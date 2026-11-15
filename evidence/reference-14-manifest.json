@@ -1,0 +1,35 @@
+{
+  "original_version_id": "4f1807378dd0332a357c0513500196e94067553c59efb1d061301d69234f161d",
+  "status": "independent_fail_high1_medium4_not_adopted",
+  "included_files": {
+    "boundary10_cases.py": "d4767180e3344055cb4bd426a0f74b589c16b3283017728cea70edf1c9629b92",
+    "boundary11_cases.py": "20f21aeb883421a8d5e44910eac9ec400141dde5c012686e1b3a3f3b812e274f",
+    "boundary12_cases.py": "1e6d20aa5855c56a5c21883a1ae27611d3bbab3989f6fe8e00258652875ea811",
+    "boundary9_cases.py": "b56512f1d78aac4aac1a94d3a4f6b4b2405865e867f0dfde2c617b1cf210d4f5",
+    "boundary_cases.py": "ae1e3f0eb397499ace1efefa410a63b788861d0d64140b31673bfec1d3238ecd",
+    "cases/CHANGES.md": "33b9e4ab7e47873a2426ad5a4f298f9a20cfb4ac21c94de3b58a08d61f0ec544",
+    "cases/LOCK.txt": "241889313b93be73d102b2761d2ff1f883e4d2627c88ccc83b831bd5153b7f25",
+    "cases/build_cases.py": "9f711567435d5f42aa69babc8c509580b19ae3246b73611a065bd56a9f7531d2",
+    "cases/cases.json": "69f72086ec86967dbeffbed97c700fba86bab43e302e0f3b53ad73a1b1d6b94e",
+    "cases/locked-v1/LOCK.txt": "1367734b7553ab29e7abee61c2f3360a77ef97ff3d42dca7970e4c999c83d936",
+    "cases/locked-v1/build_cases.py": "d95acf55c3285f2a3f0c807f7c93c14caa73c37c73b36a5bca5f8dedf8230c09",
+    "cases/locked-v1/cases.json": "da99476c14dbfc776b17cbbfb010cf6657f0450589b7880840d6034028bf0c7a",
+    "cases/v1-to-v2.diff": "4f24f7eba2194bf0c9ccead841c010fe80f2a7a849c12b2ab14dc2e3a2633868",
+    "new_cases.py": "64920d652f0c78003a67a279cc088ae013e36c5712f7c79316d9ccbeeebbb9ee",
+    "src/keiba_proto/config.py": "f12822b5d7fa2a2cfc38edc303478ab491daa92d1e9413a66d173c0f83789bb6",
+    "src/keiba_proto/fictional.py": "7874745c55f1519d684425f3dc76cfb708a67e493e9c3abf6d4a1b05b71d98f2",
+    "src/keiba_proto/jra_result_import.py": "86d975034ac8eb0477860de6da1aee6aef37d3668d9129fdbe74829ef83b9536",
+    "src/keiba_proto/system.py": "afc33474bda7e5ea1e8be18932d6f67e2406e8e35f25ac1b8673e11fbde8e095",
+    "tools/guard.py": "536e5ddf4194a4c39b7a85bcb7ff49ded6a0c922d724e54be69ff963e11d4117",
+    "tools/mutants.py": "97966fe3abcdae3f077f320ff55ad1e6efbf704676783d6f4fe12f4b409978a5",
+    "tools/no-network.sb": "5c358b8d847211333e7ba22df82d84f796b5f30a41a2682209a949d783adbd08",
+    "tools/pdf_text.py": "c42afa129d862cc35f2e67097eda732e85f505063f35def4f6ba2bf07ca620e8",
+    "tools/run-all.sh": "137f1a8b5224bdf5cee6268e61cb21391f805f6c31be1fda99d64151753f16b6",
+    "tools/run_cases.py": "f9fb20b3eb4d34826a35042b492436c193cbd6e4787e8b9ce5ad95b5b2d55a2d"
+  },
+  "excluded_files": [
+    "real_ingest_cases.py",
+    "boundary14_cases.py"
+  ],
+  "exclusion_reason": "actual PDF/data dependent tests retained locally; no original PDFs, extracted data, credentials or databases uploaded"
+}

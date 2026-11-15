@@ -1,0 +1,5150 @@
+{
+ "cases": [
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T01",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "view_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_count"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": "09:55",
+     "end": "09:40",
+     "op": "odds",
+     "race": "T01",
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "op": "view",
+     "race": "T01",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "U-01",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "final_store_count"
+    },
+    {
+     "args": {
+      "race": "T01",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "view_count"
+    },
+    {
+     "args": {
+      "race": "T01",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "pred_refs_final"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": null,
+     "end": "09:30",
+     "op": "odds",
+     "race": "T01",
+     "stage": 4,
+     "values": "F"
+    },
+    {
+     "at": "09:45",
+     "op": "confirm",
+     "race": "T01",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "U-02",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "kind": "result",
+      "race": "T02",
+      "race_date": "2099-01-17",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "feature_rows"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_count"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "kind": "result",
+     "op": "row",
+     "race_date": "2099-01-17",
+     "race_no": 2,
+     "saved": "09:00"
+    },
+    {
+     "op": "view",
+     "race": "T02",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "U-03a",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "kind": "result",
+      "race": "T02",
+      "race_date": "2099-01-10",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "feature_rows"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "warnings_total"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "kind": "result",
+     "op": "row",
+     "race": "T02",
+     "saved": "10:10"
+    },
+    {
+     "op": "view",
+     "race": "T02",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "U-03b",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "kind": "weight",
+      "race": "T03",
+      "tp": "24h"
+     },
+     "expect": 0,
+     "metric": "feature_rows"
+    },
+    {
+     "args": {
+      "kind": "weight",
+      "race": "T03",
+      "tp": "1h"
+     },
+     "expect": 0,
+     "metric": "feature_rows"
+    },
+    {
+     "args": {
+      "kind": "weight",
+      "race": "T03",
+      "tp": "15m"
+     },
+     "expect": 1,
+     "metric": "feature_rows"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": "10:05",
+     "kind": "weight",
+     "op": "row",
+     "race": "T03",
+     "saved": "10:06"
+    }
+   ],
+   "group": "main",
+   "id": "U-04",
+   "note": "v0.2本文の24時間前時点『01-09 11:00』と1時間前『10:00』はT03（発走11:00）の時点そのもの。"
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T03",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "view_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_count"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "adapter": "accumulated",
+     "announce": null,
+     "end": "10:00",
+     "op": "odds",
+     "race": "T03",
+     "stage": null,
+     "values": "A"
+    }
+   ],
+   "group": "main",
+   "id": "U-05",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "X",
+     "metric": "pred_ref_values"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "2099-01-10 11:12:00",
+     "metric": "pred_ref_obs_end"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "配分済み",
+     "metric": "race_state"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "warnings_total"
+    }
+   ],
+   "design": "v0.3改",
+   "events": [
+    {
+     "announce": "11:11",
+     "end": "11:12",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "announce": "11:15",
+     "end": "11:16",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "Y"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "D-01a",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "未配分",
+     "metric": "race_state"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "reason": "鮮度切れ・取得",
+      "tp": "15m"
+     },
+     "expect": true,
+     "metric": "reasons_include"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": true,
+     "metric": "amounts_all_empty"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "warnings_total"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "pred_ref_count"
+    }
+   ],
+   "design": "v0.3読替",
+   "events": [
+    {
+     "announce": "11:04",
+     "end": "11:05",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "announce": "11:15",
+     "end": "11:16",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "Y"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "D-01b",
+   "note": "11:05の観測の発表時刻はv0.2に記載がないため11:04と置いた（取得の鮮度だけで不採用になる）。"
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "不適格",
+     "metric": "eligibility_latest"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "eligible_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "ineligible_count"
+    },
+    {
+     "args": {
+      "race": "T04"
+     },
+     "expect": 1,
+     "metric": "pred_count"
+    }
+   ],
+   "design": "v0.3読替",
+   "events": [
+    {
+     "announce": "11:13",
+     "end": "11:14",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "at": "11:31",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "D-02",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "warnings_total"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "view_count"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": "11:14",
+     "end": "11:14:55",
+     "op": "odds",
+     "race": "T04",
+     "skew": 10,
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "op": "view",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "D-03a",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "2099-01-10 11:12:00",
+     "metric": "pred_ref_obs_end"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_min"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "配分済み",
+     "metric": "race_state"
+    },
+    {
+     "args": {},
+     "expect": true,
+     "metric": "halted"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "independent": true,
+     "op": "judge_clock",
+     "trusted": true
+    },
+    {
+     "announce": "11:11",
+     "end": "11:12",
+     "op": "odds",
+     "race": "T04",
+     "skew": 1,
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "announce": "11:12",
+     "end": "11:13",
+     "op": "odds",
+     "race": "T04",
+     "skew": 180,
+     "stage": 1,
+     "values": "Y"
+    },
+    {
+     "announce": "11:13",
+     "end": "11:14",
+     "op": "odds",
+     "race": "T04",
+     "skew": 180,
+     "stage": 1,
+     "values": "Z"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "D-03b1",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "未配分",
+     "metric": "race_state"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "reason": "時計ずれ",
+      "tp": "15m"
+     },
+     "expect": true,
+     "metric": "reasons_include"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "pred_ref_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_min"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "independent": true,
+     "op": "judge_clock",
+     "trusted": true
+    },
+    {
+     "announce": "11:04",
+     "end": "11:05",
+     "op": "odds",
+     "race": "T04",
+     "skew": 1,
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "announce": "11:12",
+     "end": "11:13",
+     "op": "odds",
+     "race": "T04",
+     "skew": 180,
+     "stage": 1,
+     "values": "Y"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "D-03b2",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "1h"
+     },
+     "expect": "2099-01-10 11:20:00",
+     "metric": "schedule"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "2099-01-10 12:05:00",
+     "metric": "schedule"
+    },
+    {
+     "args": {
+      "race": "T05"
+     },
+     "expect": 1,
+     "metric": "pred_count"
+    },
+    {
+     "args": {},
+     "expect": true,
+     "metric": "pred_hashes_stable"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": "01-09 11:58",
+     "end": "01-09 11:59",
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "01-09 12:00",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "24h"
+    },
+    {
+     "announce": "10:50",
+     "kind": "post_change",
+     "new": "12:20",
+     "old": "12:00",
+     "op": "row",
+     "race": "T05",
+     "saved": "10:50"
+    }
+   ],
+   "group": "main",
+   "id": "D-04a",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": true,
+     "metric": "pred_hashes_stable"
+    },
+    {
+     "args": {
+      "race": "T05"
+     },
+     "expect": 1,
+     "metric": "pred_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "warnings_total"
+    },
+    {
+     "args": {
+      "field": "change",
+      "kind": "post_change_after_final"
+     },
+     "expect": "12:00→12:30",
+     "metric": "warning_field"
+    },
+    {
+     "args": {
+      "field": "announce",
+      "kind": "post_change_after_final"
+     },
+     "expect": "2099-01-10 11:50:00",
+     "metric": "warning_field"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "2099-01-10 11:45:00",
+     "metric": "schedule"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "適格",
+     "metric": "eligibility_latest"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": 2,
+     "metric": "eligibility_rows"
+    }
+   ],
+   "design": "v0.3追記",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    },
+    {
+     "announce": "11:50",
+     "kind": "post_change",
+     "new": "12:30",
+     "old": "12:00",
+     "op": "row",
+     "race": "T05",
+     "saved": "11:50"
+    }
+   ],
+   "group": "main",
+   "id": "D-04b",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "result": "failure"
+     },
+     "expect": 4,
+     "metric": "obs_count"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "1h"
+     },
+     "expect": "未配分",
+     "metric": "race_state"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "reason": "取得失敗",
+      "tp": "1h"
+     },
+     "expect": true,
+     "metric": "reasons_include"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "1h"
+     },
+     "expect": true,
+     "metric": "amounts_all_empty"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "warnings_total"
+    }
+   ],
+   "design": "v0.3読替",
+   "events": [
+    {
+     "announce": "10:29",
+     "end": "10:30",
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "announce": null,
+     "end": "10:40",
+     "op": "odds",
+     "race": "T05",
+     "result": "failure",
+     "stage": 1,
+     "values": null
+    },
+    {
+     "announce": null,
+     "end": "10:47",
+     "op": "odds",
+     "race": "T05",
+     "result": "failure",
+     "stage": 1,
+     "values": null
+    },
+    {
+     "announce": null,
+     "end": "10:53",
+     "op": "odds",
+     "race": "T05",
+     "result": "failure",
+     "stage": 1,
+     "values": null
+    },
+    {
+     "announce": null,
+     "end": "11:00",
+     "op": "odds",
+     "race": "T05",
+     "result": "failure",
+     "stage": 1,
+     "values": null
+    },
+    {
+     "at": "11:00",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "1h"
+    }
+   ],
+   "group": "main",
+   "id": "M-01",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "combo": "1-3-4",
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "未配分",
+     "metric": "bet_state"
+    },
+    {
+     "args": {
+      "combo": "1-3-4",
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "欠損",
+     "metric": "bet_reason"
+    },
+    {
+     "args": {
+      "combo": "1-2-3",
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "配分済み",
+     "metric": "bet_state"
+    },
+    {
+     "args": {
+      "combo": "1-2-4",
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "配分済み",
+     "metric": "bet_state"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": [
+      20,
+      560
+     ],
+     "metric": "missing_rate"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": null,
+     "metric": "confidence_cap"
+    }
+   ],
+   "design": "v0.3改",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "mods": {
+      "missing": 20,
+      "missing_include": [
+       "1-3-4"
+      ]
+     },
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "M-02a",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "配分済み",
+     "metric": "race_state"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "C",
+     "metric": "confidence_cap"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": [
+      60,
+      560
+     ],
+     "metric": "missing_rate"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "warnings_total"
+    }
+   ],
+   "design": "v0.3明記",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "mods": {
+      "missing": 60
+     },
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "M-02b",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "未配分",
+     "metric": "race_state"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "reason": "欠損",
+      "tp": "15m"
+     },
+     "expect": true,
+     "metric": "reasons_include"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "Z",
+     "metric": "confidence"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": true,
+     "metric": "amounts_all_empty"
+    }
+   ],
+   "design": "v0.3改",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "mods": {
+      "missing": 140
+     },
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "M-02c",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": [
+      0,
+      455
+     ],
+     "metric": "missing_rate"
+    },
+    {
+     "args": {
+      "combo": "1-2-4",
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "取消",
+     "metric": "bet_state"
+    },
+    {
+     "args": {
+      "combo": "1-3-4",
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "取消",
+     "metric": "bet_state"
+    },
+    {
+     "args": {
+      "combo": "1-2-3",
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "配分済み",
+     "metric": "bet_state"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": null,
+     "metric": "confidence_cap"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "mods": {
+      "cancel_horse": 4
+     },
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "M-02d",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": [
+      0,
+      560
+     ],
+     "metric": "missing_rate"
+    },
+    {
+     "args": {
+      "combo": "1-3-4",
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "未配分",
+     "metric": "bet_state"
+    },
+    {
+     "args": {
+      "combo": "1-3-4",
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "票なし",
+     "metric": "bet_reason"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": null,
+     "metric": "confidence_cap"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "mods": {
+      "novote": 50,
+      "novote_include": [
+       "1-3-4"
+      ]
+     },
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "M-02e",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": [
+      30,
+      560
+     ],
+     "metric": "missing_rate"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "C",
+     "metric": "confidence_cap"
+    },
+    {
+     "args": {},
+     "expect": 30,
+     "metric": "parse_defects"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "mods": {
+      "invalid": 30
+     },
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "M-02f",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05"
+     },
+     "expect": 0,
+     "metric": "pred_count"
+    },
+    {
+     "args": {
+      "kind": "entries_incomplete"
+     },
+     "expect": 1,
+     "metric": "hold_count"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "field_size": 16,
+     "horses": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16
+     ],
+     "kind": "entries",
+     "op": "row",
+     "race": "T05",
+     "saved": "01-09 18:00"
+    },
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "M-03",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "content_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "defect_count"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": null,
+     "announce_raw": "00000000",
+     "end": "11:44",
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    }
+   ],
+   "group": "main",
+   "id": "M-04a",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "kind": "race_detail"
+     },
+     "expect": 1,
+     "metric": "body_rows"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "defect_count"
+    },
+    {
+     "args": {
+      "at": "01-09 19:09:59",
+      "kind": "race_detail",
+      "race": "T05"
+     },
+     "expect": 0,
+     "metric": "feature_rows"
+    },
+    {
+     "args": {
+      "at": "01-09 19:10",
+      "kind": "race_detail",
+      "race": "T05"
+     },
+     "expect": 1,
+     "metric": "feature_rows"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "created": "2099-01-09",
+     "kind": "race_detail",
+     "op": "row",
+     "race": "T05",
+     "saved": "01-09 19:10"
+    }
+   ],
+   "group": "main",
+   "id": "M-04b",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "kind": "race_detail"
+     },
+     "expect": 0,
+     "metric": "body_rows"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_count"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "created": "2099-01-11",
+     "kind": "race_detail",
+     "op": "row",
+     "race": "T05",
+     "saved": "09:00"
+    }
+   ],
+   "group": "main",
+   "id": "M-04c",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "final_store_count"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "defect_count"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "view_count"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": null,
+     "end": "12:10",
+     "op": "odds",
+     "race": "T05",
+     "stage": 4,
+     "values": "F"
+    }
+   ],
+   "group": "main",
+   "id": "M-04d",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "horse": 4,
+      "race": "T06",
+      "tp": "1h"
+     },
+     "expect": 0,
+     "metric": "bets_with_horse"
+    },
+    {
+     "args": {
+      "combo": "1-2-4",
+      "race": "T06",
+      "tp": "1h"
+     },
+     "expect": "取消",
+     "metric": "bet_state"
+    },
+    {
+     "args": {
+      "combo": "1-3-4",
+      "race": "T06",
+      "tp": "1h"
+     },
+     "expect": "取消",
+     "metric": "bet_state"
+    },
+    {
+     "args": {
+      "combo": "1-2-4",
+      "race": "T06",
+      "tp": "1h"
+     },
+     "expect": "取消馬4",
+     "metric": "bet_reason"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "date": "2099-01-10",
+     "end": "09:05",
+     "op": "fetch_day",
+     "scratches": [
+      {
+       "announce": "09:00",
+       "horse": 4,
+       "kind": "出走取消",
+       "race": "T06"
+      }
+     ]
+    },
+    {
+     "announce": "11:28",
+     "end": "11:29",
+     "op": "odds",
+     "race": "T06",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:30",
+     "op": "confirm",
+     "race": "T06",
+     "tp": "1h"
+    }
+   ],
+   "group": "main",
+   "id": "C-01",
+   "note": "『買い目』は状態が取消でないもの（配分済み・見送り・未配分）を数える。取消は外した記録として残す（v0.3 6章の状態表）。"
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T06",
+      "tp": "15m"
+     },
+     "expect": true,
+     "metric": "rebuild"
+    },
+    {
+     "args": {
+      "race": "T06",
+      "tp": "15m"
+     },
+     "expect": true,
+     "metric": "rebuild_reason_present"
+    },
+    {
+     "args": {
+      "horse": 1,
+      "race": "T06",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "bets_with_horse"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": "11:28",
+     "end": "11:29",
+     "op": "odds",
+     "race": "T06",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:30",
+     "op": "confirm",
+     "race": "T06",
+     "tp": "1h"
+    },
+    {
+     "date": "2099-01-10",
+     "end": "11:51",
+     "op": "fetch_day",
+     "scratches": [
+      {
+       "announce": "11:50",
+       "horse": 1,
+       "kind": "競走除外",
+       "race": "T06"
+      }
+     ]
+    },
+    {
+     "announce": "12:13",
+     "end": "12:14",
+     "op": "odds",
+     "race": "T06",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "12:15",
+     "op": "confirm",
+     "race": "T06",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "C-02",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": true,
+     "metric": "pred_hashes_stable"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "warnings_total"
+    },
+    {
+     "args": {
+      "race": "T06"
+     },
+     "expect": 3000,
+     "metric": "settle_refund"
+    },
+    {
+     "args": {
+      "race": "T06"
+     },
+     "expect": 0,
+     "metric": "settle_invest"
+    },
+    {
+     "args": {
+      "race": "T06"
+     },
+     "expect": "返還フラグ・返還馬番",
+     "metric": "settle_basis"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "12:13",
+     "end": "12:14",
+     "op": "odds",
+     "race": "T06",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "12:15",
+     "op": "confirm",
+     "race": "T06",
+     "tp": "15m"
+    },
+    {
+     "date": "2099-01-10",
+     "end": "12:21",
+     "op": "fetch_day",
+     "scratches": [
+      {
+       "announce": "12:20",
+       "horse": 1,
+       "kind": "出走取消",
+       "race": "T06"
+      }
+     ]
+    },
+    {
+     "kind": "payout",
+     "not_established": false,
+     "op": "row",
+     "race": "T06",
+     "refund_flag": true,
+     "refund_horses": [
+      1
+     ],
+     "saved": "12:50",
+     "special": false,
+     "trio": {
+      "combo": "2-3-5",
+      "pay": 3000
+     }
+    }
+   ],
+   "group": "main",
+   "id": "C-03a",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T06"
+     },
+     "expect": 3000,
+     "metric": "settle_refund"
+    },
+    {
+     "args": {
+      "race": "T06"
+     },
+     "expect": 0,
+     "metric": "settle_invest"
+    },
+    {
+     "args": {
+      "race": "T06"
+     },
+     "expect": "不成立フラグ",
+     "metric": "settle_basis"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "12:13",
+     "end": "12:14",
+     "op": "odds",
+     "race": "T06",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "12:15",
+     "op": "confirm",
+     "race": "T06",
+     "tp": "15m"
+    },
+    {
+     "kind": "payout",
+     "not_established": true,
+     "op": "row",
+     "race": "T06",
+     "refund_flag": false,
+     "refund_horses": [],
+     "saved": "12:50",
+     "special": false,
+     "trio": null
+    }
+   ],
+   "group": "main",
+   "id": "C-03b",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T06"
+     },
+     "expect": 0,
+     "metric": "settle_rows"
+    },
+    {
+     "args": {
+      "kind": "settle_mismatch"
+     },
+     "expect": 1,
+     "metric": "hold_count"
+    },
+    {
+     "args": {
+      "kind": "settle_mismatch"
+     },
+     "expect": 1,
+     "metric": "warnings_kind"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "12:13",
+     "end": "12:14",
+     "op": "odds",
+     "race": "T06",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "12:15",
+     "op": "confirm",
+     "race": "T06",
+     "tp": "15m"
+    },
+    {
+     "date": "2099-01-10",
+     "end": "12:21",
+     "op": "fetch_day",
+     "scratches": [
+      {
+       "announce": "12:20",
+       "horse": 1,
+       "kind": "出走取消",
+       "race": "T06"
+      }
+     ]
+    },
+    {
+     "kind": "payout",
+     "not_established": false,
+     "op": "row",
+     "race": "T06",
+     "refund_flag": false,
+     "refund_horses": [],
+     "saved": "12:50",
+     "special": false,
+     "trio": {
+      "combo": "2-3-5",
+      "pay": 3000
+     }
+    }
+   ],
+   "group": "main",
+   "id": "C-03c",
+   "note": "軸馬の取消は最終確定後に届くため、取消の警告（C-03aの1件）も別に出る。期待値の『警告1件』は不一致の警告を指すので種類で数える。"
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "kind": "day"
+     },
+     "expect": 1,
+     "metric": "content_count"
+    },
+    {
+     "args": {
+      "kind": "day"
+     },
+     "expect": 2,
+     "metric": "obs_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "warnings_total"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "date": "2099-01-10",
+     "end": "09:05",
+     "op": "fetch_day",
+     "scratches": [
+      {
+       "announce": "09:00",
+       "horse": 4,
+       "kind": "出走取消",
+       "race": "T06"
+      }
+     ]
+    },
+    {
+     "date": "2099-01-10",
+     "end": "09:20",
+     "op": "fetch_day",
+     "scratches": [
+      {
+       "announce": "09:00",
+       "horse": 4,
+       "kind": "出走取消",
+       "race": "T06"
+      }
+     ]
+    }
+   ],
+   "group": "main",
+   "id": "C-04",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "withdrawal_count"
+    },
+    {
+     "args": {},
+     "expect": "2099-01-10 10:30:00",
+     "metric": "withdrawal_at"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "scratch_rows"
+    },
+    {
+     "args": {},
+     "expect": true,
+     "metric": "pred_hashes_stable"
+    },
+    {
+     "args": {
+      "combo": "1-2-4",
+      "race": "T06",
+      "tp": "1h"
+     },
+     "expect": "配分済み",
+     "metric": "bet_state"
+    }
+   ],
+   "design": "v0.3改",
+   "events": [
+    {
+     "announce": "01-09 12:28",
+     "end": "01-09 12:29",
+     "op": "odds",
+     "race": "T06",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "01-09 12:30",
+     "op": "confirm",
+     "race": "T06",
+     "tp": "24h"
+    },
+    {
+     "date": "2099-01-10",
+     "end": "10:00",
+     "op": "fetch_day",
+     "scratches": [
+      {
+       "announce": "09:00",
+       "horse": 4,
+       "kind": "出走取消",
+       "race": "T06"
+      }
+     ]
+    },
+    {
+     "date": "2099-01-10",
+     "end": "10:15",
+     "op": "fetch_day",
+     "reached_end": false,
+     "result": "failure",
+     "scratches": []
+    },
+    {
+     "date": "2099-01-10",
+     "end": "10:30",
+     "op": "fetch_day",
+     "scratches": []
+    },
+    {
+     "announce": "11:28",
+     "end": "11:29",
+     "op": "odds",
+     "race": "T06",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:30",
+     "op": "confirm",
+     "race": "T06",
+     "tp": "1h"
+    }
+   ],
+   "group": "main",
+   "id": "C-05",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "withdrawal_count"
+    },
+    {
+     "args": {
+      "horse": 4,
+      "race": "T06",
+      "tp": "1h"
+     },
+     "expect": 0,
+     "metric": "bets_with_horse"
+    },
+    {
+     "args": {
+      "reason": "部分取得"
+     },
+     "expect": true,
+     "metric": "undecidable_include"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "date": "2099-01-10",
+     "end": "10:00",
+     "op": "fetch_day",
+     "scratches": [
+      {
+       "announce": "09:00",
+       "horse": 4,
+       "kind": "出走取消",
+       "race": "T06"
+      }
+     ]
+    },
+    {
+     "complete": false,
+     "date": "2099-01-10",
+     "end": "10:30",
+     "op": "fetch_day",
+     "scratches": []
+    },
+    {
+     "announce": "11:28",
+     "end": "11:29",
+     "op": "odds",
+     "race": "T06",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:30",
+     "op": "confirm",
+     "race": "T06",
+     "tp": "1h"
+    }
+   ],
+   "group": "main",
+   "id": "W-01",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "withdrawal_count"
+    },
+    {
+     "args": {
+      "horse": 4,
+      "race": "T06",
+      "tp": "1h"
+     },
+     "expect": 0,
+     "metric": "bets_with_horse"
+    },
+    {
+     "args": {
+      "reason": "途中切断"
+     },
+     "expect": true,
+     "metric": "undecidable_include"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "date": "2099-01-10",
+     "end": "10:00",
+     "op": "fetch_day",
+     "scratches": [
+      {
+       "announce": "09:00",
+       "horse": 4,
+       "kind": "出走取消",
+       "race": "T06"
+      }
+     ]
+    },
+    {
+     "date": "2099-01-10",
+     "end": "10:30",
+     "op": "fetch_day",
+     "reached_end": false,
+     "result": "failure",
+     "scratches": []
+    },
+    {
+     "announce": "11:28",
+     "end": "11:29",
+     "op": "odds",
+     "race": "T06",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:30",
+     "op": "confirm",
+     "race": "T06",
+     "tp": "1h"
+    }
+   ],
+   "group": "main",
+   "id": "W-02",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "withdrawal_count"
+    },
+    {
+     "args": {
+      "horse": 4,
+      "race": "T06",
+      "tp": "1h"
+     },
+     "expect": 0,
+     "metric": "bets_with_horse"
+    },
+    {
+     "args": {
+      "reason": "解析不備"
+     },
+     "expect": true,
+     "metric": "undecidable_include"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "date": "2099-01-10",
+     "end": "10:00",
+     "op": "fetch_day",
+     "scratches": [
+      {
+       "announce": "09:00",
+       "horse": 4,
+       "kind": "出走取消",
+       "race": "T06"
+      }
+     ]
+    },
+    {
+     "date": "2099-01-10",
+     "end": "10:30",
+     "op": "fetch_day",
+     "parse_errors": 1,
+     "scratches": []
+    },
+    {
+     "announce": "11:28",
+     "end": "11:29",
+     "op": "odds",
+     "race": "T06",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:30",
+     "op": "confirm",
+     "race": "T06",
+     "tp": "1h"
+    }
+   ],
+   "group": "main",
+   "id": "W-03",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "withdrawal_count"
+    },
+    {
+     "args": {
+      "horse": 4,
+      "race": "T06",
+      "tp": "1h"
+     },
+     "expect": 0,
+     "metric": "bets_with_horse"
+    },
+    {
+     "args": {
+      "reason": "範囲違い"
+     },
+     "expect": true,
+     "metric": "undecidable_include"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "date": "2099-01-10",
+     "end": "10:00",
+     "op": "fetch_day",
+     "scratches": [
+      {
+       "announce": "09:00",
+       "horse": 4,
+       "kind": "出走取消",
+       "race": "T06"
+      }
+     ]
+    },
+    {
+     "date": "2099-01-11",
+     "end": "10:30",
+     "op": "fetch_day",
+     "scratches": []
+    },
+    {
+     "date": "2099-01-10",
+     "end": "10:31",
+     "op": "fetch_day",
+     "race": "T03",
+     "scope": "race",
+     "scratches": []
+    },
+    {
+     "announce": "11:28",
+     "end": "11:29",
+     "op": "odds",
+     "race": "T06",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:30",
+     "op": "confirm",
+     "race": "T06",
+     "tp": "1h"
+    }
+   ],
+   "group": "main",
+   "id": "W-04",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "kind": "odds"
+     },
+     "expect": 1,
+     "metric": "content_count"
+    },
+    {
+     "args": {
+      "race": "T04"
+     },
+     "expect": 3,
+     "metric": "obs_count"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "2099-01-10 11:14:00",
+     "metric": "pred_ref_obs_end"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "配分済み",
+     "metric": "race_state"
+    }
+   ],
+   "design": "v0.3明記",
+   "events": [
+    {
+     "announce": "11:04",
+     "end": "11:05",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "announce": "11:09",
+     "end": "11:10",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "announce": "11:13",
+     "end": "11:14",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "R-01",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "kind": "odds"
+     },
+     "expect": 2,
+     "metric": "content_count"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": "11:09",
+     "end": "11:10",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "announce": "11:13",
+     "end": "11:14",
+     "mods": {
+      "set": {
+       "5-6-7": 99.9
+      }
+     },
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "X"
+    }
+   ],
+   "group": "main",
+   "id": "R-02",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "kind": "odds"
+     },
+     "expect": 1,
+     "metric": "content_count"
+    },
+    {
+     "args": {
+      "race": "T04"
+     },
+     "expect": 1,
+     "metric": "pred_count"
+    },
+    {
+     "args": {
+      "race": "T04"
+     },
+     "expect": 2,
+     "metric": "obs_count"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": "11:09",
+     "end": "11:10",
+     "op": "odds",
+     "race": "T04",
+     "result": "interrupted",
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "announce": "11:11",
+     "end": "11:12",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "R-03",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04"
+     },
+     "expect": 1,
+     "metric": "pred_count"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": "11:11",
+     "end": "11:12",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m",
+     "unknown_result": true
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "R-04",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "未配分",
+     "metric": "race_state"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "reason": "鮮度切れ・取得",
+      "tp": "15m"
+     },
+     "expect": true,
+     "metric": "reasons_include"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": true,
+     "metric": "amounts_all_empty"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "warnings_total"
+    }
+   ],
+   "design": "v0.3読替",
+   "events": [
+    {
+     "announce": "11:00",
+     "end": "11:00",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "announce": null,
+     "end": "11:08",
+     "op": "odds",
+     "race": "T04",
+     "result": "failure",
+     "stage": 1,
+     "values": null
+    },
+    {
+     "announce": null,
+     "end": "11:13",
+     "op": "odds",
+     "race": "T04",
+     "result": "failure",
+     "stage": 1,
+     "values": null
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "R-05",
+   "note": "11:00の観測の発表時刻はv0.2に記載がないため11:00と置いた。"
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T07",
+      "result": "unpublished"
+     },
+     "expect": 1,
+     "metric": "obs_count"
+    },
+    {
+     "args": {
+      "race": "T07",
+      "result": "failure"
+     },
+     "expect": 0,
+     "metric": "obs_count"
+    },
+    {
+     "args": {
+      "race": "T07",
+      "tp": "24h"
+     },
+     "expect": "未配分",
+     "metric": "race_state"
+    },
+    {
+     "args": {
+      "race": "T07",
+      "reason": "オッズ未発売",
+      "tp": "24h"
+     },
+     "expect": true,
+     "metric": "reasons_include"
+    },
+    {
+     "args": {
+      "race": "T07",
+      "tp": "24h"
+     },
+     "expect": true,
+     "metric": "amounts_all_empty"
+    },
+    {
+     "args": {
+      "race": "T07",
+      "tp": "24h"
+     },
+     "expect": null,
+     "metric": "missing_rate"
+    },
+    {
+     "args": {
+      "race": "T07",
+      "tp": "24h"
+     },
+     "expect": true,
+     "metric": "marks_present"
+    }
+   ],
+   "design": "v0.3改",
+   "events": [
+    {
+     "announce": null,
+     "end": "01-09 12:59",
+     "op": "odds",
+     "race": "T07",
+     "result": "unpublished",
+     "sale": "none",
+     "stage": 1,
+     "values": null
+    },
+    {
+     "at": "01-09 13:00",
+     "op": "confirm",
+     "race": "T07",
+     "tp": "24h"
+    }
+   ],
+   "group": "main",
+   "id": "N-01",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T07",
+      "result": "failure"
+     },
+     "expect": 1,
+     "metric": "obs_count_min"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "warnings_total"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": null,
+     "end": "01-09 19:10",
+     "op": "odds",
+     "race": "T07",
+     "result": "unpublished",
+     "sale": "none",
+     "stage": 1,
+     "values": null
+    },
+    {
+     "announce": null,
+     "end": "01-09 19:31",
+     "op": "odds",
+     "race": "T07",
+     "result": "unpublished",
+     "sale": "none",
+     "stage": 1,
+     "values": null
+    }
+   ],
+   "group": "main",
+   "id": "N-02",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": true,
+     "metric": "pred_hashes_stable"
+    },
+    {
+     "args": {},
+     "expect": 2,
+     "metric": "warnings_total"
+    },
+    {
+     "args": {},
+     "expect": true,
+     "metric": "warnings_have_row_time"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": "13:13",
+     "end": "13:14",
+     "mods": {
+      "set": {
+       "1-2-3": 40.0
+      }
+     },
+     "op": "odds",
+     "race": "T08",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "13:15",
+     "op": "confirm",
+     "race": "T08",
+     "tp": "15m"
+    },
+    {
+     "announce": "13:19",
+     "end": "13:20",
+     "mods": {
+      "set": {
+       "1-2-3": 12.0
+      }
+     },
+     "op": "odds",
+     "race": "T08",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "announce": "13:20",
+     "kind": "track",
+     "old": "良",
+     "op": "row",
+     "race": "T08",
+     "saved": "13:20",
+     "value": "稍重"
+    }
+   ],
+   "group": "main",
+   "id": "F-01",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T08"
+     },
+     "expect": 40000,
+     "metric": "settle_payout_latest"
+    },
+    {
+     "args": {
+      "race": "T08"
+     },
+     "expect": 1,
+     "metric": "settle_rows"
+    },
+    {
+     "args": {
+      "kind": "着順訂正あり・払戻訂正なし"
+     },
+     "expect": 1,
+     "metric": "note_count"
+    },
+    {
+     "args": {},
+     "expect": true,
+     "metric": "pred_hashes_stable"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": "13:13",
+     "end": "13:14",
+     "op": "odds",
+     "race": "T08",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "13:15",
+     "op": "confirm",
+     "race": "T08",
+     "tp": "15m"
+    },
+    {
+     "kind": "payout",
+     "not_established": false,
+     "op": "row",
+     "race": "T08",
+     "refund_flag": false,
+     "refund_horses": [],
+     "saved": "14:00",
+     "special": false,
+     "trio": {
+      "combo": "1-2-3",
+      "pay": 4000
+     }
+    },
+    {
+     "kind": "finish_correction",
+     "op": "row",
+     "race": "T08",
+     "saved": "14:30"
+    }
+   ],
+   "group": "main",
+   "id": "F-02a",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T08"
+     },
+     "expect": 2,
+     "metric": "settle_rows"
+    },
+    {
+     "args": {
+      "race": "T08"
+     },
+     "expect": 52000,
+     "metric": "settle_payout_latest"
+    },
+    {
+     "args": {
+      "race": "T08"
+     },
+     "expect": 40000,
+     "metric": "settle_payout_first"
+    },
+    {
+     "args": {},
+     "expect": true,
+     "metric": "pred_hashes_stable"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "announce": "13:13",
+     "end": "13:14",
+     "op": "odds",
+     "race": "T08",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "13:15",
+     "op": "confirm",
+     "race": "T08",
+     "tp": "15m"
+    },
+    {
+     "kind": "payout",
+     "not_established": false,
+     "op": "row",
+     "race": "T08",
+     "refund_flag": false,
+     "refund_horses": [],
+     "saved": "14:00",
+     "special": false,
+     "trio": {
+      "combo": "1-2-3",
+      "pay": 4000
+     }
+    },
+    {
+     "correction": true,
+     "kind": "payout",
+     "not_established": false,
+     "op": "row",
+     "race": "T08",
+     "refund_flag": false,
+     "refund_horses": [],
+     "saved": "15:00",
+     "special": false,
+     "trio": {
+      "combo": "1-2-3",
+      "pay": 5200
+     }
+    }
+   ],
+   "group": "main",
+   "id": "F-02b",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04",
+      "race_date": "2099-01-03"
+     },
+     "expect": 1,
+     "metric": "hist_feature_rows_min"
+    },
+    {
+     "args": {
+      "race": "T04"
+     },
+     "expect": "再構成",
+     "metric": "hist_feature_basis_all"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "op": "hist_import",
+     "results": [
+      {
+       "race_date": "2099-01-03",
+       "race_no": 1
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 2
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 3
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 4
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 5
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 6
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 7
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 8
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 1
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 2
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 3
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 4
+      }
+     ],
+     "today": "2099-02-01 09:00"
+    },
+    {
+     "op": "hist_predict",
+     "race": "T04"
+    }
+   ],
+   "group": "main",
+   "id": "H-01",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04",
+      "race_date": "2099-01-10"
+     },
+     "expect": 0,
+     "metric": "hist_feature_rows"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "op": "hist_import",
+     "results": [
+      {
+       "race_date": "2099-01-03",
+       "race_no": 1
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 2
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 3
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 4
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 5
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 6
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 7
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 8
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 1
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 2
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 3
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 4
+      }
+     ],
+     "today": "2099-02-01 09:00"
+    },
+    {
+     "op": "hist_predict",
+     "race": "T04"
+    }
+   ],
+   "group": "main",
+   "id": "H-02",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04"
+     },
+     "expect": 0,
+     "metric": "hist_odds_refs"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_count"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "op": "hist_import",
+     "results": [
+      {
+       "race_date": "2099-01-03",
+       "race_no": 1
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 2
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 3
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 4
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 5
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 6
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 7
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 8
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 1
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 2
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 3
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 4
+      }
+     ],
+     "tamper": {
+      "race_date": "2099-01-03",
+      "race_no": 9,
+      "saved": "01-09 10:00"
+     },
+     "today": "2099-02-01 09:00"
+    },
+    {
+     "op": "hist_predict",
+     "race": "T04",
+     "want_odds": true
+    }
+   ],
+   "group": "main",
+   "id": "H-03",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "agg_mixed"
+    },
+    {
+     "args": {},
+     "expect": null,
+     "metric": "hist_recovery"
+    },
+    {
+     "args": {},
+     "expect": "出走表は最終状態",
+     "metric": "hist_note"
+    }
+   ],
+   "design": "v0.2",
+   "events": [
+    {
+     "op": "hist_import",
+     "results": [
+      {
+       "race_date": "2099-01-03",
+       "race_no": 1
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 2
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 3
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 4
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 5
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 6
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 7
+      },
+      {
+       "race_date": "2099-01-03",
+       "race_no": 8
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 1
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 2
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 3
+      },
+      {
+       "race_date": "2099-01-10",
+       "race_no": 4
+      }
+     ],
+     "today": "2099-02-01 09:00"
+    },
+    {
+     "op": "hist_predict",
+     "race": "T04"
+    },
+    {
+     "announce": "11:13",
+     "end": "11:14",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "H-04",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "pred_ref_count"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "未配分",
+     "metric": "race_state"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "reason": "鮮度切れ・発表",
+      "tp": "15m"
+     },
+     "expect": true,
+     "metric": "reasons_include"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "reason": "鮮度切れ・取得",
+      "tp": "15m"
+     },
+     "expect": false,
+     "metric": "reasons_include"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "warnings_total"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:00",
+     "end": "11:01",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "V1"
+    },
+    {
+     "announce": "11:00",
+     "end": "11:14",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "V1"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "P-01",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "kind": "odds"
+     },
+     "expect": 1,
+     "metric": "content_count"
+    },
+    {
+     "args": {
+      "race": "T04"
+     },
+     "expect": 2,
+     "metric": "obs_count"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "2099-01-10 11:14:00",
+     "metric": "pred_ref_obs_end"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "2099-01-10 11:12:00",
+     "metric": "pred_ref_announce"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "配分済み",
+     "metric": "race_state"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:00",
+     "end": "11:01",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "V1"
+    },
+    {
+     "announce": "11:12",
+     "end": "11:14",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "V1"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "P-02",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "配分済み",
+     "metric": "race_state"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:05",
+     "end": "11:14",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "P-03",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "未配分",
+     "metric": "race_state"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "reason": "鮮度切れ・発表",
+      "tp": "15m"
+     },
+     "expect": true,
+     "metric": "reasons_include"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:04",
+     "end": "11:14",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "P-04",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "配分済み",
+     "metric": "race_state"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:09",
+     "end": "11:10:00",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "P-05",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "未配分",
+     "metric": "race_state"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "reason": "鮮度切れ・取得",
+      "tp": "15m"
+     },
+     "expect": true,
+     "metric": "reasons_include"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "reason": "鮮度切れ・発表",
+      "tp": "15m"
+     },
+     "expect": false,
+     "metric": "reasons_include"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:09",
+     "end": "11:09:59",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "P-06",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "defect_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "prerelease_count"
+    },
+    {
+     "args": {
+      "race": "T07",
+      "tp": "24h"
+     },
+     "expect": 0,
+     "metric": "view_count"
+    },
+    {
+     "args": {
+      "race": "T07",
+      "tp": "1h"
+     },
+     "expect": 0,
+     "metric": "view_count"
+    },
+    {
+     "args": {
+      "race": "T07",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "view_count"
+    },
+    {
+     "args": {
+      "race": "T07",
+      "tp": "15m"
+     },
+     "expect": "未配分",
+     "metric": "race_state"
+    },
+    {
+     "args": {
+      "race": "T07",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "pred_ref_count"
+    },
+    {
+     "args": {
+      "race": "T07",
+      "tp": "1h"
+     },
+     "expect": 0,
+     "metric": "pred_ref_count"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": null,
+     "end": "01-09 19:30",
+     "op": "odds",
+     "race": "T07",
+     "stage": 2,
+     "values": "P"
+    },
+    {
+     "at": "01-09 13:00",
+     "op": "confirm",
+     "race": "T07",
+     "tp": "24h"
+    },
+    {
+     "at": "12:00",
+     "op": "confirm",
+     "race": "T07",
+     "tp": "1h"
+    },
+    {
+     "at": "12:45",
+     "op": "confirm",
+     "race": "T07",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "Z-01",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": true,
+     "metric": "pred_hashes_stable"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": 2,
+     "metric": "eligibility_rows"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "適格",
+     "metric": "eligibility_first"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "不適格",
+     "metric": "eligibility_latest"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "eligible_count"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "at": "11:55",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    },
+    {
+     "announce": "11:40",
+     "kind": "post_change",
+     "new": "11:50",
+     "old": "12:00",
+     "op": "row",
+     "race": "T05",
+     "saved": "12:10"
+    }
+   ],
+   "group": "main",
+   "id": "S-01",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05"
+     },
+     "expect": 1,
+     "metric": "pred_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "warnings_total"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "適格",
+     "metric": "eligibility_latest"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "変更後",
+     "metric": "eligibility_basis"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    },
+    {
+     "announce": "11:50",
+     "kind": "post_change",
+     "new": "12:20",
+     "old": "12:00",
+     "op": "row",
+     "race": "T05",
+     "saved": "11:50"
+    }
+   ],
+   "group": "main",
+   "id": "S-02",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "未確認",
+     "metric": "eligibility_latest"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "eligible_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "unconfirmed_count"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "at": "11:55",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    },
+    {
+     "announce": "11:40",
+     "kind": "post_change",
+     "new": "12:10",
+     "old": "12:00",
+     "op": "row",
+     "race": "T05",
+     "saved": "11:56"
+    },
+    {
+     "announce": "11:40",
+     "kind": "post_change",
+     "new": "11:50",
+     "old": "12:00",
+     "op": "row",
+     "race": "T05",
+     "saved": "11:56:30"
+    }
+   ],
+   "group": "main",
+   "id": "S-03",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "適格",
+     "metric": "eligibility_latest"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "at": "11:59:00",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "S-04",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "未確認",
+     "metric": "eligibility_latest"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "at": "11:59:01",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "S-05",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "見送り",
+     "metric": "race_state"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "amounts_all"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "agg_skip_count"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "decision": "none_meets",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "V-01",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": null,
+     "metric": "confidence_cap"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": [
+      28,
+      560
+     ],
+     "metric": "missing_rate"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "mods": {
+      "missing": 28
+     },
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "B-01",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "C",
+     "metric": "confidence_cap"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": [
+      29,
+      560
+     ],
+     "metric": "missing_rate"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "mods": {
+      "missing": 29
+     },
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "B-02",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "C",
+     "metric": "confidence_cap"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": [
+      112,
+      560
+     ],
+     "metric": "missing_rate"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "配分済み",
+     "metric": "race_state"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "mods": {
+      "missing": 112
+     },
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "B-03",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "未配分",
+     "metric": "race_state"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "reason": "欠損",
+      "tp": "15m"
+     },
+     "expect": true,
+     "metric": "reasons_include"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "Z",
+     "metric": "confidence"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "mods": {
+      "missing": 113
+     },
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "main",
+   "id": "B-04",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "warnings_total"
+    },
+    {
+     "args": {},
+     "expect": false,
+     "metric": "halted"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:09",
+     "end": "11:10",
+     "op": "odds",
+     "race": "T04",
+     "skew": 2.0,
+     "stage": 1,
+     "values": "V"
+    }
+   ],
+   "group": "main",
+   "id": "B-05",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "warnings_total"
+    },
+    {
+     "args": {
+      "race": "T04"
+     },
+     "expect": 2.1,
+     "metric": "obs_avail_adjust_sec"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:09",
+     "end": "11:10",
+     "op": "odds",
+     "race": "T04",
+     "skew": 2.1,
+     "stage": 1,
+     "values": "V"
+    }
+   ],
+   "group": "main",
+   "id": "B-06",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": false,
+     "metric": "halted"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "warnings_total"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:09",
+     "end": "11:10",
+     "op": "odds",
+     "race": "T04",
+     "skew": 30.0,
+     "stage": 1,
+     "values": "V"
+    }
+   ],
+   "group": "main",
+   "id": "B-07",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": true,
+     "metric": "halted"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_min"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "announce": "11:09",
+     "end": "11:10",
+     "op": "odds",
+     "race": "T04",
+     "skew": 30.1,
+     "stage": 1,
+     "values": "V"
+    }
+   ],
+   "group": "main",
+   "id": "B-08",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "content_count"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "quarantine_count"
+    },
+    {
+     "args": {
+      "race": "Y"
+     },
+     "expect": "2099-12-31 19:00:00",
+     "metric": "obs_announce"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "date": "2100-01-01",
+     "op": "add_race",
+     "post": "12:00",
+     "race": "Y"
+    },
+    {
+     "announce": null,
+     "announce_raw": "12311900",
+     "end": "2100-01-01 11:00",
+     "op": "odds",
+     "race": "Y",
+     "stage": 1,
+     "values": "V"
+    }
+   ],
+   "group": "main",
+   "id": "Y-01",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "content_count"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "quarantine_count"
+    },
+    {
+     "args": {
+      "race": "Y"
+     },
+     "expect": "2100-01-01 10:00:00",
+     "metric": "obs_announce"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "date": "2099-12-30",
+     "op": "add_race",
+     "post": "12:00",
+     "race": "Y"
+    },
+    {
+     "announce": null,
+     "announce_raw": "01011000",
+     "end": "2100-01-01 10:01",
+     "op": "odds",
+     "race": "Y",
+     "stage": 1,
+     "values": "V"
+    }
+   ],
+   "group": "main",
+   "id": "Y-02",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "content_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_count"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "date": "2099-12-28",
+     "op": "add_race",
+     "post": "12:00",
+     "race": "Y"
+    },
+    {
+     "announce": null,
+     "announce_raw": "01020900",
+     "end": "2099-12-28 11:00",
+     "op": "odds",
+     "race": "Y",
+     "stage": 1,
+     "values": "V"
+    }
+   ],
+   "group": "main",
+   "id": "Y-03",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "content_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_count"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "date": "2100-03-01",
+     "op": "add_race",
+     "post": "12:00",
+     "race": "Y"
+    },
+    {
+     "announce": null,
+     "announce_raw": "02291200",
+     "end": "2100-03-01 11:00",
+     "op": "odds",
+     "race": "Y",
+     "stage": 1,
+     "values": "V"
+    }
+   ],
+   "group": "main",
+   "id": "Y-04",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "content_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_count"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "date": "2100-01-01",
+     "op": "add_race",
+     "post": "12:00",
+     "race": "Y"
+    },
+    {
+     "announce": null,
+     "announce_raw": "12281900",
+     "end": "2100-01-01 11:00",
+     "op": "odds",
+     "race": "Y",
+     "stage": 1,
+     "values": "V"
+    }
+   ],
+   "group": "main",
+   "id": "Y-05",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "content_count"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "quarantine_count"
+    },
+    {
+     "args": {
+      "race": "Y"
+     },
+     "expect": "2099-12-29 19:00:00",
+     "metric": "obs_announce"
+    }
+   ],
+   "design": "v0.3新",
+   "events": [
+    {
+     "date": "2100-01-01",
+     "op": "add_race",
+     "post": "12:00",
+     "race": "Y"
+    },
+    {
+     "announce": null,
+     "announce_raw": "12291900",
+     "end": "2100-01-01 11:00",
+     "op": "odds",
+     "race": "Y",
+     "stage": 1,
+     "values": "V"
+    }
+   ],
+   "group": "main",
+   "id": "Y-06",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "適格",
+     "metric": "eligibility_latest"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "予定",
+     "metric": "eligibility_basis"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "provisional_count"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "official_count"
+    }
+   ],
+   "design": "依頼 安全①",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    }
+   ],
+   "group": "safety1",
+   "id": "SA1-01",
+   "note": "実発走が不明なら予定基準の暫定適格。正式成績に入れない。"
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "適格",
+     "metric": "eligibility_latest"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "実際",
+     "metric": "eligibility_basis"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "official_count"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "provisional_count"
+    },
+    {
+     "args": {},
+     "expect": true,
+     "metric": "pred_hashes_stable"
+    },
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": 2,
+     "metric": "eligibility_rows"
+    }
+   ],
+   "design": "依頼 安全①",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    },
+    {
+     "actual": "12:01",
+     "kind": "actual_post",
+     "op": "row",
+     "race": "T05",
+     "saved": "12:05"
+    }
+   ],
+   "group": "safety1",
+   "id": "SA1-02",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "不適格",
+     "metric": "eligibility_latest"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "official_count"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "provisional_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "ineligible_count"
+    }
+   ],
+   "design": "依頼 安全①",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    },
+    {
+     "actual": "11:44",
+     "kind": "actual_post",
+     "op": "row",
+     "race": "T05",
+     "saved": "12:05"
+    }
+   ],
+   "group": "safety1",
+   "id": "SA1-03",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05"
+     },
+     "expect": 1,
+     "metric": "pred_count"
+    },
+    {
+     "args": {},
+     "expect": true,
+     "metric": "pred_hashes_stable"
+    },
+    {
+     "args": {
+      "kind": "actual_post_after_final"
+     },
+     "expect": 1,
+     "metric": "warnings_kind"
+    }
+   ],
+   "design": "依頼 安全①",
+   "events": [
+    {
+     "announce": "11:43",
+     "end": "11:44",
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "V"
+    },
+    {
+     "at": "11:45",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    },
+    {
+     "actual": "12:03",
+     "kind": "actual_post",
+     "op": "row",
+     "race": "T05",
+     "saved": "12:05"
+    }
+   ],
+   "group": "safety1",
+   "id": "SA1-04",
+   "note": "最終確定後の実発走情報は警告のみ。再予想しない。"
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T05",
+      "tp": "15m"
+     },
+     "expect": "適格",
+     "metric": "eligibility_latest"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "official_count"
+    }
+   ],
+   "design": "依頼 安全①",
+   "events": [
+    {
+     "at": "11:59:00",
+     "op": "confirm",
+     "race": "T05",
+     "tp": "15m"
+    },
+    {
+     "actual": "12:00",
+     "kind": "actual_post",
+     "op": "row",
+     "race": "T05",
+     "saved": "12:05"
+    }
+   ],
+   "group": "safety1",
+   "id": "SA1-05",
+   "note": "実発走がちょうど60秒後でも適格（境界）。"
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04"
+     },
+     "expect": 0,
+     "metric": "pred_count"
+    },
+    {
+     "args": {
+      "kind": "judge_clock_uncertain"
+     },
+     "expect": 1,
+     "metric": "hold_count"
+    }
+   ],
+   "design": "依頼 安全②",
+   "events": [
+    {
+     "independent": false,
+     "op": "judge_clock",
+     "trusted": true
+    },
+    {
+     "announce": "11:11",
+     "end": "11:12",
+     "op": "odds",
+     "race": "T04",
+     "skew": 1,
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "announce": "11:12",
+     "end": "11:13",
+     "op": "odds",
+     "race": "T04",
+     "skew": 180,
+     "stage": 1,
+     "values": "Y"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "safety2",
+   "id": "SA2-01",
+   "note": "判断時計が取得機と同じ時計なら確定保留。"
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04"
+     },
+     "expect": 0,
+     "metric": "pred_count"
+    },
+    {
+     "args": {
+      "kind": "judge_clock_uncertain"
+     },
+     "expect": 1,
+     "metric": "hold_count"
+    }
+   ],
+   "design": "依頼 安全②",
+   "events": [
+    {
+     "independent": true,
+     "op": "judge_clock",
+     "trusted": false
+    },
+    {
+     "announce": "11:11",
+     "end": "11:12",
+     "op": "odds",
+     "race": "T04",
+     "skew": 1,
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "announce": "11:12",
+     "end": "11:13",
+     "op": "odds",
+     "race": "T04",
+     "skew": 180,
+     "stage": 1,
+     "values": "Y"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "safety2",
+   "id": "SA2-02",
+   "note": "判断時計が独立でも信頼できなければ確定保留。"
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04"
+     },
+     "expect": 1,
+     "metric": "pred_count"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "配分済み",
+     "metric": "race_state"
+    },
+    {
+     "args": {
+      "kind": "judge_clock_uncertain"
+     },
+     "expect": 0,
+     "metric": "hold_count"
+    }
+   ],
+   "design": "依頼 安全②",
+   "events": [
+    {
+     "independent": true,
+     "op": "judge_clock",
+     "trusted": true
+    },
+    {
+     "announce": "11:11",
+     "end": "11:12",
+     "op": "odds",
+     "race": "T04",
+     "skew": 1,
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "announce": "11:12",
+     "end": "11:13",
+     "op": "odds",
+     "race": "T04",
+     "skew": 180,
+     "stage": 1,
+     "values": "Y"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "safety2",
+   "id": "SA2-03",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04"
+     },
+     "expect": 0,
+     "metric": "pred_count"
+    },
+    {
+     "args": {
+      "kind": "judge_clock_uncertain"
+     },
+     "expect": 1,
+     "metric": "hold_count"
+    }
+   ],
+   "design": "依頼 安全②",
+   "events": [
+    {
+     "independent": true,
+     "op": "judge_clock",
+     "trusted": false
+    },
+    {
+     "announce": "11:13",
+     "end": "11:14",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "X"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "safety2",
+   "id": "SA2-04",
+   "note": "取得側にずれがなくても、判断時計が不確実なら確定しない。"
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "kind": "odds"
+     },
+     "expect": 1,
+     "metric": "content_count"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "pred_ref_count"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "未配分",
+     "metric": "race_state"
+    }
+   ],
+   "design": "依頼 安全③",
+   "events": [
+    {
+     "announce": "11:13",
+     "end": "11:14",
+     "op": "odds",
+     "race": "T05",
+     "stage": 1,
+     "values": "S"
+    },
+    {
+     "announce": "10:59",
+     "end": "11:00",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "S"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "safety3",
+   "id": "SA3-01",
+   "note": "T05の新しい観測とT04の古い観測が同じ内容を共有しても、T04の判断にT05の観測を使わない。"
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "kind": "odds"
+     },
+     "expect": 1,
+     "metric": "content_count"
+    },
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "final_store_count"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "pred_ref_count"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "pred_refs_final"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": "未配分",
+     "metric": "race_state"
+    }
+   ],
+   "design": "依頼 安全③",
+   "events": [
+    {
+     "announce": "10:59",
+     "end": "11:00",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "S"
+    },
+    {
+     "announce": null,
+     "end": "11:14",
+     "op": "odds",
+     "race": "T04",
+     "stage": 3,
+     "values": "S"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "safety3",
+   "id": "SA3-02",
+   "note": "最終オッズ（区分3）と同じ内容でも、最終の観測を判断に使わない。"
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_count"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "content_count"
+    },
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": 0,
+     "metric": "pred_ref_count"
+    }
+   ],
+   "design": "依頼 安全③",
+   "events": [
+    {
+     "announce": "11:13",
+     "end": "11:14",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "target": null,
+     "values": "S"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "safety3",
+   "id": "SA3-03",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_count"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "content_count"
+    }
+   ],
+   "design": "依頼 安全③",
+   "events": [
+    {
+     "announce": "11:13",
+     "end": "11:14",
+     "op": "odds",
+     "race": "T04",
+     "stage": null,
+     "values": "S"
+    }
+   ],
+   "group": "safety3",
+   "id": "SA3-04",
+   "note": ""
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_count"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "content_count"
+    }
+   ],
+   "design": "依頼 安全③",
+   "events": [
+    {
+     "announce": null,
+     "end": "11:14",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "S"
+    }
+   ],
+   "group": "safety3",
+   "id": "SA3-05",
+   "note": "中間オッズで発表時刻が空。"
+  },
+  {
+   "checks": [
+    {
+     "args": {},
+     "expect": 1,
+     "metric": "quarantine_count"
+    },
+    {
+     "args": {},
+     "expect": 0,
+     "metric": "content_count"
+    }
+   ],
+   "design": "依頼 安全③",
+   "events": [
+    {
+     "announce": "11:13",
+     "end": "11:14",
+     "obs_id": null,
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "S"
+    }
+   ],
+   "group": "safety3",
+   "id": "SA3-06",
+   "note": "観測IDなし。"
+  },
+  {
+   "checks": [
+    {
+     "args": {
+      "race": "T04",
+      "tp": "15m"
+     },
+     "expect": true,
+     "metric": "pred_ref_fields_complete"
+    }
+   ],
+   "design": "依頼 安全③",
+   "events": [
+    {
+     "announce": "11:13",
+     "end": "11:14",
+     "op": "odds",
+     "race": "T04",
+     "stage": 1,
+     "values": "S"
+    },
+    {
+     "at": "11:15",
+     "op": "confirm",
+     "race": "T04",
+     "tp": "15m"
+    }
+   ],
+   "group": "safety3",
+   "id": "SA3-07",
+   "note": "参照に対象キー・段階・発表時刻・観測IDがすべて残る。"
+  }
+ ],
+ "count_main": 78,
+ "count_safety": 16,
+ "design": "v0.3 https://app.notion.com/p/418f1dff94dc81328a16f7b4316b7330",
+ "format": "keiba-proto-cases/1"
+}

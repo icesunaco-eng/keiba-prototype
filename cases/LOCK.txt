@@ -1,0 +1,4 @@
+locked_utc=2026-11-14T05:47:08Z
+69f72086ec86967dbeffbed97c700fba86bab43e302e0f3b53ad73a1b1d6b94e  cases/cases.json
+9f711567435d5f42aa69babc8c509580b19ae3246b73611a065bd56a9f7531d2  cases/build_cases.py
+previous=locked-v1 (da99476c…)。変更は CHANGES.md。期待値の変更なし。

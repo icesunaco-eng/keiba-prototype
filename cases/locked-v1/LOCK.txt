@@ -1,0 +1,4 @@
+locked_utc=2026-11-14T05:40:55Z
+da99476c14dbfc776b17cbbfb010cf6657f0450589b7880840d6034028bf0c7a  cases/cases.json
+d95acf55c3285f2a3f0c807f7c93c14caa73c37c73b36a5bca5f8dedf8230c09  cases/build_cases.py
+note=実装コード未作成・未実行の状態で固定。以後の変更は cases/CHANGES.md に差分と理由を残す。
