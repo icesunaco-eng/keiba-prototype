@@ -1,0 +1,12 @@
+# 発走前スナップショット取込・隔離試作
+実行: python3 -I -B test_snapshot.py
+架空データ専用。source・published_at・observed_at・as_of・scheduled_startを保管。取得/発表の両時刻が予測時点以前、予測時点が発走前であることを検査。正規化したpacketのSHA256を計算し同一packetの重複を抑止。これは原本ファイルのhashではなく入力packetのhashで、出典真正性や実データ利用許諾を証明しない。
+
+最小の許可列はhorse_id/distance_m/carried_weight_kgだけ。結果・払戻・勝馬や任意の入れ子列は破棄して黙認せずpacket全体を保留。3列はインターフェース試作用で、実モデルの完全な特徴schemaではない。実データはsynthetic=Falseで必ず保留。
+
+odds_status=not_on_saleならunallocated_not_on_saleとallocation_allowed=Falseを返す。availableも実オッズ本体は受け付けず配分未実装として未配分。欠損・未発売・未実装を区別する。永久保存DB・原本照合・取消や日時変更の版統合・モデル接続・実データ許諾検証は未実装。
+
+5テストメソッド成功、結果列5種、要求9境界、値6境界、再送・コピー不変・未発売を確認。新取得・本番変更・実賭け・希少同着の調査なし。
+
+独立レビュー後: source/race_key/horse_idのUTF-8不正サロゲートは保存前に保留。missingはunallocated_missing_odds、not_on_saleはunallocated_not_on_sale、availableはunallocated_not_implementedと返却も区別。全てallocation_allowed=Falseのまま。追加6不正文字列とmissing状態を含む7メソッド成功。
+独立再確認：同7メソッド再現＋32項目成功。架空専用で実データ保存許諾は未確認、永続DB/モデル接続未実装。private別branch保存のみ、main/本番変更・実賭けなし。
