@@ -1,4 +1,5 @@
 import unittest,tempfile,json
+from unittest.mock import patch
 from pathlib import Path
 import test_profile_history
 from history_pipeline import run
@@ -15,4 +16,31 @@ class Tests(unittest.TestCase):
  def test_empty(self):
   m=self.manifest();m['profiles']=[]
   with self.assertRaisesRegex(ValueError,'profiles_required'):run(m,'.')
+ def test_bad_manifest_before_read(self):
+  for value in (None,[],{},dict(self.manifest(),extra=1)):
+   with self.subTest(value=value),patch.object(Path,'read_bytes',side_effect=AssertionError('read')):
+    with self.assertRaisesRegex(ValueError,'manifest_fields'):run(value,'.')
+ def test_duplicate_before_read(self):
+  m=self.manifest();m['profiles'].append(dict(html='./one.html',metadata='two.json'))
+  with patch.object(Path,'read_bytes',side_effect=AssertionError('read')):
+   with self.assertRaisesRegex(ValueError,'duplicate_snapshot_path'):run(m,'.')
+ def test_limit_before_read(self):
+  m=self.manifest();m['profiles']*=100
+  with patch.object(Path,'read_bytes',side_effect=AssertionError('read')):
+   with self.assertRaisesRegex(ValueError,'profile_limit'):run(m,'.')
+ def test_invalid_second_item_before_read(self):
+  m=self.manifest();m['profiles'].append(dict(html=None,metadata='two.json'))
+  with patch.object(Path,'read_bytes',side_effect=AssertionError('read')):
+   with self.assertRaisesRegex(ValueError,'snapshot_path_required'):run(m,'.')
+ def test_missing_file_diagnostic(self):
+  with tempfile.TemporaryDirectory() as d:
+   with self.assertRaisesRegex(ValueError,'snapshot_read_or_json_failed'):run(self.manifest(),d)
+ def test_metadata_schema(self):
+  with tempfile.TemporaryDirectory() as d:
+   Path(d,'one.html').write_bytes(b'hello');Path(d,'one.json').write_text('null')
+   with self.assertRaisesRegex(ValueError,'metadata_fields'):run(self.manifest(),d)
+ def test_bad_times_before_read(self):
+  m=self.manifest();m['as_of']=None
+  with patch.object(Path,'read_bytes',side_effect=AssertionError('read')):
+   with self.assertRaisesRegex(ValueError,'manifest_times'):run(m,'.')
 if __name__=='__main__':unittest.main()
