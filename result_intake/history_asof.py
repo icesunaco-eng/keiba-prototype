@@ -27,6 +27,8 @@ def select(reports, *, as_of, target_start, target_race_ref):
             identity=(key,row['race_ref'])
             if identity in seen:raise ValueError('duplicate_history')
             seen.add(identity)
+            # This adapter supports observed snapshots with unknown original timing only.
+            if row['published_at'] is not None or row['start_at'] is not None:raise ValueError('unsupported_original_timing')
             day=date.fromisoformat(row['event_date'])
             if day>acquired.astimezone(JST).date():raise ValueError('future_result')
             if type(row['field_size']) is not int or not 1<=row['field_size']<=30:raise ValueError('field_size')
