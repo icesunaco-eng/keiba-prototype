@@ -21,11 +21,17 @@ def parse(raw,metadata):
         except UnicodeDecodeError:continue
     else:raise ValueError('encoding_unknown')
     if not all(label in s for label in ('出走レース','頭数','着順','負担重量')):raise ValueError('profile_schema_missing')
+    tables=[]
+    for table in re.findall(r'<table\b[^>]*>.*?</table>',s,re.S|re.I):
+        captions=re.findall(r'<caption\b[^>]*>(.*?)</caption>',table,re.S|re.I)
+        if any(text(c)=='出走レース' for c in captions):tables.append(table)
+    if len(tables)!=1:raise ValueError('history_table_scope')
+    s=tables[0]
     rows=[];seen=set()
     for block in re.findall(r'<tr\b[^>]*>(.*?)</tr>',s,re.S|re.I):
         cells=re.findall(r'<td\b[^>]*>(.*?)</td>',block,re.S|re.I)
         if not cells:continue
-        if not any('/JRADB/accessS.html?CNAME=' in cell for cell in cells):continue
+        if not any('/JRADB/accessS.html?CNAME=' in cell for cell in cells):raise ValueError('race_link_missing')
         if len(cells)==2:
             a=re.fullmatch(r'(\d{4}年\d{1,2}月\d{1,2}日) (\S+) (.+?) (芝|ダ|障)(\d{3,4}) (\S+) (\d+)頭 (.*)',text(cells[0]))
             b=re.fullmatch(r'(\d+)着 (\d+)人気 (\d+:\d{2}\.\d) (\d+)kg (.+) (\d+\.\d+)',text(cells[1]))
