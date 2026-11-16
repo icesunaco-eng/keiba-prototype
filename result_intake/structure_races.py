@@ -50,17 +50,23 @@ def structure_pages(pages):
             for y in rowys:
                 rp=[p for p in panel if abs(p['y']-y)<.3]
                 w=text([p for p in rp if abs(p['x']-21)<.3]); u=text([p for p in rp if 21.5<p['x']<23])
-                name=text([p for p in rp if 49<=p['x']<121])
+                name_pieces=[p for p in panel if 49<=p['x']<110 and abs(p['y']-y)<=.6]
+                name=text(name_pieces)
                 if not re.fullmatch('[1-8]',w) or not re.fullmatch(r'\d{1,2}',u) or not name: issues.append('incomplete_row');continue
-                rows.append({'waku':int(w),'umaban':int(u),'name_candidate':name,'horse_id':None,'finish':None,'source_indices':[p['source_index'] for p in rp]})
+                # Explicit status only, in the result/status column of this row.
+                status_pieces=[p for p in panel if 300<=p['x']<400 and abs(p['y']-y)<=.6]
+                status_text=text(status_pieces)
+                runner_status='excluded' if '(競走除外)' in status_text else 'unclassified'
+                rows.append({'runner_status':runner_status,'status_source_indices':[p['source_index'] for p in status_pieces] if runner_status=='excluded' else [],'waku':int(w),'umaban':int(u),'name_candidate':name,'name_source_indices':[p['source_index'] for p in name_pieces],'horse_id':None,'finish':None,'source_indices':[p['source_index'] for p in rp]})
             nums=[r['umaban'] for r in rows]
             if len(nums)!=len(set(nums)): issues.append('duplicate_runner')
-            if field_size!=len(rows): issues.append('row_count_mismatch')
+            excluded_count=sum(r['runner_status']=='excluded' for r in rows)
+            if field_size!=len(rows)-excluded_count: issues.append('row_count_mismatch')
             if any(not 1<=x<=18 for x in nums): issues.append('invalid_runner_number')
             # Unknown glyph may be outside results but remains unresolved until located/reviewed.
             if page.get('unknown_glyph_occurrences',0): issues.append('page_unknown_glyphs')
             if any('\ufffd' in p['t'] or re.search(r'\{(?:c|cid)\d+\}',p['t']) for p in panel): issues.append('unresolved_panel_glyphs')
-            races.append({'page':pn,'panel_origin':origin,'race_label':candidates[0][0][0],'date':dt,'venue':yv[3],'kai':int(yv[2]),'nichi':int(nr[1]),'race_no':race_no,'field_size':field_size,'rows':rows,'status':'hold' if issues else 'candidate','issues':sorted(set(issues)),'text_verified':False})
+            races.append({'page':pn,'panel_origin':origin,'race_label':candidates[0][0][0],'date':dt,'venue':yv[3],'kai':int(yv[2]),'nichi':int(nr[1]),'race_no':race_no,'field_size':field_size,'listed_count':len(rows),'excluded_count':excluded_count,'rows':rows,'status':'hold' if issues else 'candidate','issues':sorted(set(issues)),'text_verified':False})
     keys=[(r['date'],r['venue'],r['kai'],r['nichi'],r['race_no']) for r in races]
     for i,r in enumerate(races):
         if keys.count(keys[i])>1: r['status']='hold';r['issues'].append('duplicate_race_identity')
