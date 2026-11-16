@@ -25,4 +25,19 @@ class Tests(unittest.TestCase):
   _,m=self.fixture()
   r=('出走レース 頭数 着順 負担重量 <tr><td>2026年10月10日 東京<br><a href="/JRADB/accessS.html?CNAME=fixture">未勝利</a><br>ダ1300 良 16頭 馬</td><td>3着 6人気<br>1:20.2<br>440kg<br>騎手 55.0</td></tr>').encode()
   m['sha256']=hashlib.sha256(r).hexdigest();self.assertEqual(parse(r,m)['rows'][0]['finish'],3)
+ def changed(self,old,new,append=False):
+  r,m=self.fixture();changed=r.replace(old.encode(),new.encode());r=r+changed if append else changed
+  m['sha256']=hashlib.sha256(r).hexdigest();return r,m
+ def test_bad_date_row_never_silent(self):
+  with self.assertRaisesRegex(ValueError,'invalid_history_date'):parse(*self.changed('2026年10月10日','202X年10月10日',True))
+ def test_invalid_calendar_date(self):
+  with self.assertRaises(ValueError):parse(*self.changed('2026年10月10日','2026年2月30日'))
+ def test_popularity_over_field(self):
+  with self.assertRaisesRegex(ValueError,'popularity'):parse(*self.changed('<td>6</td>','<td>99</td>'))
+ def test_zero_popularity(self):
+  with self.assertRaisesRegex(ValueError,'popularity'):parse(*self.changed('<td>6</td>','<td>0</td>'))
+ def test_popularity_boundary(self):
+  self.assertEqual(parse(*self.changed('<td>6</td>','<td>16</td>'))['rows'][0]['popularity'],16)
+ def test_unavailable_popularity(self):
+  self.assertIsNone(parse(*self.changed('<td>6</td>','<td>取消</td>'))['rows'][0]['popularity'])
 if __name__=='__main__':unittest.main()
