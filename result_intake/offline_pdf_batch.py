@@ -43,7 +43,7 @@ def extract_batch(manifest, extractor):
                 item.update({"status": "duplicate", "duplicate_of": seen[digest]})
             else:
                 pages = extractor(data)
-                if type(pages) is not list or not pages or any(type(p) is not dict for p in pages):
+                if type(pages) is not list or not pages or any(type(p) is not dict or type(p.get("pieces")) is not list for p in pages):
                     raise ValueError("invalid_page_extraction")
                 item.update({"status": "extracted", "pages": pages, "page_count": len(pages)})
                 seen[digest] = index
@@ -102,11 +102,17 @@ def existing_fragment_adapter(module):
                 cids = [int(x) for x in re.findall(rb"(\d+)\s+0\s+R", many.group(1))]
             if not cids:
                 raise ValueError("missing_page_contents")
-            contents = b"".join(module.stream_of(objs[c]) or b"" for c in cids)
+            streams = [module.stream_of(objs[c]) for c in cids]
+            if any(s is None for s in streams):
+                raise ValueError("missing_content_stream")
+            contents = b"".join(streams)
+            module.UNKNOWN.clear()
             pieces = module.run(contents, fonts)
             if not pieces:
                 raise ValueError("empty_extracted_page")
             pages.append({"page_number": len(pages)+1, "page_obj": n, "pieces": pieces,
-                          "text_is_unverified": True})
+                          "text_is_unverified": True,
+                          "unknown_glyph_codes": len(module.UNKNOWN),
+                          "unknown_glyph_occurrences": sum(module.UNKNOWN.values())})
         return pages
     return extract
