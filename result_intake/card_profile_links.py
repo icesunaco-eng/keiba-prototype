@@ -5,7 +5,8 @@ from profile_history import horse_key,text
 from profile_identity import decode
 from history_asof import instant
 
-def extract(raw,meta):
+def extract(raw,meta,*,expected_count):
+    if type(expected_count) is not int or not 1<=expected_count<=30:raise ValueError('expected_count_required')
     if hashlib.sha256(raw).hexdigest()!=meta['sha256']:raise ValueError('card_hash')
     u=urlparse(meta['url'])
     if u.scheme!='https' or u.hostname not in ('www.jra.go.jp','sp.jra.jp','jra.jp') or u.path!='/JRADB/accessD.html':raise ValueError('official_card_required')
@@ -19,7 +20,7 @@ def extract(raw,meta):
         if number in numbers or key in ids or not name or not 1<=number<=30:raise ValueError('duplicate_or_invalid_identity')
         numbers.add(number);ids.add(key)
         records.append(dict(horse_number=number,horse_name=name,horse_key=key,profile_url=url,card_source_sha256=meta['sha256'],observed_at=meta['acquired_at']))
-    if not records or sorted(numbers)!=list(range(1,len(records)+1)):raise ValueError('card_number_coverage')
+    if len(records)!=expected_count or sorted(numbers)!=list(range(1,expected_count+1)):raise ValueError('card_number_coverage')
     return dict(schema='saved-card-profile-links-v1',records=sorted(records,key=lambda r:r['horse_number']),source_url=meta['url'],
                 source_sha256=meta['sha256'],observed_at=meta['acquired_at'],profile_pages_fetched=False,
                 independently_verified=False,model_ready=False,confirmed_future_entry=False)
