@@ -3,7 +3,7 @@ from profile_history import parse,batch,horse_key
 class Tests(unittest.TestCase):
  def fixture(self):
   cells=['2026年10月10日','東京','<a href="/JRADB/accessS.html?CNAME=fixture">未勝利</a>','ダ1300','良','16','6','3','騎手','55.0','440','1:20.2','','馬']
-  raw=('出走レース 頭数 着順 負担重量 <tr>'+''.join('<td>'+x+'</td>' for x in cells)+'</tr>').encode()
+  raw=('<table><caption>出走レース</caption> 頭数 着順 負担重量 <tr>'+''.join('<td>'+x+'</td>' for x in cells)+'</tr></table>').encode()
   return raw,dict(sha256=hashlib.sha256(raw).hexdigest(),acquired_at='2026-11-16T06:00:00Z',url='https://www.jra.go.jp/JRADB/accessU.html?CNAME=pw01dud102024106071%2F52')
  def test_parse(self):
   x=parse(*self.fixture());self.assertEqual(x['rows'][0]['finish'],3);self.assertIsNone(x['rows'][0]['start_at']);self.assertFalse(x['model_ready'])
@@ -23,10 +23,10 @@ class Tests(unittest.TestCase):
   r,m=self.fixture();r+='<tr><td>2024年2月7日</td></tr>'.encode();m['sha256']=hashlib.sha256(r).hexdigest();self.assertEqual(len(parse(r,m)['rows']),1)
  def test_mobile(self):
   _,m=self.fixture()
-  r=('出走レース 頭数 着順 負担重量 <tr><td>2026年10月10日 東京<br><a href="/JRADB/accessS.html?CNAME=fixture">未勝利</a><br>ダ1300 良 16頭 馬</td><td>3着 6人気<br>1:20.2<br>440kg<br>騎手 55.0</td></tr>').encode()
+  r=('<table><caption>出走レース</caption> 頭数 着順 負担重量 <tr><td>2026年10月10日 東京<br><a href="/JRADB/accessS.html?CNAME=fixture">未勝利</a><br>ダ1300 良 16頭 馬</td><td>3着 6人気<br>1:20.2<br>440kg<br>騎手 55.0</td></tr></table>').encode()
   m['sha256']=hashlib.sha256(r).hexdigest();self.assertEqual(parse(r,m)['rows'][0]['finish'],3)
  def changed(self,old,new,append=False):
-  r,m=self.fixture();changed=r.replace(old.encode(),new.encode());r=r+changed if append else changed
+  r,m=self.fixture();changed=r.replace(old.encode(),new.encode());r=r.replace(b'</table>',changed[changed.index(b'<tr>'):changed.index(b'</table>')]+b'</table>') if append else changed
   m['sha256']=hashlib.sha256(r).hexdigest();return r,m
  def test_bad_date_row_never_silent(self):
   with self.assertRaisesRegex(ValueError,'invalid_history_date'):parse(*self.changed('2026年10月10日','202X年10月10日',True))
@@ -40,4 +40,9 @@ class Tests(unittest.TestCase):
   self.assertEqual(parse(*self.changed('<td>6</td>','<td>16</td>'))['rows'][0]['popularity'],16)
  def test_unavailable_popularity(self):
   self.assertIsNone(parse(*self.changed('<td>6</td>','<td>取消</td>'))['rows'][0]['popularity'])
+ def test_calendar_link_ignored(self):
+  r,m=self.fixture();r+=b'<table><caption>calendar</caption><tr><td><a href="/JRADB/accessS.html?CNAME=other">calendar</a></td></tr></table>'
+  m['sha256']=hashlib.sha256(r).hexdigest();self.assertEqual(len(parse(r,m)['rows']),1)
+ def test_missing_result_link_rejects(self):
+  with self.assertRaisesRegex(ValueError,'race_link_missing'):parse(*self.changed('/JRADB/accessS.html','/missing'))
 if __name__=='__main__':unittest.main()
