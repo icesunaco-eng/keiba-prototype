@@ -33,7 +33,8 @@ def parse(raw,metadata):
             link=re.search(r'<a\b[^>]*href=[\"\'](/JRADB/accessS.html[^\"\']+)[\"\'][^>]*>(.*?)</a>',cells[0],re.S)
             if not link:raise ValueError('race_link_missing')
             cells=[a[1],a[2],link[0],a[4]+a[5],a[6],a[7],b[2],b[1],b[5],b[6],b[4],b[3],'',a[8]]
-        if not re.fullmatch(r'\d{4}年\d{1,2}月\d{1,2}日',text(cells[0])):continue
+        # A result-link row is a history candidate, never silently discard it.
+        if not re.fullmatch(r'\d{4}年\d{1,2}月\d{1,2}日',text(cells[0])):raise ValueError('invalid_history_date')
         if len(cells)!=14:raise ValueError('changed_history_columns')
         c=list(map(text,cells));d=date(*map(int,re.findall(r'\d+',c[0])))
         if d>observed.date():raise ValueError('future_result_date')
@@ -43,12 +44,14 @@ def parse(raw,metadata):
         if race_ref in seen:raise ValueError('duplicate_history')
         seen.add(race_ref)
         if not c[5].isdigit() or not 1<=int(c[5])<=30:raise ValueError('field_size')
+        popularity=int(c[6]) if c[6].isdigit() else None
+        if popularity is not None and not 1<=popularity<=int(c[5]):raise ValueError('popularity')
         finish=int(c[7]) if c[7].isdigit() else None
         if finish is not None and not 1<=finish<=int(c[5]):raise ValueError('finish')
         distance=re.fullmatch(r'(芝|ダ|障)(\d{3,4})',c[3])
         rows.append(dict(horse_key=key,event_date=d.isoformat(),venue=c[1],race_name=c[2],race_ref=race_ref,
           surface=distance[1] if distance else None,distance_m=int(distance[2]) if distance else None,
-          going=c[4],field_size=int(c[5]),popularity=int(c[6]) if c[6].isdigit() else None,
+          going=c[4],field_size=int(c[5]),popularity=popularity,
           finish=finish,finish_raw=c[7],jockey=c[8],weight_raw=c[9],body_weight_raw=c[10],time_raw=c[11],
           observed_at=metadata['acquired_at'],published_at=None,start_at=None,
           source_sha256=metadata['sha256'],source_url=metadata['url'],source_kind='post_race_history_snapshot'))
