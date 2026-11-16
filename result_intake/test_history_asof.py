@@ -29,4 +29,10 @@ class Tests(unittest.TestCase):
   with self.assertRaises(ValueError):self.runit(r)
  def test_immutability(self):
   r=self.fixture();b=copy.deepcopy(r);self.runit(r);self.assertEqual(r,b)
+ def test_nonnull_original_timing_rejected(self):
+  for field in ('published_at','start_at'):
+   for value in ('2026-11-30T00:00:00Z','2026-11-13T00:00:00Z','bad',0):
+    with self.subTest(field=field,value=value):
+     r=self.fixture();r[0]['rows'][0][field]=value
+     with self.assertRaisesRegex(ValueError,'unsupported_original_timing'):self.runit(r)
 if __name__=='__main__':unittest.main()
