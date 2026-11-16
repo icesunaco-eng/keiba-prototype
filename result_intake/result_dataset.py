@@ -9,6 +9,35 @@ def _index(rows):
         if any(type(v) is not int for v in key) or key[0]<1 or not 1<=key[1]<=12 or not 1<=key[2]<=18:raise ValueError('invalid_identity')
         out[key]=r
     return out
+def _validate_time_references(ti,mi):
+    """Reject malformed or ungrounded ditto chains before any verified output."""
+    for key,row in ti.items():
+        ref=row.get('time_reference')
+        if row.get('status')!='referenced_time':
+            if ref is not None:raise ValueError('unexpected_time_reference')
+            continue
+        if not isinstance(ref,(list,tuple)) or len(ref)!=3 or any(type(v) is not int for v in ref):
+            raise ValueError('invalid_time_reference')
+        target=tuple(ref)
+        if target==key or target[:2]!=key[:2] or target not in ti:raise ValueError('invalid_time_reference')
+        previous=ti[target]
+        if previous.get('status') not in ('explicit_time','referenced_time'):raise ValueError('unverified_time_reference')
+        values=[row.get('seconds'),previous.get('seconds')]
+        if any(type(v) not in (int,float) or not math.isfinite(v) or v<=0 for v in values) or values[0]!=values[1]:
+            raise ValueError('time_reference_value_mismatch')
+        pos=mi[key].get('table_position');prev=mi[target].get('table_position')
+        if type(pos) is not int or type(prev) is not int or prev<1 or pos!=prev+1:
+            raise ValueError('time_reference_order')
+        if sum(m.get('table_position')==prev for k,m in mi.items() if k[:2]==key[:2])!=1 or sum(m.get('table_position')==pos for k,m in mi.items() if k[:2]==key[:2])!=1:
+            raise ValueError('ambiguous_time_reference_order')
+    # Explicit termination check also protects against future order-policy changes.
+    for key in ti:
+        seen=set();current=key
+        while ti[current].get('status')=='referenced_time':
+            if current in seen:raise ValueError('cyclic_time_reference')
+            seen.add(current);current=tuple(ti[current]['time_reference'])
+        if seen and ti[current].get('status')!='explicit_time':raise ValueError('ungrounded_time_reference')
+
 def build(races,names,times,market):
     envelopes=[names,times,market]
     hashes=[e.get('source_sha256') for e in envelopes]
@@ -16,6 +45,7 @@ def build(races,names,times,market):
     if any(e.get('source_kind')!='post_race_results' for e in envelopes):raise ValueError('results_only')
     ni,ti,mi=[_index(e['rows']) for e in envelopes]
     if not ni or set(ni)!=set(ti) or set(ni)!=set(mi):raise ValueError('coverage_mismatch')
+    _validate_time_references(ti,mi)
     ri={}
     for r in races:
         if r.get('source_sha256')!=hashes[0]:raise ValueError('race_source_hash_mismatch')
