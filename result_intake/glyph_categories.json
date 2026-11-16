@@ -1,0 +1,145 @@
+{
+  "6116a94e34b617585cfafce783508c99bba6a75e14c80b100fb3d17539a2165d": {
+    "{c054}": "pedigree_brace",
+    "{c055}": "pedigree_brace"
+  },
+  "20bc678ad77ada1108cb61cb2d2f782150b77ff04d5f0426edd247fb334014ca": {
+    "{c049}": "pedigree_brace",
+    "{c050}": "pedigree_brace"
+  },
+  "4df36fde5ddbfc2a691f2b8ac7068742b17457331adb3c382569230e4079f577": {
+    "{c051}": "pedigree_brace",
+    "{c052}": "pedigree_brace"
+  },
+  "2a663eec9020533e91d72428a027f8247581cc9caefc967bdf3c277fa7131784": {
+    "{c052}": "pedigree_brace",
+    "{c053}": "pedigree_brace"
+  },
+  "e583d8c2fcb819c8c1404f2120443ccf40c4d151d3a06e82d4cfb1fdd957664e": {
+    "{c049}": "pedigree_brace",
+    "{c050}": "pedigree_brace"
+  },
+  "8657ffc748aa896db2b0581b2ae1c1e5f6ce63e5f31930c7ccdab9dbfc2c68b3": {
+    "{c053}": "pedigree_brace",
+    "{c054}": "pedigree_brace"
+  },
+  "247649106a253b7764b7ba37bc9082ef2b011ad1af8327e7d8763fe77922b84e": {
+    "{c049}": "pedigree_brace",
+    "{c050}": "pedigree_brace"
+  },
+  "d60e43739ea4adb5b72ebee58611cf7771a4d59c4f5b1d231c59ed825cf946cb": {
+    "{c052}": "pedigree_brace",
+    "{c053}": "pedigree_brace"
+  },
+  "8d321e95c27ba28629eb5a244ce3bcfe6b37ce3005dcde786f34647e14e2c2e6": {
+    "{c047}": "pedigree_brace",
+    "{c048}": "pedigree_brace"
+  },
+  "b9a48a1d677345604281443bbf452619b08e89bbfc7a9f02cd6a7a7696195133": {
+    "{c048}": "pedigree_brace",
+    "{c049}": "pedigree_brace"
+  },
+  "b88e4a586e2057431ecb3cf47dccc0938220f7e367a219d8b01cfac8b44e0d57": {
+    "{c050}": "pedigree_brace",
+    "{c051}": "pedigree_brace",
+    "{c052}": "unresolved_text"
+  },
+  "5cf5e87e4b9d09fd2495acd4725434d1d701e76ca4cb8148f8ef5d0808904bdf": {
+    "{c046}": "pedigree_brace",
+    "{c047}": "pedigree_brace",
+    "{c048}": "unresolved_text"
+  },
+  "be86914e20ee2e98fff463b06e6781735516c19f08b5bd28a91e25551edad20a": {
+    "{c033}": "pedigree_brace",
+    "{c034}": "pedigree_brace",
+    "{c035}": "pedigree_brace",
+    "{c036}": "pedigree_brace",
+    "{c037}": "pedigree_brace"
+  },
+  "7ce44a723ff0cde04250cbfba2ce115c72d4d147ec8c0ef78f8afe59c18b9a0b": {
+    "{c040}": "course_diagram",
+    "{c033}": "race_eligibility",
+    "{c034}": "race_eligibility",
+    "{c035}": "race_eligibility",
+    "{c036}": "race_eligibility"
+  },
+  "e253a057609c935983787831b14424545caf1279f55fa99fc5ac9feac99631c8": {
+    "{c042}": "course_diagram",
+    "{c033}": "race_eligibility",
+    "{c034}": "race_eligibility",
+    "{c035}": "race_eligibility",
+    "{c036}": "race_eligibility",
+    "{c040}": "sex_glyph",
+    "{c041}": "unresolved_text"
+  },
+  "b870e42136c6411e2e6deb99e53c11992754dfa1c848a588fffb0c593e278072": {
+    "{c040}": "course_diagram",
+    "{c033}": "race_eligibility",
+    "{c034}": "race_eligibility",
+    "{c039}": "sex_glyph"
+  },
+  "1bd055f63152c589f1ab329cb3b214f7c934901bf48ed49e97d7e76d4eb7801c": {
+    "{c040}": "course_diagram",
+    "{c033}": "race_eligibility",
+    "{c034}": "race_eligibility",
+    "{c035}": "race_eligibility",
+    "{c036}": "race_eligibility",
+    "{c039}": "unresolved_text"
+  },
+  "26b65926a86d54842b3f1adc94e1764225c8493f95600213beb603cf42c0d87c": {
+    "{c042}": "course_diagram",
+    "{c035}": "race_eligibility",
+    "{c036}": "race_eligibility",
+    "{c033}": "race_eligibility",
+    "{c034}": "race_eligibility",
+    "{c041}": "unresolved_text"
+  },
+  "d8d8f33499e7b038eb851e4d3d8838cd66f301a46e2a0472361420726f78db7b": {
+    "{c037}": "course_diagram",
+    "{c033}": "race_eligibility",
+    "{c034}": "race_eligibility"
+  },
+  "212dbbc108d19549ac969dd7468953f41498175a63e063324265514f841494db": {
+    "{c044}": "course_diagram",
+    "{c035}": "race_eligibility",
+    "{c036}": "race_eligibility",
+    "{c037}": "race_eligibility",
+    "{c038}": "race_eligibility",
+    "{c043}": "sex_glyph",
+    "{c033}": "runner_registration",
+    "{c034}": "runner_registration"
+  },
+  "e7ea4c27f16fd87319184064981ae8bdd461492e688272880a69eaee2bbb8b65": {
+    "{c040}": "course_diagram",
+    "{c033}": "race_eligibility",
+    "{c034}": "race_eligibility",
+    "{c039}": "sex_glyph"
+  },
+  "f56d4c66a8a64b4be0bcd6f93290612c0707fb2b469722284e67ea4cb448b3ae": {
+    "{c040}": "course_diagram",
+    "{c033}": "race_eligibility",
+    "{c034}": "race_eligibility",
+    "{c035}": "race_eligibility",
+    "{c036}": "race_eligibility",
+    "{c039}": "sex_glyph"
+  },
+  "0af526ee5e27851b81176d5dd60629cc89c8b9736e8f48bc46230344167304cd": {
+    "{c041}": "course_diagram",
+    "{c035}": "race_eligibility",
+    "{c036}": "race_eligibility",
+    "{c033}": "race_eligibility",
+    "{c034}": "race_eligibility",
+    "{c040}": "sex_glyph"
+  },
+  "85b577671b736c58895d11110b4d45a3d45216b09d44c7f615202bedc21138c4": {
+    "{c039}": "course_diagram",
+    "{c033}": "race_eligibility",
+    "{c034}": "race_eligibility",
+    "{c038}": "unresolved_text"
+  },
+  "4522e8175e32cf1d46ddf3041d3641b194ed05d1b21440e0c4eb4ededfcde560": {
+    "{c037}": "course_diagram",
+    "{c033}": "race_eligibility",
+    "{c034}": "race_eligibility"
+  }
+}
