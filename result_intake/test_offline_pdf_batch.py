@@ -10,7 +10,7 @@ class BatchTests(unittest.TestCase):
             return extract_batch(rows,extractor or (lambda data:[{"pieces":[]}]))
     def test_duplicate(self):
         calls=[]
-        r=self.run_batch([self.row,self.row],lambda data:calls.append(data) or [{}])
+        r=self.run_batch([self.row,self.row],lambda data:calls.append(data) or [{"pieces":[]}])
         self.assertEqual((r["extracted"],r["duplicates"],len(calls)),(1,1,1))
         self.assertFalse(r["model_ready"])
     def test_hash_hold_isolated(self):
@@ -24,7 +24,7 @@ class BatchTests(unittest.TestCase):
         def fail_once(data):
             calls.append(1)
             if len(calls)==1: raise ValueError("failure")
-            return [{}]
+            return [{"pieces":[]}]
         r=self.run_batch([self.row,self.row],fail_once)
         self.assertEqual((r["holds"],r["extracted"],r["duplicates"]),(1,1,0))
     def test_adapter_flat_tree(self):
