@@ -21,3 +21,9 @@ class ReferenceTests(unittest.TestCase):
   r=self.rows();r[1]['custom_time']='?';self.assertIsNone(resolve_ditto(r)['checks'][2]['seconds'])
  def test_reject_bad_order(self):
   r=self.rows();r[1]['y']=510;self.assertIsNone(resolve_ditto(r)['checks'][1]['seconds'])
+
+class FiniteTests(unittest.TestCase):
+ def test_nonfinite_break(self):
+  for y in [float('inf'),float('nan')]:
+   r=ReferenceTests().rows();r[0]['y']=y
+   self.assertTrue(all(x['seconds'] is None for x in resolve_ditto(r)['checks']))
