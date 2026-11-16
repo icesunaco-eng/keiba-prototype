@@ -21,6 +21,20 @@ class Tests(unittest.TestCase):
   p=page();p['pieces']=p['pieces'][1:]+[dict(x=18.7+i*.5,y=530.3,t=t,f='test') for i,t in enumerate('30025')];self.assertEqual(structure_pages([p])['races'][0]['race_no'],1)
  def test_right_shift(self):
   p=page();p['pieces']=[dict(x=x['x']+410.5,y=x['y'],t=x['t'],f=x['f']) for x in p['pieces']];self.assertEqual(structure_pages([p])['races'][0]['race_no'],1)
+ def test_explicit_exclusion(self):
+  p=page();p['pieces'] += [dict(x=x,y=y,t=t,f='test') for x,y,t in [(21,380,'2'),(22,380,'2'),(50,380,'除外馬'),(310,380.4,'（競走除外）')]]
+  r=structure_pages([p])['races'][0]
+  self.assertEqual(r['excluded_count'],1);self.assertEqual(r['listed_count'],2);self.assertNotIn('row_count_mismatch',r['issues'])
+  self.assertEqual(r['rows'][1]['runner_status'],'excluded');self.assertIsNone(r['rows'][1]['finish'])
+ def test_remote_exclusion_not_assigned(self):
+  p=page();p['pieces'] += [dict(x=310,y=100,t='（競走除外）',f='test')]
+  self.assertEqual(structure_pages([p])['races'][0]['excluded_count'],0)
+ def test_unknown_status_not_excluded(self):
+  p=page();p['pieces'] += [dict(x=310,y=460,t='（競�除外）',f='test')]
+  self.assertEqual(structure_pages([p])['races'][0]['excluded_count'],0)
+ def test_name_offset_excludes_sex(self):
+  p=page();p['pieces'][6]['y']=459.6;p['pieces'].append(dict(x=111.2,y=460,t='牝4',f='test'))
+  self.assertEqual(structure_pages([p])['races'][0]['rows'][0]['name_candidate'],'架空馬')
  def test_no_mutation(self):
   p=page();old=copy.deepcopy(p);structure_pages([p]);self.assertEqual(p,old)
 if __name__=='__main__':unittest.main()
