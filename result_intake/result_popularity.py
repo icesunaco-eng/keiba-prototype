@@ -10,6 +10,22 @@ def validate(dataset):
         key=(row['page'],row['race_no'],row['umaban'])
         if key in identities:raise ValueError('duplicate_identity')
         identities.add(key);groups.setdefault(key[:2],[]).append(row)
+    expected={}
+    for summary in dataset['race_summary']:
+        key=(summary['page'],summary['race_no']) if 'page' in summary else None
+        # Staging summaries identify races by date/venue/race; resolve page via rows.
+        if key is None:
+            candidates={k for k,items in groups.items() if k[1]==summary['race_no'] and all(r.get('date')==summary.get('date') and r.get('venue')==summary.get('venue') for r in items)}
+            if len(candidates)!=1:raise ValueError('race_summary_coverage')
+            key=next(iter(candidates))
+        if key in expected:raise ValueError('duplicate_race_summary')
+        expected[key]=summary
+    if set(expected)!=set(groups):raise ValueError('race_summary_coverage')
+    for key,items in groups.items():
+        summary=expected[key]
+        if any(type(r.get('excluded')) is not bool for r in items):raise ValueError('invalid_exclusion')
+        counts={'listed':len(items),'excluded':sum(r['excluded'] for r in items),'starters':sum(not r['excluded'] for r in items)}
+        if any(type(summary.get(k)) is not int or summary[k]!=v for k,v in counts.items()):raise ValueError('race_count_mismatch')
     summaries=[];rows=[]
     for key,items in groups.items():
         active=[r for r in items if not r['excluded']]
