@@ -15,3 +15,22 @@ class Tests(unittest.TestCase):
   c,i=self.fixture();c['records']=[]
   with self.assertRaises(ValueError):self.runit((c,i))
 if __name__=='__main__':unittest.main()
+
+class EvidenceTests(unittest.TestCase):
+ def fixture(self):
+  from forward_readiness import checklist
+  c,i=Tests().fixture();r=checklist(c,i,as_of='2026-11-14T00:30:00Z',target_start='2026-11-14T00:50:00Z',target_event_date='2026-11-14')
+  b=dict(schema='identity-history-staging-v1',as_of=r['as_of'],target_start=r['target_start'],model_ready=False,production_ready=False,candidates=[dict(horse_key='id1',source_sha256='hash',observed_at='2026-11-14T00:00:00Z',source_url='source',identity_evidence=dict(horse_key='id1',profile_sha256='hash',status='saved_card_profile_identity_matched',card_observed_at='2026-11-14T00:00:00Z',horse_name='合成馬'))])
+  return r,b
+ def test_annotation_never_clears_gap(self):
+  import copy
+  from forward_readiness import attach_historical_evidence
+  r,b=self.fixture();old=copy.deepcopy(r);x=attach_historical_evidence(r,b);self.assertEqual(x['gap_counts'],r['gap_counts']);self.assertEqual(x['rows'][0]['missing'],r['rows'][0]['missing']);self.assertFalse(x['rows'][0]['historical_related_evidence'][0]['target_identity_verified']);self.assertEqual(r,old)
+ def test_future_evidence(self):
+  from forward_readiness import attach_historical_evidence
+  r,b=self.fixture();b['candidates'][0]['observed_at']='2026-11-15T00:00:00Z'
+  with self.assertRaises(ValueError):attach_historical_evidence(r,b)
+ def test_mismatched_target(self):
+  from forward_readiness import attach_historical_evidence
+  r,b=self.fixture();b['target_start']='2026-11-15T00:50:00Z'
+  with self.assertRaises(ValueError):attach_historical_evidence(r,b)
