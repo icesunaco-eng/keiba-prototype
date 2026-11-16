@@ -1,5 +1,5 @@
 """Post-race time candidates; ditto marks are deliberately not resolved."""
-import re,unicodedata
+import re,unicodedata,math
 def normalize(s):return re.sub(r'\s','',unicodedata.normalize('NFKC',s))
 def parse_time(value):
     t=normalize(value)
@@ -51,7 +51,7 @@ def resolve_ditto(rows):
         out=dict(page=row['page'],race_no=row['race_no'],umaban=row['umaban'],seconds=None,
                  status='hold',time_reference=None,finish=None,dead_heat_inferred=False)
         y=row.get('y')
-        ordered=type(y) in (int,float) and (key not in last_y or y<last_y[key])
+        ordered=type(y) in (int,float) and math.isfinite(y) and (key not in last_y or y<last_y[key])
         if ordered:last_y[key]=y
         if keys.count(identity)!=1 or not ordered:
             previous.pop(key,None);results.append(out);continue
