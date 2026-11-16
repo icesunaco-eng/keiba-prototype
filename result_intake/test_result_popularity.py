@@ -2,7 +2,7 @@ import unittest
 from result_popularity import validate
 class Tests(unittest.TestCase):
  def fixture(self):
-  return dict(source_kind='post_race_results',records=[dict(page=1,race_no=1,umaban=i,excluded=False,popularity_candidate=i,win_odds=float(i),holds=[],status='verified_columns_only') for i in (1,2,3)])
+  return dict(source_kind='post_race_results',race_summary=[dict(page=1,race_no=1,listed=3,starters=3,excluded=0)],records=[dict(page=1,race_no=1,umaban=i,excluded=False,popularity_candidate=i,win_odds=float(i),holds=[],status='verified_columns_only') for i in (1,2,3)])
  def test_ok(self):
   x=validate(self.fixture());self.assertEqual(x['race_summary'][0]['status'],'race_consistency_passed');self.assertFalse(x['rows'][0]['popularity_verified']);self.assertFalse(x['model_ready'])
  def test_tied_rounded_odds_not_tied_popularity(self):
@@ -15,7 +15,7 @@ class Tests(unittest.TestCase):
  def test_inversion(self):
   f=self.fixture();f['records'][0]['win_odds']=10.;self.assertEqual(validate(f)['race_summary'][0]['reasons'],['odds_popularity_inversion'])
  def test_excluded(self):
-  f=self.fixture();f['records'].append(dict(page=1,race_no=1,umaban=4,excluded=True,popularity_candidate=None,win_odds=None,holds=[],status='verified_columns_only'));self.assertEqual(validate(f)['race_summary'][0]['starters'],3)
+  f=self.fixture();f['records'].append(dict(page=1,race_no=1,umaban=4,excluded=True,popularity_candidate=None,win_odds=None,holds=[],status='verified_columns_only'));f['race_summary'][0].update(listed=4,excluded=1);self.assertEqual(validate(f)['race_summary'][0]['starters'],3)
  def test_hold(self):
   f=self.fixture();f['records'][0]['holds']=['name'];self.assertIn('upstream_hold',validate(f)['race_summary'][0]['reasons'])
  def test_duplicate(self):
@@ -24,4 +24,20 @@ class Tests(unittest.TestCase):
  def test_prerace(self):
   f=self.fixture();f['source_kind']='pre_race'
   with self.assertRaises(ValueError):validate(f)
+ def test_missing_last_popularity(self):
+  f=self.fixture();f['records'].pop()
+  with self.assertRaises(ValueError):validate(f)
+ def test_missing_race(self):
+  f=self.fixture();f['records']=[]
+  with self.assertRaises(ValueError):validate(f)
+ def test_missing_summary(self):
+  f=self.fixture();f['race_summary']=[]
+  with self.assertRaises(ValueError):validate(f)
+ def test_duplicate_summary(self):
+  f=self.fixture();f['race_summary']*=2
+  with self.assertRaises(ValueError):validate(f)
+ def test_wrong_counts(self):
+  for field in ('listed','starters','excluded'):
+   f=self.fixture();f['race_summary'][0][field]+=1
+   with self.subTest(field=field),self.assertRaises(ValueError):validate(f)
 if __name__=='__main__':unittest.main()
