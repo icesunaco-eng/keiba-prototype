@@ -141,6 +141,8 @@ def parse_card(page: str) -> list[dict]:
                          "f3": _t(td.xpath('.//div[@class="f3"]')[0]).replace("3F", "").strip() if td.xpath('.//div[@class="f3"]') else None,
                          "corners": [_t(li) for li in td.xpath('.//div[@class="corner_list"]//li')]})
         num = _t(tr.xpath('./td[contains(@class,"num")]')[0]) if tr.xpath('./td[contains(@class,"num")]') else ""
+        row_text = " ".join(_t(td) for td in tr.xpath('./td[not(contains(@class,"past"))]'))  # 過去走の欄は見ない
+        scratch = next((w for w in ("取消", "除外") if w in row_text), None)
         waku = tr.xpath('./td[contains(@class,"waku")]//img/@alt')
         rows.append({
             "horse_number": int(num) if num.isdigit() else None,
@@ -158,6 +160,7 @@ def parse_card(page: str) -> list[dict]:
             "dam": mare_text or None,
             "damsire": re.sub(r"[()（）]|母の父[:：]", "", _t(bm[0])).strip() if bm else None,
             "past_runs": past,
+            "scratch": scratch,
         })
     return rows
 
@@ -235,7 +238,7 @@ def parse_trio_odds(page: str, field: int) -> dict:
     """三連複オッズ（"a-b-c" → 倍）。表ごとに見出し（例「1-2」）の2頭と、行の馬番・オッズで組を作る。
     取消の馬がいれば組は減るので、C(出走頭数,3) と一致したときだけ ok=True。"""
     doc = lxml_html.fromstring(page)
-    odds = {}
+    odds, dups, bad = {}, 0, 0
     for table in doc.xpath("//table"):
         cap = table.xpath("./caption") or table.xpath("preceding-sibling::*[1]")
         head = [int(x) for x in re.findall(r"\d+", _t(cap[0]))] if cap else []
@@ -248,7 +251,24 @@ def parse_trio_odds(page: str, field: int) -> dict:
                 continue
             v = _num(_t(val[0]))
             third = int(_t(num[0]))
-            if v and third not in head:
-                odds["-".join(map(str, sorted(head + [third])))] = v
+            if third in head:
+                continue
+            if not v:
+                bad += 1  # 「取消」「---」など、数字でないオッズ
+                continue
+            key = "-".join(map(str, sorted(head + [third])))
+            if key in odds:
+                dups += 1
+            odds[key] = v
     expected = math.comb(field, 3) if field and field >= 3 else None
-    return {"odds": odds, "ok": expected is not None and len(odds) == expected, "expected": expected}
+    ok = expected is not None and len(odds) == expected and dups == 0
+    return {"odds": odds, "ok": ok, "expected": expected, "found": len(odds), "duplicates": dups, "unreadable": bad}
+
+
+_ODDS_TIME = re.compile(r"(\d{1,2})時(\d{2})分\s*(?:現在|時点)")
+
+
+def parse_odds_time(page: str) -> str | None:
+    """オッズの発表時刻（例「11時30分現在」）。見つからなければ None（時刻不明）。"""
+    m = _ODDS_TIME.search(unicodedata.normalize("NFKC", lxml_html.fromstring(page).text_content()))
+    return f"{int(m.group(1)):02d}:{m.group(2)}" if m else None

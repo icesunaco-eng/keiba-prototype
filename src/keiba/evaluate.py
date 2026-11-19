@@ -143,6 +143,7 @@ def predict_race(g: pd.DataFrame, scores: np.ndarray, calib: Calibration, method
         "confidence": conf,
         "calibration": {"beta": round(calib.beta, 4), "gamma": round(calib.gamma, 4), "n": calib.n_races},
         "allocation": {"status": "unallocated_no_odds", "reason": "発走前の三連複オッズが無い（検証A）"},
+        "rule_view": (rule_v1.rule_view(g, p_top3, tp) if method in ("ml_lgbm", "ml_market") and "u_recent" in g else None),
         "notes": notes,
     }
 

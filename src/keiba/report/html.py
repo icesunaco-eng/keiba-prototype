@@ -10,7 +10,6 @@ from pathlib import Path
 import pandas as pd
 
 from ..ledger import Ledger
-from ..models.rule import GROUP_LABELS, GROUPS
 
 METHOD_LABEL = {"ml_lgbm": "学習モデル", "ml_market": "学習＋市場（確定オッズ近似）", "rule": "ルール（あいす v1.0）", "rule_v11": "ルール（案 v1.1）", "rule_v01": "ルール（暫定 v0.1）", "base_logit": "比較：ロジスティック",
                 "base_pop": "比較：人気順（確定オッズ）"}
@@ -140,11 +139,18 @@ def _race_page(path: Path, rk: str, preds: dict, sett: dict):
                      f"<div class='scroll'><table><tr><th>三連複</th><th>確率</th></tr>{rows}</table></div>"
                      f"<p class='muted'>参考（10点買い）：{s10.get('status', '–')}／払戻 {s10.get('returned', '–')}円"
                      f"{'／' + '、'.join(map(html.escape, p['notes'])) if p.get('notes') else ''}</p>")
-        if method == "rule" and tp == "1h":
-            head = "".join(f"<th>{GROUP_LABELS[g]}</th>" for g in GROUPS)
+        view = p.get("rule_view")
+        if method == "ml_lgbm" and tp == "1h" and view:
+            labels = list(view["top"][0]["groups"]) if view["top"] else []
+            head = "".join(f"<th>{html.escape(k)}</th>" for k in labels)
             body = "".join("<tr><td>" + str(h["n"]) + "</td>" +
-                           "".join(f"<td>{'未' if h['groups'][g] is None else round(h['groups'][g])}</td>" for g in GROUPS) +
-                           f"<td>{h['coverage']*100:.0f}%</td></tr>" for h in sorted(p["horses"], key=lambda h: h["n"]))
-            parts.append("<h2>ルール方式の採点（10段階・未＝未採点）</h2>"
-                         f"<div class='scroll'><table><tr><th>馬番</th>{head}<th>採点割合</th></tr>{body}</table></div>")
+                           "".join(f"<td>{html.escape(str(h['groups'][k]))}</td>" for k in labels) +
+                           f"<td>{h['evaluated']}</td><td>{h['total']}</td></tr>" for h in view["top"])
+            mark = view["disagreement"]
+            parts.append("<h2>学習モデルの上位3頭：別基準（ルール）の評価</h2>"
+                         f"<p class='muted'>{html.escape(view['note'])}。基準 {html.escape(view['basis'])}。"
+                         f"10段階、評価できなかった項目は「未評価」。</p>"
+                         f"<div class='scroll'><table><tr><th>馬番</th>{head}<th>評価できた項目</th><th>総合</th></tr>{body}</table></div>"
+                         f"<p class='{'warn' if mark == '食い違い' else 'muted'}'>食い違いの印：{html.escape(mark)}"
+                         f"（{html.escape(view['disagreement_rule'])}。配分には使わない）</p>")
     path.write_text(_page(rk, "".join(parts), depth=1), encoding="utf-8")

@@ -126,7 +126,13 @@ VARIANTS = {
     # 案（rule-v1.1）：未採点を減らす。1走から使い、走数が少ないほど全体の真ん中へ寄せる。
     # 期間は730日、芝ダ違いの走は重み0.5、能力の基準集団が足りないときは「全場・同芝ダ・同距離」に広げる
     "v1.1": dict(window=730, min_runs=1, shrink_k=2.0, cross_surface_w=0.5, ref_fallback=True, prefix="u11_"),
+    # 比較版（あいすの指示：変更を1つずつ別々に確かめる。どれも v1.0 からの差分は1つだけ）
+    "v1.1-window": dict(window=730, min_runs=2, shrink_k=0.0, cross_surface_w=0.0, ref_fallback=False, prefix="u11w_"),
+    "v1.1-onerun": dict(window=365, min_runs=1, shrink_k=2.0, cross_surface_w=0.0, ref_fallback=False, prefix="u11o_"),
+    "v1.1-surface": dict(window=365, min_runs=2, shrink_k=0.0, cross_surface_w=0.5, ref_fallback=False, prefix="u11s_"),
+    "v1.1-ref": dict(window=365, min_runs=2, shrink_k=0.0, cross_surface_w=0.0, ref_fallback=True, prefix="u11r_"),
 }
+COMPARISON_VARIANTS = ["v1.1", "v1.1-window", "v1.1-onerun", "v1.1-surface", "v1.1-ref"]
 
 
 def _n(runs) -> float:
@@ -356,3 +362,35 @@ class RuleV1Model:
 
     def fingerprint(self) -> str:
         return f"{RULE_V1_VERSION}:{self.variant}:{MODE}"
+
+
+# ---------- 役割A：学習モデルの上位3頭に、別基準（ルール）の8項目の評価を添える ----------
+
+DISAGREE_BOTTOM = 0.3   # 暫定：学習モデルの1位が、ルールの総合点で評価できた馬の下位3割なら「食い違い」の印
+GROUP_LABELS = {"ability": "能力", "recent": "近走", "distance": "距離", "course": "コース", "going": "馬場",
+                "pace": "展開脚", "draw": "枠", "weight_rider": "斤量・騎手"}
+
+
+def rule_view(g: pd.DataFrame, p_top3, time_point: str, top: int = 3) -> dict:
+    """g：1レースの特徴（u_* 列を含む）、p_top3：学習モデルの3着内確率（g と同じ順）。
+    学習モデルがその馬を選んだ理由ではない。別基準での評価を並べるだけ。欠測は「未評価」。"""
+    sr = score_race(g, time_point)
+    tied = sr.attrs.get("all_tied", {})
+    order = np.argsort(-np.asarray(p_top3, dtype=float))[:top]
+    horses = []
+    for i in order:
+        row = sr.iloc[i]
+        groups = {GROUP_LABELS[k]: ("未評価" if row[k] is None or pd.isna(row[k]) or tied.get(k) else int(row[k])) for k in GROUPS}
+        n_eval = sum(v != "未評価" for v in groups.values())
+        horses.append({"n": int(g["horse_number"].iloc[i]), "groups": groups, "evaluated": f"{n_eval}/8",
+                       "total": "未評価" if row["rule_total"] is None or pd.isna(row["rule_total"]) else round(float(row["rule_total"]), 2)})
+    totals = pd.to_numeric(sr["rule_total"], errors="coerce")
+    first = order[0]
+    if pd.isna(totals.iloc[first]) or totals.notna().sum() < 3:
+        flag = "判定できない（ルールの総合点が未評価）"
+    else:
+        pct = (totals.rank(ascending=False, method="average").iloc[first] - 1) / (totals.notna().sum() - 1)
+        flag = "食い違い" if pct >= 1 - DISAGREE_BOTTOM else "なし"
+    return {"basis": f"{RULE_V1_VERSION}（{MODE}）", "note": "学習モデルの選んだ理由ではなく、別基準での評価",
+            "top": horses, "disagreement": flag, "disagreement_rule": f"学習モデルの1位がルール総合点の下位{int(DISAGREE_BOTTOM*100)}%（暫定）",
+            "used_for_allocation": False}

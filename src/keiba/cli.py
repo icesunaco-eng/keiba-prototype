@@ -8,6 +8,7 @@
   keiba collect tick      これからのレースの出馬表・オッズ・結果をJRA公式から時刻つきで集める（5分ごとに呼ぶ）
   keiba collect install   上を5分ごとに動かす launchd の設定ファイルを書く（読み込みは表示するコマンドで）
   keiba live run          集めたページで予想・配分・精算（tick が新しいページを取ったときにも自動で動く）
+  keiba live check        週末の合格判定：三連複オッズを正しく読めたか（時点ごと）
   keiba live wallets      仮想の財布（方式×配分）の成績
   keiba all        上を順に全部
 """
@@ -40,7 +41,9 @@ def cmd_features(paths, args):
     from .models.rule_v1 import build_utilities
     feat = build_features(races, runners)
     feat = feat.merge(build_utilities(races, runners), on=["runner_key", "race_key"], how="left")
-    feat = feat.merge(build_utilities(races, runners, "v1.1").drop(columns=["is_flat"]), on=["runner_key", "race_key"], how="left")
+    from .models.rule_v1 import COMPARISON_VARIANTS
+    for v in COMPARISON_VARIANTS:
+        feat = feat.merge(build_utilities(races, runners, v).drop(columns=["is_flat"]), on=["runner_key", "race_key"], how="left")
     feat.to_parquet(paths.tables_dir / "features.parquet", index=False)
     print(f"特徴 {feat.shape[0]:,}行 × {feat.shape[1]}列 → {paths.tables_dir / 'features.parquet'}")
 
@@ -86,11 +89,20 @@ def _notify(title: str, body: str):
 
 
 def cmd_live(paths, args):
-    from .live.wallet import run_live, wallet_summary
+    from .live.wallet import odds_check, run_live, wallet_summary
     if args.action == "run":
         print(json.dumps(run_live(paths), ensure_ascii=False))
+    elif args.action == "check":
+        df = odds_check(paths)
+        out = paths.data_dir / "live" / "odds_check.csv"
+        df.to_csv(out, index=False)
+        print(df.to_string(index=False) if len(df) else "まだ判定するページがない")
+        if len(df):
+            print(f"合格 {int(df['pass'].sum())} / {len(df)}（1h・15m）→ {out}")
     else:
-        print(wallet_summary(paths).to_string(index=False))
+        w = wallet_summary(paths)
+        print(w.to_string(index=False))
+        print(w.attrs.get("note", ""))
 
 
 def cmd_collect(paths, args):
@@ -149,7 +161,7 @@ def main(argv=None):
     p = sub.add_parser("collect")
     p.add_argument("action", choices=["tick", "install"])
     p = sub.add_parser("live")
-    p.add_argument("action", choices=["run", "wallets"])
+    p.add_argument("action", choices=["run", "check", "wallets"])
     args = ap.parse_args(argv)
     paths = load_paths(args.paths)
     if args.cmd == "all":

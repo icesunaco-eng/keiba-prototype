@@ -1,18 +1,22 @@
 """これからのレースを、集めた発走前のページで予想し、配分して、レース後に精算する（仮想の財布。実購入はしない）。
 
   予想の時点：24h・1h・15m（出馬表は、その時点までに取った一番新しいもの）
-  予想の方式：ml_lgbm（学習モデル）・ml_market（学習＋その時点の単勝オッズ）・rule（あいす v1.0）・rule_v11（案）
-  配分：三連複オッズが読めたときだけ。equal_payout・ev_weighted・kelly の3つの財布（方式×配分ごとに別の財布）
-  精算：15m の配分を使う（無ければ 1h）。設計どおり、15m で変えてよいのは配分・削除・見送りだけ
+  財布を持つ方式：ml_lgbm（学習モデル）・ml_market（学習＋その時点の単勝オッズ）
+  ルール方式（v1.0 と比較版）：役割A（説明・確認役）。予想は比較のために台帳へ残すが、配分はしない。
+    学習モデルの予想には、上位3頭のルール8項目の評価と「食い違い」の印を添える（配分には使わない）
+  配分：equal_payout・ev_weighted・kelly。次の「オッズの合格判定」を全部満たしたときだけ：
+    - 三連複の組が、出走する頭数から決まる数とちょうど一致（欠落なし）で、重複なし
+    - オッズの発表時刻が読めて、取得時刻との差が STALE_MINUTES 分以内（古いオッズでない）
+    - 取得時刻が発走時刻より前
+  取消・除外は、その時点までに取った出馬表に載っていたものだけ反映する
+  精算：15m の配分を使う（無ければ 1h）
   台帳の版は "live-<コードのハッシュ>"。過去の検証の版とは混ぜない
-
-オッズの読取は、最初の実物で確かめるまで自己照合（頭数・組の数）が合ったものだけ使う。
 """
 from __future__ import annotations
 
 import json
 import pickle
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -27,9 +31,12 @@ from ..models.trio import fit_calibration
 from ..settle import settle_trio
 from . import jra
 
-LIVE_METHODS = ("ml_lgbm", "ml_market", "rule", "rule_v11")
+WALLET_METHODS = ("ml_lgbm", "ml_market")
+RULE_METHODS = {"rule": "v1.0", **{f"rule_{v.replace('.', '').replace('-', '_')}": v for v in rule_v1.COMPARISON_VARIANTS}}
 ALLOC_METHODS = ("equal_payout", "ev_weighted", "kelly")
 TP_ORDER = {"24h": 0, "1h": 1, "15m": 2}
+STALE_MINUTES = 15
+JST = "+09:00"
 
 
 def _snapshots(root: Path) -> pd.DataFrame:
@@ -43,43 +50,76 @@ def _read(root: Path, rec) -> str:
     return (root / rec["path"]).read_text(encoding="utf-8")
 
 
+def odds_gate(trio: dict, trio_rec, race: dict) -> dict:
+    """三連複オッズの合格判定（週末の確認の物差し）。"""
+    g = {"trio_found": trio.get("found"), "trio_expected": trio.get("expected"), "duplicates": trio.get("duplicates"),
+         "unreadable": trio.get("unreadable"), "fetched_at": None, "odds_time": None, "snapshot_sha256": None}
+    reasons = []
+    if trio_rec is None:
+        reasons.append("三連複オッズのページが無い")
+    else:
+        g["fetched_at"], g["snapshot_sha256"] = trio_rec["fetched_at"], trio_rec["sha256"]
+        g["odds_time"] = trio.get("odds_time")
+        if not trio.get("ok"):
+            reasons.append(f"組の数が合わない・重複（{trio.get('found')}/{trio.get('expected')}・重複{trio.get('duplicates')}）")
+        fetched = datetime.fromisoformat(trio_rec["fetched_at"])
+        post = datetime.fromisoformat(f"{race['race_date']}T{race['post_time']}:00{JST}")
+        if fetched >= post:
+            reasons.append("取得が発走後")
+        if not g["odds_time"]:
+            reasons.append("オッズの時刻が分からない")
+        else:
+            t = datetime.fromisoformat(f"{race['race_date']}T{g['odds_time']}:00{JST}")
+            if fetched - t > timedelta(minutes=STALE_MINUTES) or t - fetched > timedelta(minutes=1):
+                reasons.append(f"古いオッズ（発表 {g['odds_time']}・取得 {fetched:%H:%M}）")
+    g["pass"] = not reasons
+    g["reasons"] = reasons
+    return g
+
+
 def live_tables(root: Path, state: dict, snaps: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """集めたページから、正規の表と同じ形の races / runners と、時点ごとの入力を作る。
-    結果が取れたレースは確定行（過去走として使う）、まだのレースは pending 行。"""
+    """集めたページから、正規の表と同じ形の races / runners と、時点ごとの入力を作る。"""
     races, runners, inputs = [], [], {}
     for rk, r in state.get("races", {}).items():
-        s = snaps[(snaps["race_key"] == rk)] if len(snaps) else snaps
+        s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
         races.append({"race_key": rk, "race_date": r["race_date"], "venue": r["venue"], "race_number": r["race_number"],
                       "surface": r.get("surface"), "distance_m": r.get("distance_m"), "going": None, "race_class": None,
-                      "field_size": r.get("field_size"), "attr_source": "jra_live", "race_type": "障害候補" if r.get("surface") == "障害" else "平地候補"})
+                      "field_size": r.get("field_size"), "attr_source": "jra_live",
+                      "race_type": "障害候補" if r.get("surface") == "障害" else "平地候補"})
         res = s[s["kind"] == "result"] if len(s) else s
         if len(res):
             parsed = jra.parse_result(_read(root, res.iloc[-1]))
-            card = {}
             cards = s[s["kind"] == "card"]
-            if len(cards):
-                card = {c["horse_number"]: c for c in jra.parse_card(_read(root, cards.iloc[-1]))}
+            card = {c["horse_number"]: c for c in jra.parse_card(_read(root, cards.iloc[-1]))} if len(cards) else {}
             for row in parsed["rows"]:
-                c = card.get(row["horse_number"], {})
-                runners.append(_runner(rk, r, {**c, **{k: v for k, v in row.items() if v is not None}}, row["status"]))
+                runners.append(_runner(rk, r, {**card.get(row["horse_number"], {}), **{k: v for k, v in row.items() if v is not None}}, row["status"]))
             inputs[(rk, "result")] = parsed
             continue
         for tp in ("24h", "1h", "15m"):
             cards = s[(s["kind"] == "card") & s["time_point"].map(lambda x: TP_ORDER.get(x, 9) <= TP_ORDER[tp])] if len(s) else s
             if not len(cards):
                 continue
-            card = [c for c in jra.parse_card(_read(root, cards.iloc[-1])) if c["horse_number"]]
+            card_all = [c for c in jra.parse_card(_read(root, cards.iloc[-1])) if c["horse_number"]]
+            scratched = sorted(c["horse_number"] for c in card_all if c.get("scratch"))
+            card = [c for c in card_all if not c.get("scratch")]
             if len(card) < 3:
                 continue
-            field = len(card)
             win = s[(s["kind"].isin(["odds_win", "odds_first"])) & (s["time_point"] == tp)]
             trio = s[(s["kind"] == "odds_trio") & (s["time_point"] == tp)]
             if tp == "15m" and not (len(win) or len(trio)):
                 continue  # 15分前は配分の見直しだけ。新しいオッズが無ければ作らない
-            w = jra.parse_win_odds(_read(root, win.iloc[-1]), field) if len(win) else {"ok": False, "odds": {}}
-            t = jra.parse_trio_odds(_read(root, trio.iloc[-1]), field) if len(trio) else {"ok": False, "odds": {}}
-            inputs[(rk, tp)] = {"card": card, "win": w, "trio": t,
-                                "snapshots": [x for x in (cards.iloc[-1]["sha256"], *(win["sha256"].tolist()[-1:]), *(trio["sha256"].tolist()[-1:]))]}
+            w = jra.parse_win_odds(_read(root, win.iloc[-1]), len(card)) if len(win) else {"ok": False, "odds": {}}
+            t = {"ok": False, "odds": {}}
+            trio_rec = trio.iloc[-1] if len(trio) else None
+            if trio_rec is not None:
+                page = _read(root, trio_rec)
+                t = jra.parse_trio_odds(page, len(card))
+                t["odds_time"] = jra.parse_odds_time(page)
+            inputs[(rk, tp)] = {"card": card, "scratched": scratched, "win": w, "trio": t,
+                                "gate": odds_gate(t, trio_rec, r) if tp != "24h" or trio_rec is not None else
+                                {"pass": False, "reasons": ["前日はオッズを使わない（未発売のことが多い）"]},
+                                "card_fetched_at": cards.iloc[-1]["fetched_at"],
+                                "snapshots": [cards.iloc[-1]["sha256"], *win["sha256"].tolist()[-1:], *trio["sha256"].tolist()[-1:]]}
         last = max((tp for tp in ("24h", "1h", "15m") if (rk, tp) in inputs), key=TP_ORDER.get, default=None)
         if last:
             for c in inputs[(rk, last)]["card"]:
@@ -100,7 +140,7 @@ def _runner(rk, r, c, status):
 
 
 def _models(paths, feat_hist: pd.DataFrame, tp: str, day: str):
-    """学習モデルと市場組み合わせを、その日までのデータで1日1回学習してキャッシュする。"""
+    """学習モデルと市場組み合わせを、その日までのデータで1日1回学習してキャッシュする。ルールは学習しない（較正だけ）。"""
     cache = paths.data_dir / "live" / "models" / f"{day}-{tp}-{code_hash()[:8]}.pkl"
     if cache.exists():
         return pickle.loads(cache.read_bytes())
@@ -108,14 +148,32 @@ def _models(paths, feat_hist: pd.DataFrame, tp: str, day: str):
     cut = pd.Timestamp(day) - pd.Timedelta(days=ev.CALIB_DAYS)
     train, calib = feat_hist[feat_hist["race_date"] < cut], feat_hist[feat_hist["race_date"] >= cut]
     out = {}
-    for m in LIVE_METHODS:
+    for m in WALLET_METHODS:
         model = ev.make_model(m, tp)
         model.fit(train)
         if hasattr(model, "fit_blend"):
             model.fit_blend(calib, ev._calibration_set)
         out[m] = (model, fit_calibration(ev._calibration_set(calib, model.score(calib))))
+    for m, v in RULE_METHODS.items():
+        model = rule_v1.RuleV1Model(tp, v)
+        out[m] = (model, fit_calibration(ev._calibration_set(calib, model.score(calib))))
     cache.write_bytes(pickle.dumps(out))
     return out
+
+
+def _features(paths, lr, lrun):
+    races = pd.read_parquet(paths.tables_dir / "races.parquet")
+    runners = pd.read_parquet(paths.tables_dir / "runners.parquet")
+    lr = lr[~lr["race_key"].isin(races["race_key"])]
+    lrun = lrun[~lrun["runner_key"].isin(runners["runner_key"])]
+    all_races = pd.concat([races, lr], ignore_index=True)
+    all_run = pd.concat([runners, lrun], ignore_index=True)
+    feat = build_features(all_races, all_run)
+    feat = feat.merge(rule_v1.build_utilities(all_races, all_run), on=["runner_key", "race_key"], how="left")
+    for v in rule_v1.COMPARISON_VARIANTS:
+        feat = feat.merge(rule_v1.build_utilities(all_races, all_run, v).drop(columns=["is_flat"]), on=["runner_key", "race_key"], how="left")
+    pending = lrun.loc[lrun["status"] == "pending", "race_key"]
+    return feat, ev.eligible_features(feat[~feat["race_key"].isin(pending)], all_races, 5)
 
 
 def run_live(paths, log=print) -> dict:
@@ -125,16 +183,7 @@ def run_live(paths, log=print) -> dict:
     lr, lrun, inputs = live_tables(root, state, snaps)
     if lrun.empty:
         return {"predicted": 0, "settled": 0}
-    races = pd.read_parquet(paths.tables_dir / "races.parquet")
-    runners = pd.read_parquet(paths.tables_dir / "runners.parquet")
-    lr = lr[~lr["race_key"].isin(races["race_key"])]
-    lrun = lrun[~lrun["runner_key"].isin(runners["runner_key"])]
-    all_races = pd.concat([races, lr], ignore_index=True)
-    all_run = pd.concat([runners, lrun], ignore_index=True)
-    feat = build_features(all_races, all_run)
-    feat = feat.merge(rule_v1.build_utilities(all_races, all_run), on=["runner_key", "race_key"], how="left")
-    feat = feat.merge(rule_v1.build_utilities(all_races, all_run, "v1.1").drop(columns=["is_flat"]), on=["runner_key", "race_key"], how="left")
-    hist = ev.eligible_features(feat[~feat["race_key"].isin(lrun.loc[lrun["status"] == "pending", "race_key"])], all_races, 5)
+    feat, hist = _features(paths, lr, lrun)
     version = f"live-{code_hash()[:8]}"
     led = Ledger(paths.ledger_path)
     done = {(p["race_key"], p["time_point"], p["method"]) for p in led.predictions(version)}
@@ -143,11 +192,12 @@ def run_live(paths, log=print) -> dict:
         if tp == "result":
             continue
         g = feat[feat["race_key"] == rk].sort_values("horse_number")
+        g = g[g["horse_number"].isin([c["horse_number"] for c in inp["card"]])]
         if len(g) < 3:
             continue
         g = g.assign(live_win_odds=g["horse_number"].map(inp["win"]["odds"]) if inp["win"]["ok"] else np.nan)
         models = _models(paths, hist, "1h" if tp == "15m" else tp, str(g["race_date"].iloc[0].date()))
-        for m in LIVE_METHODS:
+        for m in (*WALLET_METHODS, *RULE_METHODS):
             if (rk, tp, m) in done:
                 continue
             model, cal = models[m]
@@ -156,21 +206,30 @@ def run_live(paths, log=print) -> dict:
                     continue
                 model.odds_col = "live_win_odds"
             sc = np.asarray(model.score(g), dtype=float)
-            rg = (rule_v1.score_frame(g, tp) if m == "rule" else
-                  rule_v1.score_frame(g, tp, rule_v1.VARIANTS["v1.1"]["prefix"]) if m == "rule_v11" else None)
-            payload = ev.predict_race(g, sc, cal, m, tp, version, rg)
-            nums = g["horse_number"].astype(int).tolist()
-            probs = {"-".join(map(str, sorted(nums[i] for i in c))): p
-                     for c, p in ev.trio_probs(cal.strength(sc), cal.gamma).items()}
-            odds = inp["trio"]["odds"] if inp["trio"]["ok"] else None
-            payload["allocation"] = {a: (lambda x: {"status": x.status, "stakes": x.stakes, "total": x.total})(
-                allocate(probs, odds, a, calibrated=cal.n_races >= 30)) for a in ALLOC_METHODS}
-            payload["inputs"] = {"snapshots": inp["snapshots"], "win_odds_ok": inp["win"]["ok"], "trio_odds_ok": inp["trio"]["ok"]}
+            if m in RULE_METHODS:
+                v = RULE_METHODS[m]
+                rg = rule_v1.score_frame(g, tp, rule_v1.VARIANTS[v]["prefix"])
+                payload = ev.predict_race(g, sc, cal, "rule", tp, version, rg)
+                payload["notes"] = [f"ルール {v}（役割A・比較用。配分しない）"]
+                payload["allocation"] = {"status": "not_allocated_role_a"}
+            else:
+                payload = ev.predict_race(g, sc, cal, m, tp, version, None)
+                nums = g["horse_number"].astype(int).tolist()
+                probs = {"-".join(map(str, sorted(nums[i] for i in c))): p
+                         for c, p in ev.trio_probs(cal.strength(sc), cal.gamma).items()}
+                gate = inp["gate"]
+                odds = inp["trio"]["odds"] if gate["pass"] else None
+                payload["allocation"] = {a: (lambda x: {"status": x.status if gate["pass"] else "not_allocated_gate",
+                                                        "stakes": x.stakes, "total": x.total})(
+                    allocate(probs, odds, a, calibrated=cal.n_races >= 30)) for a in ALLOC_METHODS}
+                payload["odds_gate"] = gate
+            payload["inputs"] = {"snapshots": inp["snapshots"], "card_fetched_at": inp["card_fetched_at"],
+                                 "scratched_known": inp["scratched"], "win_odds_ok": inp["win"]["ok"]}
             payload["period"] = "live"
             led.add_prediction(rk, tp, m, version, payload, sha(canonical(inp["snapshots"]))[:16],
                                sha(model.fingerprint() + canonical(cal.__dict__))[:16], code_hash())
             n_pred += 1
-    # 精算
+    # 精算（財布を持つ方式だけ）
     preds = {(p["race_key"], p["time_point"], p["method"]): p for p in led.predictions(version)}
     settled = {(s["race_key"], s["method"], s["wallet"]) for s in led.settlements(version)}
     for (rk, tp), res in inputs.items():
@@ -180,7 +239,7 @@ def run_live(paths, log=print) -> dict:
         finishers = sum(r["status"] == "finished" for r in rows)
         scratched = {r["horse_number"] for r in rows if r["status"] in ("withdrawn", "excluded")}
         payouts = {p["combo"]: p["payout_yen"] for p in res["trio_payouts"]} or None
-        for m in LIVE_METHODS:
+        for m in WALLET_METHODS:
             p = preds.get((rk, "15m", m)) or preds.get((rk, "1h", m))
             if not p:
                 continue
@@ -199,6 +258,23 @@ def run_live(paths, log=print) -> dict:
     return {"predicted": n_pred, "settled": n_set, "version": version}
 
 
+def odds_check(paths) -> pd.DataFrame:
+    """週末の合格判定：時点ごとに、三連複オッズを正しく読めたか（レースID・取得時刻・原本のハッシュつき）。"""
+    root = paths.data_dir / "live"
+    state = json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {"races": {}}
+    _, _, inputs = live_tables(root, state, _snapshots(root))
+    rows = []
+    for (rk, tp), inp in sorted(inputs.items()):
+        if tp == "result":
+            continue
+        g = inp["gate"]
+        rows.append({"race_key": rk, "time_point": tp, "pass": g["pass"], "reasons": " / ".join(g["reasons"]),
+                     "trio": f"{g.get('trio_found')}/{g.get('trio_expected')}", "duplicates": g.get("duplicates"),
+                     "odds_time": g.get("odds_time"), "fetched_at": g.get("fetched_at"),
+                     "scratched_known": ",".join(map(str, inp["scratched"])), "snapshot_sha256": g.get("snapshot_sha256")})
+    return pd.DataFrame(rows)
+
+
 def wallet_summary(paths) -> pd.DataFrame:
     led = Ledger(paths.ledger_path, read_only=True)
     rows = [s for s in led.settlements() if s["version"].startswith("live-")]
@@ -209,4 +285,5 @@ def wallet_summary(paths) -> pd.DataFrame:
     out = df.groupby(["method", "wallet"]).agg(races=("race_key", "nunique"), bet_races=("stake", lambda s: int((s > 0).sum())),
                                                stake=("stake", "sum"), returned=("returned", "sum")).reset_index()
     out["roi"] = (out["returned"] / out["stake"].where(out["stake"] > 0)).round(4)
+    out.attrs["note"] = "初週は回収率の達成判定をしない（あいすとの取り決め）。実購入はしない"
     return out
