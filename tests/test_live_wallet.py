@@ -30,7 +30,7 @@ def win_html():
     return "<table>" + "".join(f'<tr><td class="num">{n}</td><td class="odds_tan">{2.0 + n}</td></tr>' for n in range(1, N + 1)) + "</table>"
 
 
-def trio_html(time="14時45分", dup=False, drop=False):
+def trio_html(time="14時25分", dup=False, drop=False):
     out = [f"<p>{time}現在のオッズ</p>"] if time else []
     for a, b in combinations(range(1, N + 1), 2):
         rows = "".join(f'<tr><th class="num">{c}</th><td class="odds">{10.0 + a + b + c}</td></tr>' for c in range(b + 1, N + 1))
@@ -61,7 +61,7 @@ def test_parsers_self_check():
     assert r["trio_payouts"] == [{"combo": "1-2-3", "payout_yen": 4560}] and r["rows"][0]["finish_time_s"] == 95.1
 
 
-def _setup(tmp_path, trio=None, card=None):
+def _setup(tmp_path, trio=None, card=None, at=(14, 30), tp="1h"):
     paths = Paths(data_dir=tmp_path)
     races, runners = make_tables(n_days=34, races_per_day=6, field=10, horses=60)
     paths.tables_dir.mkdir(parents=True)
@@ -69,11 +69,11 @@ def _setup(tmp_path, trio=None, card=None):
     runners.to_parquet(paths.tables_dir / "runners.parquet")
     ids = [f"H{h:04d}" for h in range(N)]
     root = tmp_path / "live"
-    col = Collector(root, client=None, now=lambda: datetime(2025, 8, 30, 14, 50, tzinfo=JST))
+    col = Collector(root, client=None, now=lambda: datetime(2025, 8, 30, *at, tzinfo=JST))
     col.state["races"][RK] = {"race_date": "2025-08-30", "venue": "東京", "race_number": 11, "post_time": "15:40",
                               "surface": "芝", "distance_m": 1600, "field_size": N}
     for kind, page in (("card", card or card_html(ids)), ("odds_win", win_html()), ("odds_trio", trio or trio_html())):
-        col._save(RK, kind, "1h", "/JRADB/x", "c", page)
+        col._save(RK, kind, tp, "/JRADB/x", "c", page)
     col._write_state()
     return paths, col
 
@@ -124,7 +124,8 @@ def _gate(tmp_path, **kw):
 
 def test_gate_passes_clean_odds(tmp_path):
     r = _gate(tmp_path)
-    assert r["pass"] and r["trio"] == "56/56" and r["odds_time"] == "14:45" and len(r["snapshot_sha256"]) == 64
+    assert r["pass"] and r["trio"] == "56/56" and r["odds_time"] == "14:25" and len(r["snapshot_sha256"]) == 64
+    assert r["deadline"] == "2025-08-30T14:40+09:00"
 
 
 def test_gate_rejects_duplicates(tmp_path):
@@ -139,6 +140,20 @@ def test_gate_rejects_missing_combos(tmp_path):
 
 def test_gate_rejects_stale_and_unknown_time(tmp_path):
     assert "古いオッズ" in _gate(tmp_path, trio=trio_html(time="14時00分"))["reasons"]
+
+
+def test_gate_rejects_capture_after_time_point_deadline(tmp_path):
+    # 発走10分前に取ったものを「15分前」の合格にしない
+    from keiba.live.wallet import odds_check
+    orig = jra.parse_card
+    jra.parse_card = lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)]
+    try:
+        paths, _ = _setup(tmp_path, trio=trio_html(time="15時29分"), at=(15, 30), tp="15m")
+        df = odds_check(paths)
+    finally:
+        jra.parse_card = orig
+    # 出馬表も締切（15:25）後なので、15m の入力そのものが作られない
+    assert df.empty or not df.set_index("time_point").loc["15m", "pass"]
     assert "時刻が分からない" in _gate(tmp_path / "b", trio=trio_html(time=None))["reasons"]
 
 

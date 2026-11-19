@@ -3,9 +3,9 @@
 1回の tick でやること：
   1. 30分に1回、JRAの出馬表の一覧から開催とレース（発走時刻・出馬表とオッズのリンク）を更新する
   2. 各レースについて、予想の時点の窓に入っていて、まだ取っていなければ取る
-       24h ：発走の24時間前〜22時間前   出馬表・単勝・三連複（前日発売の前なら「オッズ未発表」と記録）
-       1h  ：発走の65分前〜45分前       出馬表（馬体重入り）・単勝・三連複
-       15m ：発走の17分前〜7分前        単勝・三連複
+       24h ：締切は発走の24時間前。その15分前から締切まで   出馬表・単勝・三連複（未発売なら「オッズ未発表」と記録）
+       1h  ：締切は発走の60分前。その15分前から締切まで     出馬表（馬体重入り）・単勝・三連複
+       15m ：締切は発走の15分前。その15分前から締切まで     出馬表（取消の確認）・単勝・三連複
        result：発走の30分後〜6時間後     レース結果（払戻）
   3. 取ったページはそのまま保存し、snapshots.jsonl に「いつ・何を・どこに・ハッシュ」を1行足す
 
@@ -24,12 +24,20 @@ from lxml import html as lxml_html
 from . import jra
 
 JST = timezone(timedelta(hours=9))
+# 時点ごとの締切（発走の何分前か）。その時点の予想には、締切までに取ったページだけを使う（あいすとの取り決め）
+DEADLINE_MIN = {"24h": 24 * 60, "1h": 60, "15m": 15}
+CAPTURE_LEAD_MIN = 15  # 締切の15分前から締切までの間に取る（5分ごとの実行で3回の機会）
 WINDOWS = {  # 発走からの相対（分）：[開始, 終了)
-    "24h": (-24 * 60, -22 * 60),
-    "1h": (-65, -45),
-    "15m": (-17, -7),
+    **{tp: (-d - CAPTURE_LEAD_MIN, -d) for tp, d in DEADLINE_MIN.items()},
     "result": (30, 6 * 60),
 }
+
+
+def deadline(race_date: str, post_time: str, tp: str) -> datetime:
+    post = datetime.fromisoformat(f"{race_date}T{post_time}:00+09:00")
+    return post - timedelta(minutes=DEADLINE_MIN[tp])
+
+
 REFRESH_MINUTES = 30
 ODDS_TABS = {"win": ("単勝",), "trio": ("3連複", "３連複")}
 
@@ -126,7 +134,7 @@ class Collector:
             for path, cname in (r.get("result_links") or [])[:1]:
                 saved.append(self._save(rk, "result", tp, path, cname, self.client.get(path, cname)))
         else:
-            if tp in ("24h", "1h") and r.get("card_cname"):
+            if r.get("card_cname"):  # 出馬表は毎時点取る（取消を、その時点の締切までの情報で反映するため）
                 saved.append(self._save(rk, "card", tp, "/JRADB/accessD.html", r["card_cname"],
                                         self.client.get("/JRADB/accessD.html", r["card_cname"])))
             odds_links = r.get("odds_links") or []

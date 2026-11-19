@@ -71,7 +71,7 @@ def _collector(tmp_path, when, odds=True, result=False):
 
 
 def test_time_point_windows_and_no_double_capture(tmp_path):
-    col, clock = _collector(tmp_path, datetime(2026, 11, 22, 14, 50, tzinfo=JST))  # 発走50分前 → 1h の窓
+    col, clock = _collector(tmp_path, datetime(2026, 11, 22, 14, 30, tzinfo=JST))  # 発走70分前 → 1h の窓（締切は60分前）
     out = col.tick()
     assert out["saved"] >= 3
     kinds = [json.loads(x)["kind"] for x in (tmp_path / "snapshots.jsonl").read_text().splitlines()]
@@ -80,12 +80,12 @@ def test_time_point_windows_and_no_double_capture(tmp_path):
     assert rec["time_point"] == "1h" and rec["race_key"] == "2026-11-22|京都|11" and len(rec["sha256"]) == 64
     assert (tmp_path / rec["path"]).exists()
     assert col.tick()["saved"] == 0  # 同じ窓では二度取らない
-    clock["now"] = datetime(2026, 11, 22, 15, 30, tzinfo=JST)  # 10分前 → 15m
+    clock["now"] = datetime(2026, 11, 22, 15, 15, tzinfo=JST)  # 25分前 → 15m の窓（締切は15分前）
     assert col.tick()["saved"] >= 2
 
 
 def test_odds_not_yet_on_sale_is_recorded(tmp_path):
-    col, _ = _collector(tmp_path, datetime(2026, 11, 21, 16, 0, tzinfo=JST), odds=False)  # 前日（24h の窓）
+    col, _ = _collector(tmp_path, datetime(2026, 11, 21, 15, 30, tzinfo=JST), odds=False)  # 前日（24h の窓。締切は24時間前）
     col.tick()
     kinds = [json.loads(x)["kind"] for x in (tmp_path / "snapshots.jsonl").read_text().splitlines()]
     assert kinds == ["card", "odds_unavailable"]
@@ -123,3 +123,8 @@ def test_client_spacing_and_cap():
     except RuntimeError:
         pass
     assert calls == ["https://www.jra.go.jp/JRADB/accessD.html"] * 2
+
+
+def test_no_capture_after_deadline(tmp_path):
+    col, _ = _collector(tmp_path, datetime(2026, 11, 22, 15, 32, tzinfo=JST))  # 発走8分前：15m の締切を過ぎている
+    assert col.tick()["saved"] == 0
