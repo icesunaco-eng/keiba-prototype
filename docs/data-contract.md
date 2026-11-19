@@ -1,0 +1,44 @@
+# データの置き方と列
+
+## 置き場所（`~/.heroines/paths.json` の `"keiba"`）
+
+| キー | 中身 | 今の置き場所の例 |
+|---|---|---|
+| `integrated_dir` | 馬ID候補の統合版（`combined/runner_candidates.jsonl`・`combined/races.jsonl`・`jra-baseline/expected_races.jsonl`） | `~/競馬/馬ID候補統合_6893_完了_20261119` |
+| `qa_zip` | 着順・時計・展開の統合ZIP（`data/runner_results.jsonl`・`data/race_flow.jsonl`） | `~/競馬/照合台帳受領/horse-two-year-flow-results-qa-checked.zip` |
+| `myu_zips` | netkeiba 結果表を含むZIP（`raw/netkeiba/**/result_table.dom.html` と `capture_metadata.json`） | `~/競馬/みゅう引継ぎ受領/mini-*.zip` |
+| `heroines_dirs` | HEROINES 収集フォルダ（`日付/場/NR/raw/result.html`） | `~/競馬/HEROINES並行取得*` |
+| `noa_v3_dir` | のあ v3（`races.jsonl`） | `~/Documents/Codex/…/keiba-glyph-20261117-4/v3` |
+| `jra_pdf_dirs` | JRA成績PDF（日・場別）を探すフォルダ | 複数可 |
+| `data_dir` | 出力先（省略時はリポジトリの `data/`） | |
+
+## 正規の表（`data/tables/`）
+
+- **races.parquet**：race_key（`日付|場|R`）、日付、場、R、netkeiba の race_id、担当（noa/mini/aisu）、芝ダ、距離、回り、馬場、天候、クラス、頭数、発走時刻、レースの上り3F/4F、出走表の項目の出どころ
+- **runners.parquet**：runner_key（`race_key|馬番`）、馬ID（netkeiba、全行あり）、馬名、状態（finished/did_not_finish/withdrawn/excluded）、着順、同着、走破時計、枠、性、齢、斤量、騎手キー・調教師キー（`nk:<netkeibaのID>`）、馬体重・増減、確定単勝オッズ・人気、上り3F、通過順、着差
+- **payouts.parquet**：三連複の払戻（組・円・出どころ・照合結果）
+- **conflicts.csv**：同じ値が複数の資料で違ったもの
+- **build_report.json**：件数・欠け・照合の結果
+
+## 資料の優先と照合
+
+- 着順・時計・状態は統合版（QA済み）を正とする
+- 出走表の項目は netkeiba 結果ページ → netkeiba 結果表 → のあ v3 の順に使い、違いは conflicts.csv に残す（計画では「PDF優先」としていたが、どれも同じ成績表の転記で、netkeiba には騎手・調教師のIDがあるため、IDで揃えられる netkeiba を先にした）
+- 騎手・調教師は netkeiba のIDで揃える。のあ v3 だけのレースは、同じ馬の行が両方にある期間から「名前→ID」の対応を作って当てる
+- 三連複の払戻は netkeiba 結果ページを優先し、無いレースは JRA成績PDF から読む。PDFの額は、同じ段の「3連複票数 計X 的中Y」から計算した額（X×0.75÷Y×100、10円未満切捨）と ±10円で一致したものだけ使う
+
+## 使える時点（`src/keiba/schema.py`）
+
+| 列 | 前日（24h） | 1時間前 | 15分前 |
+|---|---|---|---|
+| 過去走から作る特徴、枠・馬番・斤量・騎手・調教師・距離・芝ダ・クラス・頭数 | ○ | ○ | ○ |
+| 馬場・天候・馬体重・増減 | × | ○ | ○ |
+| 確定オッズ・確定人気・そのレースの着順/時計/上り | × | × | × |
+
+確定オッズは発走後の値なので特徴に入れない。比較用の「人気順」モデルだけが使い、レポートで「比較専用」と明記する。
+
+## 統合版に足してほしいもの
+
+1. **あいす分 1,876R（2026-03-21〜2026-11-15）の出走表の項目**：netkeiba の結果ページ（HTML）か、JRA成績PDFがあれば、`heroines_dirs` か `jra_pdf_dirs` に置くだけで読める。今の統合版には、この期間はIDと着順・時計しかない
+2. **三連複の払戻**：みに分（netkeiba 結果表だけのレース）約1,600Rは払戻が無い。結果ページかPDFがあれば精算できる
+3. **発走前のオッズ**（任意）：検証B（発走前オッズでの回収率）と配分に必要。時刻つきで、発走前に取得したものだけ

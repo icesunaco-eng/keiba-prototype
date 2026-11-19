@@ -1,19 +1,50 @@
-# 競馬プロトタイプ
+# 競馬プロトタイプ（三連複予想の検証）
 
-非公開の開発・指摘追跡用リポジトリ。実賭け・自動投票・本番接続は対象外。
+JRAの三連複を、過去データで予想して検証するための試作です。設計は Notion の「設計Y書 v0.1」に従っています。
+**実際の購入・自動投票・本番接続はしません。**
 
-## 状態
-- main は運用記録のみ。採用済みの実装版はまだ宣言していない。
-- `reference/review-14` は既存26ファイル固定版のうち公開資料・実データ依存試験を除外した参照コピー。独立検証 FAIL（高1・中4）。採用版ではない。
-- 🤍20261115-15 は修正中。未完成コードを混ぜない。完了固定版は別ブランチで検証してから扱う。
-- 新旧取込APIの正式採用は未決。旧保証・旧期待値を独断変更しない。
+- 本人向けの現在地：[docs/STATUS.md](docs/STATUS.md)
+- データの置き方と列：[docs/data-contract.md](docs/data-contract.md)
+- 旧試作（17ブランチ）は消さずにタグ `archive/<ブランチ名>` で残しています。新しい main とは別物です
 
-## 正本
-- 設計: https://app.notion.com/p/417f1dff94dc8174b62cdb6b7c3de202
-- 最新独立検証: https://app.notion.com/p/419f1dff94dc816b9571e56a1599e688
-- のあ成果: https://app.notion.com/p/419f1dff94dc817f9e0bda203615b2e7
+## 流れ
 
-## 運用
-指摘ID → issue → 修正commit → 固定回帰ケース/ログ要約 → 独立検証 → Notionを対応づける。自己試験成功は独立合格ではない。旧反例・旧期待値は保持し、承認仕様との差を別記する。
+```
+取込（統合版＋元資料） → 時点つき特徴 → 予想（ルール／学習モデル／比較用2つ） → 三連複の確率
+ → 配分（オッズが無いので今は未配分） → 追記専用の台帳 → 精算（検証Aの参考買い目） → HTMLレポート
+```
 
-PDF、画像、実データ、DB、認証・秘密、端末ログは登録しない。実資料が必要な試験はローカル限定。GitHub Projectsボードは未作成。
+| 場所 | 中身 |
+|---|---|
+| `src/keiba/ingest/` | 統合版（馬ID・着順・展開）に、netkeiba 結果表・のあ v3・JRA成績PDFの払戻を race_key×馬番 で結合 |
+| `src/keiba/features/asof.py` | 全出走を日付順に1回なめて、前日までの情報だけで特徴を作る |
+| `src/keiba/models/` | `rule.py`（8グループ10段階）、`ranker.py`（LightGBM 順位学習＋3着内分類）、`baseline.py`、`trio.py`（Plackett–Luce＋2・3着補正） |
+| `src/keiba/evaluate.py` | 月ごとのウォークフォワード、封印期間の1回だけの評価、指標 |
+| `src/keiba/ledger.py` | SQLite の追記専用台帳（レース×時点×方式×版、ハッシュ照合） |
+| `src/keiba/allocate.py` / `settle.py` | 配分（均等払戻・期待値・分数ケリー、100円単位・上限1万円）／精算（返還・同着・不成立） |
+| `src/keiba/report/` | iPhone幅の静的HTML |
+| `tools/collect/` | `~/競馬` にあった収集スクリプト（場所は paths.json から読む） |
+
+## 使い方（Mac）
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
+```
+
+データの場所は `~/.heroines/paths.json` の `"keiba"` に書きます（キーは `src/keiba/config.py` の先頭に一覧）。
+
+```bash
+bin/keiba all
+```
+
+`bin/keiba` は、Homebrew の libomp が無い Mac でも LightGBM が動くよう、scikit-learn 同梱の libomp を使わせます
+（`brew install libomp` 済みなら `.venv/bin/keiba all` でも同じ）。2年分で約3分。出力は `data/`（git 管理外）：
+`data/tables/`（正規の表・build_report.json・conflicts.csv）、`data/ledger.sqlite`、`data/eval/metrics.json`、`data/report/index.html`。
+
+```bash
+.venv/bin/python -m pytest -q
+```
+
+## 決まりごと
+
+[CONTRIBUTING.md](CONTRIBUTING.md) を参照。PDF・画像・実データ・DB・秘密はコミットしません。
