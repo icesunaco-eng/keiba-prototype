@@ -21,3 +21,4 @@ scratch/
 *.zip
 .pytest_cache/
 *.egg-info/
+.notion-sync-pending/
