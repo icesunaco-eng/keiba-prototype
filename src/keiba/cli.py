@@ -11,6 +11,8 @@
   keiba live check        週末の合格判定：三連複オッズを正しく読めたか（時点ごと）
   keiba live wallets      仮想の財布（方式×配分）の成績
   keiba review [--month YYYY-MM]  月次の振り返り（data/review/<月>.html・.json）
+  keiba mam export        まむ（文章AI方式）への入力の束を data/mam/outbox/ に書く
+  keiba mam import <file> まむの予想を検証して台帳に入れる（締切後は受け付けない）
   keiba all        上を順に全部
 """
 from __future__ import annotations
@@ -106,6 +108,15 @@ def cmd_live(paths, args):
         print(w.attrs.get("note", ""))
 
 
+def cmd_mam(paths, args):
+    from .live.mam import export_packets, import_predictions
+    if args.action == "export":
+        files = export_packets(paths)
+        print(f"まむへの入力 {len(files)} 件 → {paths.data_dir / 'mam' / 'outbox'}")
+    else:
+        print(json.dumps(import_predictions(paths, args.file), ensure_ascii=False, indent=1))
+
+
 def cmd_review(paths, args):
     from datetime import date
     from .review import write_review
@@ -122,6 +133,8 @@ def cmd_collect(paths, args):
             from .live.wallet import run_live
             try:
                 out["live"] = run_live(paths)
+                from .live.mam import export_packets
+                out["mam_packets"] = len(export_packets(paths))
                 if out["live"].get("settled"):
                     from datetime import date
                     from .review import write_review
@@ -172,6 +185,9 @@ def main(argv=None):
     sub.add_parser("verify")
     p = sub.add_parser("collect")
     p.add_argument("action", choices=["tick", "install"])
+    p = sub.add_parser("mam")
+    p.add_argument("action", choices=["export", "import"])
+    p.add_argument("file", nargs="?")
     p = sub.add_parser("review")
     p.add_argument("--month", default=None)
     p = sub.add_parser("live")
@@ -183,7 +199,7 @@ def main(argv=None):
             f(paths, args)
     else:
         {"ingest": cmd_ingest, "features": cmd_features, "evaluate": cmd_evaluate,
-         "report": cmd_report, "verify": cmd_verify, "collect": cmd_collect, "live": cmd_live, "review": cmd_review}[args.cmd](paths, args)
+         "report": cmd_report, "verify": cmd_verify, "collect": cmd_collect, "live": cmd_live, "review": cmd_review, "mam": cmd_mam}[args.cmd](paths, args)
     return 0
 
 

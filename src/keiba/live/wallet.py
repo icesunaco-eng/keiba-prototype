@@ -237,9 +237,12 @@ def run_live(paths, log=print) -> dict:
             led.add_prediction(rk, tp, m, version, payload, sha(canonical(inp["snapshots"]))[:16],
                                sha(model.fingerprint() + canonical(cal.__dict__))[:16], code_hash())
             n_pred += 1
-    # 精算（財布を持つ方式だけ）
-    preds = {(p["race_key"], p["time_point"], p["method"]): p for p in led.predictions(version)}
-    settled = {(s["race_key"], s["method"], s["wallet"]) for s in led.settlements(version)}
+    # 精算（財布を持つ方式だけ。まむ（text_ai）など、ほかの live 版の予想もまとめて精算する）
+    preds = {}
+    for p in led.predictions():
+        if p["version"].startswith("live-") and isinstance(p.get("allocation"), dict) and "kelly" in p["allocation"]:
+            preds[(p["race_key"], p["time_point"], p["method"], p["version"])] = p
+    settled = {(s["race_key"], s["method"], s["version"], s["wallet"]) for s in led.settlements()}
     for (rk, tp), res in inputs.items():
         if tp != "result":
             continue
@@ -247,16 +250,16 @@ def run_live(paths, log=print) -> dict:
         finishers = sum(r["status"] == "finished" for r in rows)
         scratched = {r["horse_number"] for r in rows if r["status"] in ("withdrawn", "excluded")}
         payouts = {p["combo"]: p["payout_yen"] for p in res["trio_payouts"]} or None
-        for m in WALLET_METHODS:
-            p = preds.get((rk, "15m", m)) or preds.get((rk, "1h", m))
+        for (m, ver) in sorted({(k[2], k[3]) for k in preds if k[0] == rk}):
+            p = preds.get((rk, "15m", m, ver)) or preds.get((rk, "1h", m, ver))
             if not p:
                 continue
             for a in ALLOC_METHODS:
-                if (rk, m, a) in settled:
+                if (rk, m, ver, a) in settled:
                     continue
                 stakes = p["allocation"][a]["stakes"]
                 st = settle_trio(stakes, finishers, scratched, payouts) if stakes else None
-                led.add_settlement(rk, p["time_point"], m, version, a,
+                led.add_settlement(rk, p["time_point"], m, ver, a,
                                    {"status": st.status if st else p["allocation"][a]["status"],
                                     "stake": st.stake if st else 0, "returned": st.returned if st else 0,
                                     "hits": st.hits if st else []})

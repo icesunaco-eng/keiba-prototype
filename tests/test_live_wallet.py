@@ -182,3 +182,37 @@ def test_monthly_review(tmp_path):
         assert write_review(paths, "2025-08").exists()
     finally:
         jra.parse_card = orig
+
+
+def test_mam_export_and_import(tmp_path):
+    from keiba.live.mam import export_packets, import_predictions
+    from keiba.ledger import Ledger
+    orig = jra.parse_card
+    jra.parse_card = lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)]
+    try:
+        paths, col = _setup(tmp_path)
+        files = export_packets(paths)
+        assert len(files) == 1
+        packet = json.loads(files[0].read_text())
+        assert packet["deadline"] == "2025-08-30T14:40+09:00" and len(packet["horses"]) == N
+        assert not any(k in packet for k in ("trios", "rule_view", "predictions"))
+        base = {"schema": "keiba-mam-prediction-v1", "race_key": RK, "time_point": "1h", "author": "mam"}
+        good = dict(base, generated_at="2025-08-30T14:35:00+09:00", ranking=[3, 1, 2],
+                    trios=[{"combo": "1-2-3", "p": 0.2}, {"combo": "1-2-4", "p": 0.1}], comment="テスト")
+        late = dict(base, generated_at="2025-08-30T14:45:00+09:00", ranking=[3, 1, 2])
+        bad = dict(base, generated_at="2025-08-30T14:35:00+09:00", ranking=[3, 99])
+        f = tmp_path / "mam.json"
+        f.write_text(json.dumps([good, late, bad]))
+        out = import_predictions(paths, f)
+        assert out["accepted"] == 1 and len(out["rejected"]) == 2
+        assert "締切後" in out["rejected"][0]["reason"]
+        led = Ledger(paths.ledger_path, read_only=True)
+        p = next(x for x in led.predictions() if x["method"] == "text_ai")
+        led.close()
+        assert p["trios"][0]["combo"] == "1-2-3" and abs(p["trios"][0]["p"] - 2 / 3) < 1e-6
+        col._save(RK, "result", "result", "/JRADB/x", "c", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
+        run_live(paths)
+        w = wallet_summary(paths)
+        assert "text_ai" in set(w["method"])
+    finally:
+        jra.parse_card = orig
