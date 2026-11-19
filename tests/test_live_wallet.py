@@ -162,3 +162,23 @@ def test_known_scratch_reduces_field(tmp_path):
     card = card_html(ids).replace('<td class="num">8</td>', '<td class="num">8</td><td class="cancel">取消</td>')
     r = _gate(tmp_path, card=card)
     assert r["scratched_known"] == "8" and r["trio"] == "56/35" and not r["pass"]  # 8頭の組は7頭の35組と合わない
+
+
+def test_monthly_review(tmp_path):
+    from keiba.review import build_review, write_review
+    orig = jra.parse_card
+    jra.parse_card = lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)]
+    try:
+        paths, col = _setup(tmp_path)
+        run_live(paths)
+        col._save(RK, "result", "result", "/JRADB/x", "c", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
+        run_live(paths)
+        r = build_review(paths, "2025-08")
+        assert r["races_predicted"] == 1 and r["races_with_result"] == 1
+        assert {w["wallet"] for w in r["wallets"]} == {"equal_payout", "ev_weighted", "kelly"}
+        assert {a["method"] for a in r["accuracy"]} >= {"ml_lgbm", "rule"}
+        assert r["odds_gate"][0]["passed"] == 1 and "判定はしない" in r["judgement"]
+        assert sum(x["races"] for x in r["role_a"]) == 1
+        assert write_review(paths, "2025-08").exists()
+    finally:
+        jra.parse_card = orig

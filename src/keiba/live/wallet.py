@@ -90,15 +90,6 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame) -> tuple[pd.DataFr
                       "surface": r.get("surface"), "distance_m": r.get("distance_m"), "going": None, "race_class": None,
                       "field_size": r.get("field_size"), "attr_source": "jra_live",
                       "race_type": "障害候補" if r.get("surface") == "障害" else "平地候補"})
-        res = s[s["kind"] == "result"] if len(s) else s
-        if len(res):
-            parsed = jra.parse_result(_read(root, res.iloc[-1]))
-            cards = s[s["kind"] == "card"]
-            card = {c["horse_number"]: c for c in jra.parse_card(_read(root, cards.iloc[-1]))} if len(cards) else {}
-            for row in parsed["rows"]:
-                runners.append(_runner(rk, r, {**card.get(row["horse_number"], {}), **{k: v for k, v in row.items() if v is not None}}, row["status"]))
-            inputs[(rk, "result")] = parsed
-            continue
         for tp in ("24h", "1h", "15m"):
             if not r.get("post_time"):
                 continue
@@ -128,6 +119,15 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame) -> tuple[pd.DataFr
                                 {"pass": False, "reasons": ["前日はオッズを使わない（未発売のことが多い）"]},
                                 "card_fetched_at": cards.iloc[-1]["fetched_at"],
                                 "snapshots": [cards.iloc[-1]["sha256"], *win["sha256"].tolist()[-1:], *trio["sha256"].tolist()[-1:]]}
+        res = s[s["kind"] == "result"] if len(s) else s
+        if len(res):  # 結果が出たレースは確定行（過去走として使う）。発走前の入力（判定・予想用）はそのまま残す
+            parsed = jra.parse_result(_read(root, res.iloc[-1]))
+            cards = s[s["kind"] == "card"]
+            card = {c["horse_number"]: c for c in jra.parse_card(_read(root, cards.iloc[-1]))} if len(cards) else {}
+            for row in parsed["rows"]:
+                runners.append(_runner(rk, r, {**card.get(row["horse_number"], {}), **{k: v for k, v in row.items() if v is not None}}, row["status"]))
+            inputs[(rk, "result")] = parsed
+            continue
         last = max((tp for tp in ("24h", "1h", "15m") if (rk, tp) in inputs), key=TP_ORDER.get, default=None)
         if last:
             for c in inputs[(rk, last)]["card"]:
