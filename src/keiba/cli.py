@@ -35,7 +35,9 @@ def cmd_ingest(paths, args):
 def cmd_features(paths, args):
     from .features.asof import build_features
     races, runners, _ = _tables(paths)
+    from .models.rule_v1 import build_utilities
     feat = build_features(races, runners)
+    feat = feat.merge(build_utilities(races, runners), on=["runner_key", "race_key"], how="left")
     feat.to_parquet(paths.tables_dir / "features.parquet", index=False)
     print(f"特徴 {feat.shape[0]:,}行 × {feat.shape[1]}列 → {paths.tables_dir / 'features.parquet'}")
 
@@ -110,7 +112,7 @@ def main(argv=None):
     for name in ("evaluate", "all"):
         p = sub.add_parser(name)
         p.add_argument("--first-month", default="2025-05-01")
-        p.add_argument("--holdout-start", default="2026-03-21")
+        p.add_argument("--holdout-start", default="2026-08-16")
         if name == "all":
             p.add_argument("--workers", type=int, default=6)
             p.add_argument("--version", default=None)

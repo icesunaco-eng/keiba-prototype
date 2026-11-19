@@ -29,7 +29,8 @@ def test_actual_order_dead_heat_is_none():
 def test_pipeline_end_to_end_on_synthetic(tmp_path):
     from tests.conftest import make_tables
     races, runners = make_tables(n_days=30, races_per_day=6, field=10, horses=60)
-    feat = build_features(races, runners)
+    from keiba.models.rule_v1 import build_utilities
+    feat = build_features(races, runners).merge(build_utilities(races, runners), on=["runner_key", "race_key"], how="left")
     pay = pd.DataFrame([{"race_key": rk, "bet_type": "trio",
                          "combo": "-".join(map(str, sorted(g.nsmallest(3, "finish_position")["horse_number"]))),
                          "payout_yen": 1500, "source": "test", "check": "test"}

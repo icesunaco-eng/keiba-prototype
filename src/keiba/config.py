@@ -6,7 +6,9 @@ paths.json の "keiba" の下に置くキー（すべて任意。~ は展開す�
   myu_zips         netkeiba結果表を含むZIPのglob（複数可）
   heroines_dirs    HEROINES収集フォルダのglob（各レースに raw/result.html）
   noa_v3_dir       のあ v3（races.jsonl）
-  jra_pdf_dirs     JRA成績PDFを探すフォルダ（複数可）
+  jra_pdf_dirs     JRA成績PDFを探すフォルダ（複数可。払戻の読取に使う）
+  pdf_table_sources  JRA成績PDFを表にしたもの [{"races_dir": …, "manifest_csv": …（任意）}]
+  aj1_cmap         PDFの読取に使う Adobe-Japan1 の CMap（UniJIS-UTF32-H）の場所
   collect_root     収集スクリプトの作業フォルダ（tools/collect 用）
   data_dir         このパッケージの出力先（既定：リポジトリ直下の data/）
 """
@@ -44,6 +46,8 @@ class Paths:
     noa_v3_dir: Path | None = None
     jra_pdf_dirs: list[Path] = field(default_factory=list)
     collect_root: Path | None = None
+    pdf_table_sources: list[dict] = field(default_factory=list)
+    aj1_cmap: Path | None = None
     data_dir: Path = REPO_ROOT / "data"
 
     @property
@@ -65,12 +69,13 @@ def load_paths(path: str | os.PathLike | None = None) -> Paths:
     if file.exists():
         raw = json.loads(file.read_text(encoding="utf-8")).get("keiba", {})
     p = Paths()
-    for key in ("integrated_dir", "qa_zip", "noa_v3_dir", "collect_root"):
+    for key in ("integrated_dir", "qa_zip", "noa_v3_dir", "collect_root", "aj1_cmap"):
         if raw.get(key):
             setattr(p, key, _expand(raw[key]))
     p.myu_zips = _globs(raw.get("myu_zips"))
     p.heroines_dirs = _globs(raw.get("heroines_dirs"))
     p.jra_pdf_dirs = _globs(raw.get("jra_pdf_dirs"))
+    p.pdf_table_sources = [{k: os.path.expanduser(v) for k, v in src.items()} for src in raw.get("pdf_table_sources", [])]
     if raw.get("data_dir"):
         p.data_dir = _expand(raw["data_dir"])
     return p

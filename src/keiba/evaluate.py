@@ -21,6 +21,7 @@ from .ledger import Ledger, canonical, code_hash, sha
 from .models.baseline import LogitModel, PopularityModel
 from .models.ranker import RankerModel
 from .models.rule import GROUPS, RULE_VERSION, RuleModel, score_groups
+from .models import rule_v1
 from .models.trio import Calibration, fit_calibration, trio_probs, win_probs
 from .settle import settle_trio
 
@@ -28,16 +29,16 @@ CALIB_DAYS = 60
 TOP_TRIOS_SAVED = 20
 REF_WALLETS = {"ref_top5_equal": 5, "ref_top10_equal": 10}
 HIT_K = (1, 5, 10, 20)
-METHOD_KIND = {"rule": "rule", "ml_lgbm": "ml", "base_logit": "baseline", "base_pop": "baseline"}
+METHOD_KIND = {"rule": "rule", "rule_v01": "rule", "ml_lgbm": "ml", "base_logit": "baseline", "base_pop": "baseline"}
 TIME_POINTS_EVAL = ("24h", "1h")
 
 
 @dataclass
 class EvalConfig:
     first_month: str = "2025-05-01"
-    holdout_start: str = "2026-03-21"
+    holdout_start: str = "2026-08-16"   # 直近3か月（データの最終日 2026-11-15 から）
     min_field: int = 5
-    methods: tuple = ("rule", "ml_lgbm", "base_logit", "base_pop")
+    methods: tuple = ("rule", "rule_v01", "ml_lgbm", "base_logit", "base_pop")
     time_points: tuple = TIME_POINTS_EVAL
     version_label: str = "v0.1"
 
@@ -63,7 +64,7 @@ def actual_order(g: pd.DataFrame) -> tuple | None:
 
 def make_model(method: str, tp: str):
     feats = feature_columns(tp)
-    return {"rule": lambda: RuleModel(tp), "ml_lgbm": lambda: RankerModel(feats),
+    return {"rule": lambda: rule_v1.RuleV1Model(tp), "rule_v01": lambda: RuleModel(tp), "ml_lgbm": lambda: RankerModel(feats),
             "base_logit": lambda: LogitModel(feats), "base_pop": lambda: PopularityModel()}[method]()
 
 
@@ -114,18 +115,24 @@ def predict_race(g: pd.DataFrame, scores: np.ndarray, calib: Calibration, method
         horses.append(h)
     top5 = sum(p for _, p in trios[:5])
     cov = float(rule_groups["rule_coverage"].mean()) if rule_groups is not None else 1.0
+    conf = confidence(top5, cov, float(g["n_runs"].mean()))
+    if method == "rule":  # rule-v1.0 は被覆で決める（仕様）。レースの代表は被覆の中央値
+        conf = rule_v1.coverage_label(float(rule_groups["rule_coverage"].median()),
+                                      0 if rule_groups["rule_total"].notna().any() else None)
     notes = []
     if method == "base_pop":
         notes.append("確定単勝オッズを使う比較専用。発走前には作れない")
+    if method == "rule_v01":
+        notes.append(f"尺度は {RULE_VERSION}（Claude の暫定版。比較用）")
     if method == "rule":
-        notes.append(f"尺度は {RULE_VERSION}（あいす叩き台・暫定）")
+        notes.append(f"尺度は {rule_v1.RULE_V1_VERSION}（あいす初版）。{rule_v1.MODE}：候補IDと保存済みの結果版で再現（発走前検証ではない）")
     return {
         "race_date": str(g["race_date"].iloc[0].date()), "method_kind": METHOD_KIND[method],
         "uses_post_race_odds": method == "base_pop",
         "horses": horses,
         "trios": [{"combo": "-".join(map(str, sorted(c))), "p": round(p, 6)} for c, p in trios[:TOP_TRIOS_SAVED]],
         "top5_mass": round(top5, 4),
-        "confidence": confidence(top5, cov, float(g["n_runs"].mean())),
+        "confidence": conf,
         "calibration": {"beta": round(calib.beta, 4), "gamma": round(calib.gamma, 4), "n": calib.n_races},
         "allocation": {"status": "unallocated_no_odds", "reason": "発走前の三連複オッズが無い（検証A）"},
         "notes": notes,
@@ -152,7 +159,8 @@ def run_period(train, calib_df, test, tp, cfg, version, ledger, label, payout_ma
         if method == "ml_lgbm":
             importance[f"{label}:{tp}"] = dict(list(model.importance().items())[:15])
         scores_all = model.score(test)
-        rule_all = score_groups(test, tp) if method == "rule" else None
+        rule_all = (rule_v1.score_frame(test, tp) if method == "rule" else
+                    score_groups(test, tp) if method == "rule_v01" else None)
         model_hash = sha(model.fingerprint() + canonical(calib.__dict__))[:16]
         test = test.assign(_s=scores_all)
         for rk, g in test.groupby("race_key", sort=False):

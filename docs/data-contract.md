@@ -9,7 +9,9 @@
 | `myu_zips` | netkeiba 結果表を含むZIP（`raw/netkeiba/**/result_table.dom.html` と `capture_metadata.json`） | `~/競馬/みゅう引継ぎ受領/mini-*.zip` |
 | `heroines_dirs` | HEROINES 収集フォルダ（`日付/場/NR/raw/result.html`） | `~/競馬/HEROINES並行取得*` |
 | `noa_v3_dir` | のあ v3（`races.jsonl`） | `~/Documents/Codex/…/keiba-glyph-20261117-4/v3` |
-| `jra_pdf_dirs` | JRA成績PDF（日・場別）を探すフォルダ | 複数可 |
+| `jra_pdf_dirs` | JRA成績PDF（日・場別）を探すフォルダ（払戻の読取） | 複数可 |
+| `pdf_table_sources` | JRA成績PDFを表にしたもの（`tools/jra_pdf/convert.py` の出力）と、使うレースの一覧 | `[{"races_dir": "~/keiba-prototype/data/work/aisu_pdf/races", "manifest_csv": "~/競馬/あいすの引継ぎ受領/aisu-jra-seiseki-1876-20261119/manifest.csv"}]` |
+| `aj1_cmap` | PDF読取に使う Adobe-Japan1 の CMap（UniJIS-UTF32-H） | のあの作業フォルダの `ref/` |
 | `data_dir` | 出力先（省略時はリポジトリの `data/`） | |
 
 ## 正規の表（`data/tables/`）
@@ -23,7 +25,7 @@
 ## 資料の優先と照合
 
 - 着順・時計・状態は統合版（QA済み）を正とする
-- 出走表の項目は netkeiba 結果ページ → netkeiba 結果表 → のあ v3 の順に使い、違いは conflicts.csv に残す（計画では「PDF優先」としていたが、どれも同じ成績表の転記で、netkeiba には騎手・調教師のIDがあるため、IDで揃えられる netkeiba を先にした）
+- 出走表の項目は netkeiba 結果ページ → netkeiba 結果表 → のあ v3 → JRA成績PDFの表（あいす分）の順に使い、違いは conflicts.csv に残す（計画では「PDF優先」としていたが、どれも同じ成績表の転記で、netkeiba には騎手・調教師のIDがあるため、IDで揃えられる netkeiba を先にした）
 - 騎手・調教師は netkeiba のIDで揃える。のあ v3 だけのレースは、同じ馬の行が両方にある期間から「名前→ID」の対応を作って当てる
 - 三連複の払戻は netkeiba 結果ページを優先し、無いレースは JRA成績PDF から読む。PDFの額は、同じ段の「3連複票数 計X 的中Y」から計算した額（X×0.75÷Y×100、10円未満切捨）と ±10円で一致したものだけ使う
 
@@ -37,10 +39,18 @@
 
 確定オッズは発走後の値なので特徴に入れない。比較用の「人気順」モデルだけが使い、レポートで「比較専用」と明記する。
 
+## JRA成績PDFを表にする
+
+```
+python3 tools/jra_pdf/convert.py <PDFのフォルダ> <出力フォルダ> [pdf_manifest.csv]
+```
+
+中身は のあ の `pdf_text2.py`・`parse_report2.py`（通信しない）。外字の騎手名（「鮫」など）は推測で埋めず、名前のまま残す。
+あいす分 1,876R は 2026-11-19 に受領（`~/競馬/あいすの引継ぎ受領/`、PDF 157本・SHA256SUMS 全一致・欠け0）。変換結果は依頼の一覧と1,876R・25,234行で一致。
+
 ## 統合版に足してほしいもの
 
-1. **あいす分 1,876R（2026-03-21〜2026-11-15）の出走表の項目**：netkeiba の結果ページ（HTML）か、JRA成績PDFがあれば、`heroines_dirs` か `jra_pdf_dirs` に置くだけで読める。今の統合版には、この期間はIDと着順・時計しかない
-2. **三連複の払戻**：みに分（netkeiba 結果表だけのレース）約1,600Rは払戻が無い。結果ページかPDFがあれば精算できる
+1. **三連複の払戻**：みに分（netkeiba 結果表だけのレース）約1,600Rは払戻が無い。結果ページかPDFがあれば精算できる
 3. **発走前のオッズ**（任意）：検証B（発走前オッズでの回収率）と配分に必要。時刻つきで、発走前に取得したものだけ
 
 ## これからのレース（`data/live/`、`keiba collect tick`）

@@ -130,6 +130,35 @@ def iter_myu(paths: Paths):
                 yield race_key(meta["race_date"], meta["venue"], meta["race_number"]), "nk_dom", page
 
 
+def _v3_race(r: dict) -> tuple[str, dict]:
+    """のあ v3 形式（JRA成績PDFから読んだ1レース）を、共通の形にする。"""
+    cls = None
+    for word, c in netkeiba.CLASS_WORDS:
+        if word in (r.get("header_raw") or ""):
+            cls = c
+            break
+    race = {"surface": r.get("surface"), "distance_m": r.get("distance_m"), "going": r.get("going"),
+            "weather": r.get("weather"), "field_size": r.get("field_size"),
+            "post_time": r.get("post_time_scheduled"), "race_class": cls,
+            "turn": (re.search(r"(右|左|直線)", r.get("surface_detail") or "") or [None, None])[1]}
+    rows = []
+    for h in r["horses"]:
+        diff = unicodedata.normalize("NFKC", h.get("body_weight_diff_raw") or "").replace("−", "-").replace("±", "")
+        sex = {"騸": "セ"}.get(h.get("sex"), h.get("sex"))
+        rows.append({
+            "horse_number": h.get("umaban"), "waku": h.get("waku"), "horse_name": h.get("name"),
+            "sex": None if sex and "{" in sex else sex, "age": h.get("age"), "weight_carried": h.get("weight_carried"),
+            "jockey_name": _norm_name(h.get("jockey")), "jockey_id": None,
+            "trainer_name": _norm_name(h.get("trainer")), "trainer_id": None,
+            "body_weight": h.get("body_weight"),
+            "body_weight_diff": int(diff) if re.fullmatch(r"[+\-]?\d+", diff or "") else None,
+            "final_win_odds": h.get("win_odds"), "final_popularity": None,
+            "last3f_s": None, "passage_raw": None, "margin_raw": h.get("margin_raw"),
+        })
+    date = r.get("race_date") or f"{r['year']}-{r['month']:02d}-{r['day']:02d}"
+    return race_key(date, r["place"], r["race_no"]), {"race": race, "rows": rows, "trio_payouts": []}
+
+
 def iter_noa(paths: Paths):
     if not paths.noa_v3_dir:
         return
@@ -137,30 +166,24 @@ def iter_noa(paths: Paths):
     if not f.exists():
         return
     for line in open(f, encoding="utf-8"):
-        r = json.loads(line)
-        cls = None
-        for word, c in netkeiba.CLASS_WORDS:
-            if word in (r.get("header_raw") or ""):
-                cls = c
-                break
-        race = {"surface": r.get("surface"), "distance_m": r.get("distance_m"), "going": r.get("going"),
-                "weather": r.get("weather"), "field_size": r.get("field_size"),
-                "post_time": r.get("post_time_scheduled"), "race_class": cls,
-                "turn": (re.search(r"(右|左|直線)", r.get("surface_detail") or "") or [None, None])[1]}
-        rows = []
-        for h in r["horses"]:
-            diff = unicodedata.normalize("NFKC", h.get("body_weight_diff_raw") or "").replace("−", "-").replace("±", "")
-            rows.append({
-                "horse_number": h.get("umaban"), "waku": h.get("waku"), "horse_name": h.get("name"),
-                "sex": {"騸": "セ"}.get(h.get("sex"), h.get("sex")), "age": h.get("age"), "weight_carried": h.get("weight_carried"),
-                "jockey_name": _norm_name(h.get("jockey")), "jockey_id": None,
-                "trainer_name": _norm_name(h.get("trainer")), "trainer_id": None,
-                "body_weight": h.get("body_weight"),
-                "body_weight_diff": int(diff) if re.fullmatch(r"[+\-]?\d+", diff or "") else None,
-                "final_win_odds": h.get("win_odds"), "final_popularity": None,
-                "last3f_s": None, "passage_raw": None, "margin_raw": h.get("margin_raw"),
-            })
-        yield race_key(r["race_date"], r["place"], r["race_no"]), "noa_v3", {"race": race, "rows": rows, "trio_payouts": []}
+        rk, page = _v3_race(json.loads(line))
+        yield rk, "noa_v3", page
+
+
+def iter_pdf_tables(paths: Paths):
+    """JRA成績PDFを tools/jra_pdf/convert.py で読んだもの（PDF1本＝races/<名前>.json）。
+    manifest_csv があれば、その race_key だけを使う（PDFには対象外のレースも載っているため）。"""
+    for src in paths.pdf_table_sources:
+        allow = None
+        if src.get("manifest_csv"):
+            import csv
+            with open(src["manifest_csv"], encoding="utf-8-sig") as f:
+                allow = {r["race_key"] for r in csv.DictReader(f)}
+        for f in sorted(Path(src["races_dir"]).glob("*.json")):
+            for r in json.load(open(f, encoding="utf-8"))["races"]:
+                rk, page = _v3_race(r)
+                if allow is None or rk in allow:
+                    yield rk, "jra_pdf_table", page
 
 
 # ---------- 払戻（JRA成績PDF） ----------
@@ -222,7 +245,7 @@ ATTR_FIELDS = ["waku", "horse_name", "sex", "age", "weight_carried", "body_weigh
                "final_win_odds", "final_popularity", "last3f_s", "passage_raw", "margin_raw"]
 COMPARE_FIELDS = ["waku", "sex", "age", "weight_carried", "body_weight", "final_win_odds"]
 RACE_FIELDS = ["surface", "distance_m", "turn", "going", "weather", "race_class", "field_size", "post_time"]
-SOURCE_ORDER = ["nk_page", "nk_dom", "noa_v3"]
+SOURCE_ORDER = ["nk_page", "nk_dom", "noa_v3", "jra_pdf_table"]
 
 
 def build(paths: Paths, log=print, pdf_workers: int = 6) -> dict:
@@ -237,7 +260,7 @@ def build(paths: Paths, log=print, pdf_workers: int = 6) -> dict:
     log("出走表の資料を読む（netkeiba 結果ページ・結果表、のあ v3）")
     by_source: dict[str, dict] = {s: {} for s in SOURCE_ORDER}
     nk_payouts = []
-    for it in (iter_heroines(paths), iter_myu(paths), iter_noa(paths)):
+    for it in (iter_heroines(paths), iter_myu(paths), iter_noa(paths), iter_pdf_tables(paths)):
         for rk, src, page in it:
             by_source[src].setdefault(rk, page)
             if src == "nk_page":
@@ -293,8 +316,8 @@ def build(paths: Paths, log=print, pdf_workers: int = 6) -> dict:
                     rec[fld] = vals[0][1]
                     if fld in COMPARE_FIELDS and len({float(v) if isinstance(v, (int, float)) else v for _, v in vals}) > 1:
                         conflicts.append({"key": f"{rk}|{hn}", "field": fld, "values": json.dumps(vals, ensure_ascii=False)})
-            nk = next((r for s, r in items if s != "noa_v3"), None)
-            noa = next((r for s, r in items if s == "noa_v3"), None)
+            nk = next((r for s, r in items if s in ("nk_page", "nk_dom")), None)
+            noa = next((r for s, r in items if s in ("noa_v3", "jra_pdf_table")), None)
             rec["jockey_key"] = (f"nk:{nk['jockey_id']}" if nk and nk.get("jockey_id")
                                  else resolve(noa["jockey_name"], jockey_map, "name") if noa else None)
             rec["trainer_key"] = (f"nk:{nk['trainer_id']}" if nk and nk.get("trainer_id")
