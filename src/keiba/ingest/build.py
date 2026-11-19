@@ -50,7 +50,7 @@ def _norm_name(s) -> str:
 
 def load_base(paths: Paths) -> tuple[pd.DataFrame, pd.DataFrame]:
     if not paths.qa_zip or not paths.qa_zip.exists():
-        raise FileNotFoundError("qa_zip が見つかりません（~/.heroines/paths.json の keiba.qa_zip）")
+        raise FileNotFoundError("qa_zip が見つかりません（~/.heroines/keiba.json の keiba.qa_zip）")
     runners, races = [], {}
     with zipfile.ZipFile(paths.qa_zip) as z:
         with z.open("data/runner_results.jsonl") as f:

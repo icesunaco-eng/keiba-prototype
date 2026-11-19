@@ -1,6 +1,6 @@
 # データの置き方と列
 
-## 置き場所（`~/.heroines/paths.json` の `"keiba"`）
+## 置き場所（`~/.heroines/keiba.json` の `"keiba"`）
 
 | キー | 中身 | 今の置き場所の例 |
 |---|---|---|
