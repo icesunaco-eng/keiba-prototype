@@ -29,7 +29,7 @@ CALIB_DAYS = 60
 TOP_TRIOS_SAVED = 20
 REF_WALLETS = {"ref_top5_equal": 5, "ref_top10_equal": 10}
 HIT_K = (1, 5, 10, 20)
-METHOD_KIND = {"rule": "rule", "rule_v01": "rule", "ml_lgbm": "ml", "base_logit": "baseline", "base_pop": "baseline"}
+METHOD_KIND = {"rule": "rule", "rule_v11": "rule", "rule_v01": "rule", "ml_lgbm": "ml", "base_logit": "baseline", "base_pop": "baseline"}
 TIME_POINTS_EVAL = ("24h", "1h")
 
 
@@ -41,6 +41,8 @@ class EvalConfig:
     methods: tuple = ("rule", "rule_v01", "ml_lgbm", "base_logit", "base_pop")
     time_points: tuple = TIME_POINTS_EVAL
     version_label: str = "v0.1"
+    run_holdout: bool = True
+    last_date: str | None = None   # これより後のレースは使わない（実験で封印期間に触れないため）
 
 
 def eligible_features(feat: pd.DataFrame, races: pd.DataFrame, min_field: int) -> pd.DataFrame:
@@ -64,7 +66,7 @@ def actual_order(g: pd.DataFrame) -> tuple | None:
 
 def make_model(method: str, tp: str):
     feats = feature_columns(tp)
-    return {"rule": lambda: rule_v1.RuleV1Model(tp), "rule_v01": lambda: RuleModel(tp), "ml_lgbm": lambda: RankerModel(feats),
+    return {"rule": lambda: rule_v1.RuleV1Model(tp), "rule_v11": lambda: rule_v1.RuleV1Model(tp, "v1.1"), "rule_v01": lambda: RuleModel(tp), "ml_lgbm": lambda: RankerModel(feats),
             "base_logit": lambda: LogitModel(feats), "base_pop": lambda: PopularityModel()}[method]()
 
 
@@ -116,7 +118,7 @@ def predict_race(g: pd.DataFrame, scores: np.ndarray, calib: Calibration, method
     top5 = sum(p for _, p in trios[:5])
     cov = float(rule_groups["rule_coverage"].mean()) if rule_groups is not None else 1.0
     conf = confidence(top5, cov, float(g["n_runs"].mean()))
-    if method == "rule":  # rule-v1.0 は被覆で決める（仕様）。レースの代表は被覆の中央値
+    if method in ("rule", "rule_v11"):  # rule-v1.x は被覆で決める（仕様）。レースの代表は被覆の中央値
         conf = rule_v1.coverage_label(float(rule_groups["rule_coverage"].median()),
                                       0 if rule_groups["rule_total"].notna().any() else None)
     notes = []
@@ -124,6 +126,8 @@ def predict_race(g: pd.DataFrame, scores: np.ndarray, calib: Calibration, method
         notes.append("確定単勝オッズを使う比較専用。発走前には作れない")
     if method == "rule_v01":
         notes.append(f"尺度は {RULE_VERSION}（Claude の暫定版。比較用）")
+    if method == "rule_v11":
+        notes.append("rule-v1.1 の案（未採点を減らし、総合点なしの馬は平均扱い）。offline_proxy")
     if method == "rule":
         notes.append(f"尺度は {rule_v1.RULE_V1_VERSION}（あいす初版）。{rule_v1.MODE}：候補IDと保存済みの結果版で再現（発走前検証ではない）")
     return {
@@ -160,6 +164,7 @@ def run_period(train, calib_df, test, tp, cfg, version, ledger, label, payout_ma
             importance[f"{label}:{tp}"] = dict(list(model.importance().items())[:15])
         scores_all = model.score(test)
         rule_all = (rule_v1.score_frame(test, tp) if method == "rule" else
+                    rule_v1.score_frame(test, tp, rule_v1.VARIANTS["v1.1"]["prefix"]) if method == "rule_v11" else
                     score_groups(test, tp) if method == "rule_v01" else None)
         model_hash = sha(model.fingerprint() + canonical(calib.__dict__))[:16]
         test = test.assign(_s=scores_all)
@@ -243,6 +248,8 @@ def summarize(rows: pd.DataFrame) -> list[dict]:
 def run_evaluation(feat: pd.DataFrame, races: pd.DataFrame, runners: pd.DataFrame, payouts: pd.DataFrame,
                    ledger: Ledger, cfg: EvalConfig = EvalConfig(), log=print) -> dict:
     df = eligible_features(feat, races, cfg.min_field)
+    if cfg.last_date:
+        df = df[df["race_date"] <= pd.Timestamp(cfg.last_date)]
     version = f"{cfg.version_label}+{code_hash()[:8]}"
     payout_map: dict = {}
     for r in payouts[payouts["bet_type"] == "trio"].itertuples():
@@ -265,7 +272,7 @@ def run_evaluation(feat: pd.DataFrame, races: pd.DataFrame, runners: pd.DataFram
             rows += run_period(train, calib, test, tp, cfg, version, ledger, "walk_forward", payout_map, scratch_map, importance)
             ledger.commit()
     # 封印期間：検証が全部終わってから1回だけ
-    for tp in cfg.time_points:
+    for tp in (cfg.time_points if cfg.run_holdout else ()):
         cut = hold - pd.Timedelta(days=CALIB_DAYS)
         train = df[df["race_date"] < cut]
         calib = df[(df["race_date"] >= cut) & (df["race_date"] < hold)]

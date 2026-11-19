@@ -38,6 +38,7 @@ def cmd_features(paths, args):
     from .models.rule_v1 import build_utilities
     feat = build_features(races, runners)
     feat = feat.merge(build_utilities(races, runners), on=["runner_key", "race_key"], how="left")
+    feat = feat.merge(build_utilities(races, runners, "v1.1").drop(columns=["is_flat"]), on=["runner_key", "race_key"], how="left")
     feat.to_parquet(paths.tables_dir / "features.parquet", index=False)
     print(f"特徴 {feat.shape[0]:,}行 × {feat.shape[1]}列 → {paths.tables_dir / 'features.parquet'}")
 

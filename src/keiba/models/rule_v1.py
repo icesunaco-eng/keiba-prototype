@@ -120,7 +120,32 @@ class _Ref:
         return [x for x in q if x[0] < day]
 
 
-def build_utilities(races: pd.DataFrame, runners: pd.DataFrame) -> pd.DataFrame:
+VARIANTS = {
+    # 仕様どおり（あいす rule-v1.0）
+    "v1.0": dict(window=365, min_runs=2, shrink_k=0.0, cross_surface_w=0.0, ref_fallback=False, prefix="u_"),
+    # 案（rule-v1.1）：未採点を減らす。1走から使い、走数が少ないほど全体の真ん中へ寄せる。
+    # 期間は730日、芝ダ違いの走は重み0.5、能力の基準集団が足りないときは「全場・同芝ダ・同距離」に広げる
+    "v1.1": dict(window=730, min_runs=1, shrink_k=2.0, cross_surface_w=0.5, ref_fallback=True, prefix="u11_"),
+}
+
+
+def _n(runs) -> float:
+    """有効走の数（芝ダ違いは重みの分だけ数える）。"""
+    return float(sum(h["sw"] for h in runs))
+
+
+def _wmean(values, sw, decay=True) -> float:
+    w = [(DECAY ** i if decay else 1.0) * x for i, x in enumerate(sw)]
+    return float(np.dot(w, values) / sum(w))
+
+
+def _shrink(raw, n, prior, V) -> float:
+    k = V["shrink_k"]
+    return raw if k <= 0 else (n * raw + k * prior) / (n + k)
+
+
+def build_utilities(races: pd.DataFrame, runners: pd.DataFrame, variant: str = "v1.0") -> pd.DataFrame:
+    V = VARIANTS[variant]
     cols = ["race_key", "surface", "distance_m", "going", "venue", "race_type"]
     df = runners.drop(columns=[c for c in cols[1:] if c in runners]).merge(races[[c for c in cols if c in races]], on="race_key", how="left")
     df = df[~df["status"].isin(["withdrawn", "excluded"])].copy()
@@ -174,35 +199,42 @@ def build_utilities(races: pd.DataFrame, runners: pd.DataFrame) -> pd.DataFrame:
                 u = {g_: None for g_ in GROUPS}
                 if flat:
                     hid = rec.horse_id if isinstance(rec.horse_id, str) else None
-                    past = [h for h in reversed(hist.get(hid, [])) if h["day"] >= day - WINDOW_DAYS and h["surface"] == surf] if hid else []
-                    valid_f = [h for h in past if h["f"] is not None][:5]
+                    cw = V["cross_surface_w"]
+                    past = [dict(h, sw=1.0 if h["surface"] == surf else cw) for h in reversed(hist.get(hid, []))
+                            if h["day"] >= day - V["window"] and (h["surface"] == surf or cw > 0)] if hid else []
                     # 能力
-                    zs = [h for h in past if h["z"] is not None and pd.notna(dist) and h["dist"] is not None and abs(h["dist"] - dist) <= 200]
-                    if len(zs) >= 2:
-                        u["ability"] = 0.5 * max(h["z"] for h in zs[:5]) + 0.5 * float(np.mean([h["z"] for h in zs[:3]]))
+                    zs = [h for h in past if h["z"] is not None and pd.notna(dist) and h["dist"] is not None and abs(h["dist"] - dist) <= 200][:5]
+                    if _n(zs) >= V["min_runs"]:
+                        raw = 0.5 * max(h["z"] for h in zs) + 0.5 * _wmean([h["z"] for h in zs[:3]], [h["sw"] for h in zs[:3]], decay=False)
+                        u["ability"] = _shrink(raw, _n(zs), 0.0, V)
                     # 近走
-                    if len(valid_f) >= 2:
-                        u["recent"] = 1 - (0.7 * _decay_mean([h["f"] for h in valid_f]) + 0.3 * valid_f[0]["f"])
+                    vf = [h for h in past if h["f"] is not None][:5]
+                    if _n(vf) >= V["min_runs"]:
+                        raw = 1 - (0.7 * _wmean([h["f"] for h in vf], [h["sw"] for h in vf]) + 0.3 * vf[0]["f"])
+                        u["recent"] = _shrink(raw, _n(vf), 0.5, V)
                     # 距離
                     if pd.notna(dist):
-                        near = [h["f"] for h in past if h["f"] is not None and h["dist"] is not None and abs(h["dist"] - dist) <= 200][:5]
-                        if len(near) >= 2:
-                            u["distance"] = 1 - _decay_mean(near)
+                        near = [h for h in past if h["f"] is not None and h["dist"] is not None and abs(h["dist"] - dist) <= 200][:5]
+                        if _n(near) >= V["min_runs"]:
+                            u["distance"] = _shrink(1 - _wmean([h["f"] for h in near], [h["sw"] for h in near]), _n(near), 0.5, V)
                     # コース
-                    same = [h["f"] for h in past if h["f"] is not None and h["venue"] == venue][:5]
-                    if len(same) >= 2:
-                        u["course"] = 1 - _decay_mean(same)
+                    same = [h for h in past if h["f"] is not None and h["venue"] == venue][:5]
+                    if _n(same) >= V["min_runs"]:
+                        u["course"] = _shrink(1 - _wmean([h["f"] for h in same], [h["sw"] for h in same]), _n(same), 0.5, V)
                     # 馬場（前日は未採点。時点の判断は score 側で行う）
                     gb = _going_bucket(going)
                     if gb:
-                        sg = [h["f"] for h in past if h["f"] is not None and h["gb"] == gb][:5]
-                        if len(sg) >= 2:
-                            u["going"] = 1 - _decay_mean(sg)
+                        sg = [h for h in past if h["f"] is not None and h["gb"] == gb][:5]
+                        if _n(sg) >= V["min_runs"]:
+                            u["going"] = _shrink(1 - _wmean([h["f"] for h in sg], [h["sw"] for h in sg]), _n(sg), 0.5, V)
                     # 展開脚
-                    ds = [h["d3f"] for h in past if h["d3f"] is not None][:3]
-                    cs = [h["c"] for h in past if h["c"] is not None][:3]
-                    if len(ds) >= 2 and len(cs) >= 2:
-                        u["pace"] = 0.7 * min(1.0, max(0.0, (1 - float(np.mean(ds))) / 2)) + 0.3 * (1 - float(np.mean(cs)))
+                    ds = [h for h in past if h["d3f"] is not None][:3]
+                    cs = [h for h in past if h["c"] is not None][:3]
+                    if _n(ds) >= V["min_runs"] and _n(cs) >= V["min_runs"]:
+                        md = _wmean([h["d3f"] for h in ds], [h["sw"] for h in ds], decay=False)
+                        mc = _wmean([h["c"] for h in cs], [h["sw"] for h in cs], decay=False)
+                        raw = 0.7 * min(1.0, max(0.0, (1 - md) / 2)) + 0.3 * (1 - mc)
+                        u["pace"] = _shrink(raw, min(_n(ds), _n(cs)), 0.5, V)
                     # 枠
                     if pop and pd.notna(rec.waku):
                         tot_n, tot_t, n_races, per_waku = pop
@@ -219,7 +251,7 @@ def build_utilities(races: pd.DataFrame, runners: pd.DataFrame) -> pd.DataFrame:
                             q_ = (sum(t for _, t in jq) + 30 * p0_j) / (len(jq) + 30)
                             d = rec.weight_carried - w_mean
                             u["weight_rider"] = 0.75 * q_ + 0.25 * min(1.0, max(0.0, (3 - d) / 6))
-                out.append({"runner_key": rec.runner_key, "race_key": rk, "is_flat": flat, **{f"u_{k}": v for k, v in u.items()}})
+                out.append({"runner_key": rec.runner_key, "race_key": rk, "is_flat": flat, **{f"{V['prefix']}{k}": v for k, v in u.items()}})
 
         # ---- その日の結果を足す ----
         fin = g[g["status"] == "finished"]
@@ -237,8 +269,11 @@ def build_utilities(races: pd.DataFrame, runners: pd.DataFrame) -> pd.DataFrame:
                 f = (pos - 1) / (rec.starters - 1) if pos is not None and rec.starters > 1 else None
                 z = None
                 if pos is not None and pd.notna(rec.finish_time_s) and pd.notna(dist) and gb:
-                    ref = [v for _, v, _ in time_ref.window((venue, surf, dist, gb), day)]
-                    n_r = len({x[2] for x in time_ref.window((venue, surf, dist, gb), day)})
+                    w = time_ref.window((venue, surf, dist, gb), day)
+                    if V["ref_fallback"] and (len(w) < 30 or len({x[2] for x in w}) < 5):
+                        w = time_ref.window(("*", surf, dist, gb), day)
+                    ref = [v for _, v, _ in w]
+                    n_r = len({x[2] for x in w})
                     if len(ref) >= 30 and n_r >= 5:
                         med = float(np.median(ref))
                         mad = float(np.median(np.abs(np.array(ref) - med)))
@@ -258,6 +293,7 @@ def build_utilities(races: pd.DataFrame, runners: pd.DataFrame) -> pd.DataFrame:
             for rec in rf.itertuples(index=False):
                 if pd.notna(rec.finish_time_s) and pd.notna(dist) and gb:
                     time_ref.add((venue, surf, dist, gb), day, rec.finish_time_s, rk)
+                    time_ref.add(("*", surf, dist, gb), day, rec.finish_time_s, rk)
             if pd.notna(dist):
                 wk = defaultdict(lambda: [0, 0])
                 for rec in race.itertuples(index=False):
@@ -268,12 +304,12 @@ def build_utilities(races: pd.DataFrame, runners: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
-def score_race(u: pd.DataFrame, time_point: str) -> pd.DataFrame:
+def score_race(u: pd.DataFrame, time_point: str, prefix: str = "u_") -> pd.DataFrame:
     """1レース分の効用 → 群の点・総合点・被覆・信頼度（仕様のとおり）。"""
     res = pd.DataFrame(index=u.index)
     tied = {}
     for g in GROUPS:
-        vals = [None if pd.isna(x) else float(x) for x in u[f"u_{g}"]]
+        vals = [None if pd.isna(x) else float(x) for x in u[f"{prefix}{g}"]]
         if g == "going" and time_point == "24h":
             vals = [None] * len(vals)  # 対象開催日より前の予想では馬場は未採点
         if not u["is_flat"].all():
@@ -293,23 +329,30 @@ def score_race(u: pd.DataFrame, time_point: str) -> pd.DataFrame:
     return res
 
 
-def score_frame(df: pd.DataFrame, time_point: str) -> pd.DataFrame:
+def score_frame(df: pd.DataFrame, time_point: str, prefix: str = "u_") -> pd.DataFrame:
     """特徴表（u_* 列を含む）全体を、レースごとに score_race する。"""
-    parts = [score_race(g, time_point) for _, g in df.groupby("race_key", sort=False)]
+    parts = [score_race(g, time_point, prefix) for _, g in df.groupby("race_key", sort=False)]
     return pd.concat(parts).loc[df.index] if parts else pd.DataFrame(index=df.index)
 
 
 class RuleV1Model:
+    """variant="v1.0" は仕様どおり（総合点なしの馬は一番弱い扱い）。
+    "v1.1" は案：未採点を減らした効用を使い、総合点なしの馬はそのレースの総合点の平均として扱う。"""
     name = "rule"
 
-    def __init__(self, time_point: str):
+    def __init__(self, time_point: str, variant: str = "v1.0"):
         self.time_point = time_point
+        self.variant = variant
+        self.prefix = VARIANTS[variant]["prefix"]
 
     def fit(self, df):
         return self
 
     def score(self, df: pd.DataFrame) -> np.ndarray:
-        return pd.to_numeric(score_frame(df, self.time_point)["rule_total"], errors="coerce").to_numpy(dtype=float)
+        total = pd.to_numeric(score_frame(df, self.time_point, self.prefix)["rule_total"], errors="coerce")
+        if self.variant != "v1.0":
+            total = total.fillna(total.groupby(df["race_key"]).transform("mean"))
+        return total.to_numpy(dtype=float)
 
     def fingerprint(self) -> str:
-        return f"{RULE_V1_VERSION}:{MODE}"
+        return f"{RULE_V1_VERSION}:{self.variant}:{MODE}"
