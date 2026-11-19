@@ -2,7 +2,7 @@
 
 中身は のあ の pdf_text2.py（PDF→文字片）と parse_report2.py（文字片→レース表）。通信しない。
 使い方: python3 tools/jra_pdf/convert.py <PDFのフォルダ> <出力フォルダ> [pdf_manifest.csv]
-CMap（UniJIS-UTF32-H）の場所は ~/.heroines/paths.json の keiba.aj1_cmap から読む。
+CMap（UniJIS-UTF32-H）の場所は ~/.heroines/keiba.json の keiba.aj1_cmap から読む。
 """
 import csv
 import json
@@ -15,7 +15,7 @@ HERE = Path(__file__).resolve().parent
 
 
 def main(pdf_dir, out_dir, manifest=None):
-    cfg = json.loads(Path(os.environ.get("KEIBA_PATHS") or Path("~/.heroines/paths.json").expanduser()).read_text()).get("keiba", {})
+    cfg = json.loads(Path(os.environ.get("KEIBA_PATHS") or Path("~/.heroines/keiba.json").expanduser()).read_text()).get("keiba", {})
     env = {**os.environ, "AJ1_CMAP": os.path.expanduser(cfg["aj1_cmap"])}
     out = Path(out_dir)
     for d in ("pieces", "races", "meta"):

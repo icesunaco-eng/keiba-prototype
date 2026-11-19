@@ -171,7 +171,7 @@ def cmd_collect(paths, args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="keiba", description="三連複予想の検証（実購入はしない）")
-    ap.add_argument("--paths", help="paths.json の場所（既定 ~/.heroines/paths.json）")
+    ap.add_argument("--paths", help="keiba.json の場所（既定 ~/.heroines/keiba.json）")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("ingest")
     p.add_argument("--workers", type=int, default=6)

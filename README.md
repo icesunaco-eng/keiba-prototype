@@ -23,7 +23,7 @@ JRAの三連複を、過去データで予想して検証するための試作�
 | `src/keiba/ledger.py` | SQLite の追記専用台帳（レース×時点×方式×版、ハッシュ照合） |
 | `src/keiba/allocate.py` / `settle.py` | 配分（均等払戻・期待値・分数ケリー、100円単位・上限1万円）／精算（返還・同着・不成立） |
 | `src/keiba/report/` | iPhone幅の静的HTML |
-| `tools/collect/` | `~/競馬` にあった収集スクリプト（場所は paths.json から読む） |
+| `tools/collect/` | `~/競馬` にあった収集スクリプト（場所は keiba.json から読む） |
 
 ## 使い方（Mac）
 
@@ -31,7 +31,7 @@ JRAの三連複を、過去データで予想して検証するための試作�
 python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
 ```
 
-データの場所は `~/.heroines/paths.json` の `"keiba"` に書きます（キーは `src/keiba/config.py` の先頭に一覧）。
+データの場所は `~/.heroines/keiba.json` の `"keiba"` に書きます（キーは `src/keiba/config.py` の先頭に一覧）。
 
 ```bash
 bin/keiba all

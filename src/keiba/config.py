@@ -1,6 +1,9 @@
-"""データの置き場所。コードに /Users/... を書かず、~/.heroines/paths.json（または KEIBA_PATHS）から読む。
+"""データの置き場所。コードに /Users/... を書かず、~/.heroines/keiba.json（または KEIBA_PATHS）から読む。
 
-paths.json の "keiba" の下に置くキー（すべて任意。~ は展開する）：
+共有の ~/.heroines/paths.json は使わない（ほかのリポジトリが「値はすべて文字列」として読むため、入れ子の設定を
+入れると止まる。2026-11-19 にそれで りり・まむ・みき が止まった）。競馬の設定は競馬専用のファイルに置く。
+
+keiba.json の "keiba" の下に置くキー（すべて任意。~ は展開する）：
   integrated_dir   馬ID候補の統合版フォルダ（combined/runner_candidates.jsonl を含む）
   qa_zip           着順・時計・展開の統合ZIP（data/runner_results.jsonl, data/race_flow.jsonl）
   myu_zips         netkeiba結果表を含むZIPのglob（複数可）
@@ -21,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_PATHS_FILE = Path("~/.heroines/paths.json").expanduser()
+DEFAULT_PATHS_FILE = Path("~/.heroines/keiba.json").expanduser()
 
 
 def _expand(value: str) -> Path:
@@ -67,7 +70,8 @@ def load_paths(path: str | os.PathLike | None = None) -> Paths:
     file = Path(path or os.environ.get("KEIBA_PATHS") or DEFAULT_PATHS_FILE)
     raw: dict = {}
     if file.exists():
-        raw = json.loads(file.read_text(encoding="utf-8")).get("keiba", {})
+        data = json.loads(file.read_text(encoding="utf-8"))
+        raw = data.get("keiba", data)
     p = Paths()
     for key in ("integrated_dir", "qa_zip", "noa_v3_dir", "collect_root", "aj1_cmap"):
         if raw.get(key):
