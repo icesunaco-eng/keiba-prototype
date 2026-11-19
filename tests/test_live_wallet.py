@@ -238,7 +238,7 @@ def test_integrated_versions(tmp_path):
         col._save(RK, "result", "result", "/JRADB/x", "c", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
         run_live(paths)
         cmp = build_review(paths, "2025-08")["comparison"]
-        assert {c["method"] for c in cmp} == {"市場のみ（基準）", "学習のみ", "市場＋学習 1.0/0.2"} and all(c["races"] == 1 for c in cmp)
+        assert {c["method"] for c in cmp} == {"市場推定確率のみ（基準）", "学習のみ", "市場＋学習 1.0/0.2"} and all(c["races"] == 1 for c in cmp)
     finally:
         jra.parse_card = orig
 
