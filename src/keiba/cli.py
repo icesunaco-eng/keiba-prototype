@@ -5,6 +5,8 @@
   keiba evaluate   時間順の検証＋封印期間の評価。予想を台帳に保存し、検証Aの参考買い目で精算する
   keiba report     iPhone幅のHTMLレポートを作る
   keiba verify     台帳の中身がハッシュと一致するか確かめる
+  keiba collect tick      これからのレースの出馬表・オッズ・結果をJRA公式から時刻つきで集める（5分ごとに呼ぶ）
+  keiba collect install   上を5分ごとに動かす launchd の設定ファイルを書く（読み込みは表示するコマンドで）
   keiba all        上を順に全部
 """
 from __future__ import annotations
@@ -70,6 +72,34 @@ def cmd_verify(paths, args):
     led.close()
 
 
+def cmd_collect(paths, args):
+    from .live.collector import Collector
+    root = paths.data_dir / "live"
+    if args.action == "tick":
+        print(json.dumps(Collector(root).tick(), ensure_ascii=False))
+    elif args.action == "install":
+        import os
+        from pathlib import Path
+        from .config import REPO_ROOT
+        label = "com.heroines.keiba-collect"
+        plist = Path("~/Library/LaunchAgents").expanduser() / f"{label}.plist"
+        root.mkdir(parents=True, exist_ok=True)
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>{label}</string>
+<key>ProgramArguments</key><array><string>{REPO_ROOT / 'bin' / 'keiba'}</string><string>collect</string><string>tick</string></array>
+<key>StartInterval</key><integer>300</integer>
+<key>StandardOutPath</key><string>{root / 'collect.log'}</string>
+<key>StandardErrorPath</key><string>{root / 'collect.log'}</string>
+</dict></plist>
+""", encoding="utf-8")
+        print(f"書いた：{plist}")
+        print(f"動かす：launchctl bootstrap gui/{os.getuid()} {plist}")
+        print(f"止める：launchctl bootout gui/{os.getuid()}/{label}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="keiba", description="三連複予想の検証（実購入はしない）")
     ap.add_argument("--paths", help="paths.json の場所（既定 ~/.heroines/paths.json）")
@@ -87,6 +117,8 @@ def main(argv=None):
     p = sub.add_parser("report")
     p.add_argument("--version", default=None)
     sub.add_parser("verify")
+    p = sub.add_parser("collect")
+    p.add_argument("action", choices=["tick", "install"])
     args = ap.parse_args(argv)
     paths = load_paths(args.paths)
     if args.cmd == "all":
@@ -94,7 +126,7 @@ def main(argv=None):
             f(paths, args)
     else:
         {"ingest": cmd_ingest, "features": cmd_features, "evaluate": cmd_evaluate,
-         "report": cmd_report, "verify": cmd_verify}[args.cmd](paths, args)
+         "report": cmd_report, "verify": cmd_verify, "collect": cmd_collect}[args.cmd](paths, args)
     return 0
 
 

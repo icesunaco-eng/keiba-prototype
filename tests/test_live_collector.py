@@ -1,0 +1,125 @@
+"""JRA公式からの収集（ネットにはつながず、合成した小さなHTMLで試す）。"""
+import json
+from datetime import datetime
+
+from keiba.live import jra
+from keiba.live.collector import JST, Collector
+
+INDEX = "<a href='#' onclick=\"return doAction('/JRADB/accessD.html', 'pw01drl00082026050620261122/28');\">京都</a>"
+
+
+def race_list(odds=False, result=False):
+    odds_cell = ("<a href='#' onclick=\"return doAction('/JRADB/accessO.html', 'pw15orl10/AA');\">オッズ</a>" if odds else "未発表")
+    res_cell = ("<a href='/JRADB/accessS.html?CNAME=pw01sde1008202605061120261122/BD'>結果</a>" if result else "未確定")
+    return f"""<table id="race_list"><caption><h2>2026年11月22日（日曜） 5回京都6日</h2></caption><tbody><tr>
+<th class="race_num"><a href="/JRADB/accessD.html?CNAME=pw01dde0108202605061120261122/55"><img alt="11レース"></a></th>
+<td class="time">15時40分</td><td class="race_name">テストS</td>
+<td class="dist"><span class="course">芝</span><span class="dist">1,600m</span><span class="num">18頭</span></td>
+<td class="syutsuba"><a href="/JRADB/accessD.html?CNAME=pw01dde0108202605061120261122/55">出馬表</a></td>
+<td class="odds">{odds_cell}</td><td class="result">{res_cell}</td></tr></tbody></table>"""
+
+
+CARD = """<table><tbody><tr><td class="waku"><img alt="枠3"></td><td class="num">5</td><td class="horse">
+<div class="name"><a href="/JRADB/accessU.html?CNAME=pw01dud002022105396/56">テストウマ</a></div>
+<p class="trainer"><a href="#">調教 師</a></p><ul><li class="sire"><span>父：</span>チチ</li>
+<li class="mare"><span>母：</span>ハハ<span class="bloodmare">(母の父：ハハチチ)</span></li></ul></td>
+<td class="jockey"><p class="age">牝4/鹿</p><p class="weight">55.0<span>kg</span></p><p class="jockey"><a href="#">騎 手</a></p></td>
+<td class="past p1"><div class="date">2026年10月17日</div><div class="rc">東京</div><div class="place">6<span>着</span></div>
+<span class="dist">1600芝</span><p class="time">1:32.8</p><div class="f3">3F 35.2</div></td></tr></tbody></table>"""
+
+ODDS = """<a href='#' onclick="return doAction('/JRADB/accessO.html', 'pw151ou1/11');">単勝・複勝</a>
+<a href='#' onclick="return doAction('/JRADB/accessO.html', 'pw156ou1/66');">3連複</a>"""
+
+
+class FakeClient:
+    def __init__(self, pages):
+        self.pages, self.count, self.calls = pages, 0, []
+
+    def get(self, path, cname):
+        self.count += 1
+        self.calls.append(cname)
+        return self.pages(cname)
+
+
+def test_parse_race_list_and_card():
+    m = jra.parse_race_list(race_list(odds=True))
+    assert m["race_date"] == "2026-11-22" and m["venue"] == "京都"
+    r = m["races"][0]
+    assert r["race_number"] == 11 and r["post_time"] == "15:40" and r["distance_m"] == 1600 and r["field_size"] == 18
+    assert r["card_cname"] == "pw01dde0108202605061120261122/55" and r["odds_links"] == [("/JRADB/accessO.html", "pw15orl10/AA")]
+    c = jra.parse_card(CARD)[0]
+    assert c["horse_number"] == 5 and c["waku"] == 3 and c["horse_id"] == "2022105396"
+    assert (c["sex"], c["age"], c["weight_carried"]) == ("牝", 4, 55.0)
+    assert (c["sire"], c["dam"], c["damsire"]) == ("チチ", "ハハ", "ハハチチ")
+    assert c["past_runs"][0]["finish"] == 6 and c["past_runs"][0]["f3"] == "35.2"
+
+
+def _collector(tmp_path, when, odds=True, result=False):
+    def pages(cname):
+        if cname.startswith("pw01dli"):
+            return INDEX
+        if cname.startswith("pw01drl"):
+            return race_list(odds=odds, result=result)
+        if cname.startswith("pw01dde"):
+            return CARD
+        if cname.startswith("pw15orl"):
+            return ODDS
+        return "<html>odds or result</html>"
+    clock = {"now": when}
+    col = Collector(tmp_path, client=FakeClient(pages), now=lambda: clock["now"])
+    return col, clock
+
+
+def test_time_point_windows_and_no_double_capture(tmp_path):
+    col, clock = _collector(tmp_path, datetime(2026, 11, 22, 14, 50, tzinfo=JST))  # 発走50分前 → 1h の窓
+    out = col.tick()
+    assert out["saved"] >= 3
+    kinds = [json.loads(x)["kind"] for x in (tmp_path / "snapshots.jsonl").read_text().splitlines()]
+    assert kinds[:4] == ["card", "odds_first", "odds_win", "odds_trio"]
+    rec = json.loads((tmp_path / "snapshots.jsonl").read_text().splitlines()[0])
+    assert rec["time_point"] == "1h" and rec["race_key"] == "2026-11-22|京都|11" and len(rec["sha256"]) == 64
+    assert (tmp_path / rec["path"]).exists()
+    assert col.tick()["saved"] == 0  # 同じ窓では二度取らない
+    clock["now"] = datetime(2026, 11, 22, 15, 30, tzinfo=JST)  # 10分前 → 15m
+    assert col.tick()["saved"] >= 2
+
+
+def test_odds_not_yet_on_sale_is_recorded(tmp_path):
+    col, _ = _collector(tmp_path, datetime(2026, 11, 21, 16, 0, tzinfo=JST), odds=False)  # 前日（24h の窓）
+    col.tick()
+    kinds = [json.loads(x)["kind"] for x in (tmp_path / "snapshots.jsonl").read_text().splitlines()]
+    assert kinds == ["card", "odds_unavailable"]
+
+
+def test_result_waits_until_link_appears(tmp_path):
+    col, clock = _collector(tmp_path, datetime(2026, 11, 22, 16, 30, tzinfo=JST), result=False)
+    col.tick()
+    assert "2026-11-22|京都|11|result" not in col.state["taken"]
+    col.client.pages = lambda c: race_list(result=True) if c.startswith("pw01drl") else "<html>result</html>"
+    clock["now"] = datetime(2026, 11, 22, 16, 40, tzinfo=JST)
+    col.tick()
+    assert "2026-11-22|京都|11|result" in col.state["taken"]
+
+
+def test_client_spacing_and_cap():
+    calls = []
+
+    class Res:
+        def __init__(self, b): self.b = b
+        def read(self): return self.b
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def opener(req, timeout):
+        calls.append(req.full_url)
+        return Res("テスト".encode("cp932"))
+
+    c = jra.Client(max_requests=2, interval=0.0, opener=opener)
+    assert c.get("/JRADB/accessD.html", "x") == "テスト"
+    c.get("/JRADB/accessD.html", "y")
+    try:
+        c.get("/JRADB/accessD.html", "z")
+        assert False
+    except RuntimeError:
+        pass
+    assert calls == ["https://www.jra.go.jp/JRADB/accessD.html"] * 2
