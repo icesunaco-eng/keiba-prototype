@@ -17,6 +17,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .ledger import Ledger
@@ -42,17 +43,63 @@ def _results(paths) -> dict:
     return out, state
 
 
-def build_review(paths, month: str) -> dict:
+CMP_METHODS = ["int_market", "ml_lgbm", "int_market_ml", "int_market_ml_mam"]
+CMP_LABELS = {"int_market": "市場のみ（基準）", "ml_lgbm": "学習のみ", "int_market_ml": "市場＋学習 1.0/0.2",
+              "int_market_ml_mam": "市場＋学習＋まむ 1.0/0.2/0.2"}
+
+
+def _in_range(day: str, month: str | None, start: str | None, end: str | None) -> bool:
+    if start or end:
+        return (not start or day >= start) and (not end or day <= end)
+    return day.startswith(month)
+
+
+def comparison(preds: list, setts: list, results: dict) -> list:
+    """同じレース・同じ時点で、市場のみ・学習のみ・統合を比べる（あいすとの取り決め）。
+    主の物差しは対数損失（実際の組の確率。全組の確率が正式なものだけ）、補助に上位10組の的中率と仮想回収率。"""
+    full = {}
+    for p in preds:
+        res = results.get(p["race_key"])
+        if p["method"] in CMP_METHODS and p.get("trio_probs_full") and res and res["actual"]:
+            full[(p["race_key"], p["time_point"], p["method"])] = p
+    roi = {}
+    for s in setts:
+        roi.setdefault((s["race_key"], s["method"]), []).append(s)
+    out = []
+    for group in (["int_market", "ml_lgbm", "int_market_ml"], ["int_market", "ml_lgbm", "int_market_ml", "int_market_ml_mam"]):
+        keys = {(rk, tp) for rk, tp, m in full if m == group[0]}
+        for m in group[1:]:
+            keys &= {(rk, tp) for rk, tp, mm in full if mm == m}
+        if not keys:
+            continue
+        for m in group:
+            ll, hit = [], []
+            for rk, tp in keys:
+                p = full[(rk, tp, m)]
+                actual = results[rk]["actual"]
+                ll.append(-np.log(max(p["trio_probs_full"].get(actual, 0.0), 1e-6)))
+                hit.append(actual in [t["combo"] for t in p["trios"][:10]])
+            st = [x for rk, _ in keys for x in roi.get((rk, m), []) if x["wallet"] == "ev_weighted"]
+            stake = sum(x["stake"] for x in st)
+            out.append({"set": "まむ入り" if "int_market_ml_mam" in group else "基本", "method": CMP_LABELS[m], "races": len(keys),
+                        "logloss": round(float(np.mean(ll)), 4), "hit10": round(float(np.mean(hit)), 4),
+                        "roi_ev": round(sum(x["returned"] for x in st) / stake, 4) if stake else None, "bet_races": sum(x["stake"] > 0 for x in st)})
+    return out
+
+
+def build_review(paths, month: str | None, start: str | None = None, end: str | None = None) -> dict:
     led = Ledger(paths.ledger_path, read_only=True) if paths.ledger_path.exists() else None
-    preds = [p for p in (led.predictions() if led else []) if p["version"].startswith("live-") and p["race_date"].startswith(month)]
-    setts = [s for s in (led.settlements() if led else []) if s["version"].startswith("live-") and s["race_key"].startswith(month)]
+    preds = [p for p in (led.predictions() if led else []) if p["version"].startswith("live-") and _in_range(p["race_date"], month, start, end)]
+    setts = [s for s in (led.settlements() if led else []) if s["version"].startswith("live-") and _in_range(s["race_key"][:10], month, start, end)]
     if led:
         led.close()
     results, state = _results(paths)
-    review = {"month": month, "races_predicted": len({p["race_key"] for p in preds}),
+    review = {"month": month or f"{start}〜{end}", "races_predicted": len({p["race_key"] for p in preds}),
               "races_with_result": len({p["race_key"] for p in preds if p["race_key"] in results}),
               "versions": sorted({p["version"] for p in preds}),
               "judgement": "回収率の達成判定はしない（取り決め：初週は判定しない。数週たまるまで参考）。実購入はしない"}
+
+    review["comparison"] = comparison(preds, setts, results)
 
     # 1. 財布
     w = pd.DataFrame(setts)
@@ -94,19 +141,20 @@ def build_review(paths, month: str) -> dict:
 
     # 5. オッズの合格判定
     oc = odds_check(paths)
-    oc = oc[oc["race_key"].str.startswith(month)] if len(oc) else oc
+    oc = oc[oc["race_key"].map(lambda k: _in_range(k[:10], month, start, end))] if len(oc) else oc
     review["odds_gate"] = [{"time_point": tp, "checked": len(d), "passed": int(d["pass"].sum()),
                             "reasons": dict(Counter(r for x in d["reasons"] if x for r in x.split(" / ")).most_common(5))}
                            for tp, d in oc.groupby("time_point")] if len(oc) else []
 
     # 6. 収集
-    missed = [k for k in state.get("missed_notified", []) if k.startswith(month)]
+    missed = [k for k in state.get("missed_notified", []) if _in_range(k[:10], month, start, end)]
     review["collection"] = {"missed": len(missed), "missed_examples": missed[:10]}
     return review
 
 
-def write_review(paths, month: str) -> Path:
-    r = build_review(paths, month)
+def write_review(paths, month: str | None, start: str | None = None, end: str | None = None) -> Path:
+    r = build_review(paths, month, start, end)
+    month = month or f"{start}_{end}"
     out = paths.data_dir / "review"
     out.mkdir(parents=True, exist_ok=True)
     (out / f"{month}.json").write_text(json.dumps(r, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
@@ -121,6 +169,10 @@ def write_review(paths, month: str) -> Path:
     parts = [f"<h1>月次の振り返り {html.escape(month)}</h1>",
              f"<p class='muted'>予想したレース {r['races_predicted']}・結果が分かったレース {r['races_with_result']}・版 {html.escape(', '.join(r['versions']) or '–')}</p>",
              f"<p class='warn'>{html.escape(r['judgement'])}</p>",
+             "<h2>比較：市場のみ・学習のみ・統合（同じレース・同じ時点）</h2>",
+             table(r["comparison"], ["set", "method", "races", "logloss", "hit10", "roi_ev", "bet_races"],
+                   ["組", "方式", "対象", "対数損失（主）", "上位10組", "仮想回収率（期待値配分）", "賭けたレース"]),
+             "<p class='muted'>対数損失は小さいほど良い。全組の確率が正式なものだけで計算。8週ごとの点検は --from/--to で期間を指定</p>",
              "<h2>仮想の財布</h2>", table(r["wallets"], ["method", "wallet", "races", "bet_races", "stake", "returned", "roi", "hit_races"],
                                       ["方式", "配分", "レース", "賭けたレース", "賭け金", "払戻", "回収率", "的中レース"]),
              "<h2>予想の当たり具合</h2>", table(r["accuracy"], ["method", "time_point", "races", "上位5", "上位10", "上位20"],
@@ -142,5 +194,5 @@ def _cell(v) -> str:
     if isinstance(v, dict):
         return "、".join(f"{k} {n}" for k, n in v.items()) or "–"
     if isinstance(v, float):
-        return f"{v * 100:.1f}%" if v <= 1.5 else f"{v:,.0f}"
+        return f"{v * 100:.1f}%" if v <= 1.5 else (f"{v:.3f}" if v < 20 else f"{v:,.0f}")
     return f"{v:,}" if isinstance(v, int) else str(v)

@@ -28,11 +28,19 @@ from ..features.asof import build_features
 from ..ledger import Ledger, canonical, code_hash, sha
 from ..models import rule_v1
 from ..models.trio import fit_calibration
+from ..integrate import pool
 from ..settle import settle_trio
 from . import jra
 from .collector import DEADLINE_MIN, deadline
 
 WALLET_METHODS = ("ml_lgbm", "ml_market")
+# あいす統合（別枠の参考予想）。重みは あいすの回答（2026-11-19）どおり固定。市場のみが比べる基準
+INT_METHODS = {
+    "int_market": {"market": 1.0},
+    "int_market_ml": {"market": 1.0, "ml": 0.2},
+    "int_market_ml_mam": {"market": 1.0, "ml": 0.2, "mam": 0.2},
+}
+INT_TIME_POINTS = ("1h", "15m")
 RULE_METHODS = {"rule": "v1.0", **{f"rule_{v.replace('.', '').replace('-', '_')}": v for v in rule_v1.COMPARISON_VARIANTS}}
 ALLOC_METHODS = ("equal_payout", "ev_weighted", "kelly")
 TP_ORDER = {"24h": 0, "1h": 1, "15m": 2}
@@ -195,6 +203,7 @@ def run_live(paths, log=print) -> dict:
     version = f"live-{code_hash()[:8]}"
     led = Ledger(paths.ledger_path)
     done = {(p["race_key"], p["time_point"], p["method"]) for p in led.predictions(version)}
+    mam_preds = {(p["race_key"], p["time_point"]): p for p in led.predictions() if p["method"] == "text_ai"}
     n_pred = n_set = 0
     for (rk, tp), inp in sorted(inputs.items()):
         if tp == "result":
@@ -231,12 +240,16 @@ def run_live(paths, log=print) -> dict:
                                                         "stakes": x.stakes, "total": x.total})(
                     allocate(probs, odds, a, calibrated=cal.n_races >= 30)) for a in ALLOC_METHODS}
                 payload["odds_gate"] = gate
+                payload["trio_probs_full"] = {c: round(p, 7) for c, p in probs.items()}
             payload["inputs"] = {"snapshots": inp["snapshots"], "card_fetched_at": inp["card_fetched_at"],
                                  "scratched_known": inp["scratched"], "win_odds_ok": inp["win"]["ok"]}
             payload["period"] = "live"
             led.add_prediction(rk, tp, m, version, payload, sha(canonical(inp["snapshots"]))[:16],
                                sha(model.fingerprint() + canonical(cal.__dict__))[:16], code_hash())
             n_pred += 1
+        # ---- あいす統合（別枠の参考予想）----
+        if tp in INT_TIME_POINTS:
+            n_pred += _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state)
     # 精算（財布を持つ方式だけ。まむ（text_ai）など、ほかの live 版の予想もまとめて精算する）
     preds = {}
     for p in led.predictions():
@@ -267,6 +280,73 @@ def run_live(paths, log=print) -> dict:
     led.commit()
     led.close()
     return {"predicted": n_pred, "settled": n_set, "version": version}
+
+
+def market_probs(trio_odds: dict) -> dict:
+    """発走前の三連複オッズ → 市場の確率（1/オッズ を合計1に直したもの。控除分は割合で消える）。"""
+    inv = {c: 1 / o for c, o in trio_odds.items() if o and o > 0}
+    total = sum(inv.values())
+    return {c: v / total for c, v in inv.items()}
+
+
+def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) -> int:
+    """統合の3版を記録する。入力が欠けたら黙って外さず、理由を残して未配分にする。"""
+    from datetime import timezone
+    added = 0
+    r = state["races"][rk]
+    dl = deadline(r["race_date"], r["post_time"], tp)
+    now = datetime.now(dl.tzinfo)
+    gate = inp["gate"]
+    nums = g["horse_number"].astype(int).tolist()
+    model, cal = models["ml_lgbm"]
+    ml = {"-".join(map(str, sorted(nums[i] for i in c))): p
+          for c, p in ev.trio_probs(cal.strength(np.asarray(model.score(g), dtype=float)), cal.gamma).items()}
+    for m, w in INT_METHODS.items():
+        if (rk, tp, m) in done:
+            continue
+        reasons, sources, formal = [], {}, True
+        if gate["pass"]:
+            sources["market"] = market_probs(inp["trio"]["odds"])
+        else:
+            reasons.append("市場：三連複オッズが合格していない（" + " / ".join(gate.get("reasons", [])) + "）")
+        if "ml" in w:
+            sources["ml"] = ml
+        if "mam" in w:
+            mp = mam_preds.get((rk, tp))
+            if mp is None:
+                if now <= dl:
+                    continue  # 締切まではまむの予想を待つ
+                reasons.append("まむ：締切までに予想が無い")
+            else:
+                sources["mam"] = mp.get("trios_all") or {}
+                if not mp.get("complete"):
+                    formal = False
+                    reasons.append("まむ：全組の確率がそろっていない（足りない組を埋めて正式な確率にはしない。参考表示）")
+        missing = [k for k in w if k not in sources]
+        if missing:
+            formal = False
+        pooled = pool(sources, w) if "market" in sources else {}
+        allow = formal and gate["pass"] and bool(pooled)
+        alloc = {}
+        for a in ALLOC_METHODS:
+            if allow:
+                x = allocate(pooled, inp["trio"]["odds"], a, calibrated=True)
+                alloc[a] = {"status": x.status, "stakes": x.stakes, "total": x.total}
+            else:
+                alloc[a] = {"status": "not_allocated", "stakes": {}, "total": 0, "reason": " / ".join(reasons) or "入力が足りない"}
+        payload = {
+            "race_date": str(g["race_date"].iloc[0].date()), "method_kind": "integrated", "uses_post_race_odds": False,
+            "weights": w, "inputs_used": sorted(sources), "inputs_missing": missing, "formal_probability": formal and bool(pooled),
+            "trios": [{"combo": c, "p": round(p, 6)} for c, p in list(pooled.items())[:20]],
+            "trio_probs_full": {c: round(p, 7) for c, p in pooled.items()} if formal else None,
+            "allocation": alloc, "odds_gate": gate, "reasons": reasons, "period": "live",
+            "notes": ["あいす統合（別枠の参考予想）。ルールは入れない"],
+            "horses": [{"n": n} for n in nums], "confidence": "Z" if not allow else "–",
+        }
+        led.add_prediction(rk, tp, m, version, payload, sha(canonical(inp["snapshots"]))[:16],
+                           sha(canonical(w))[:16], code_hash())
+        added += 1
+    return added
 
 
 def odds_check(paths) -> pd.DataFrame:
