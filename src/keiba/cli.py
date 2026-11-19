@@ -13,7 +13,7 @@
   keiba review [--month YYYY-MM]  月次の振り返り（data/review/<月>.html・.json）
   keiba mam export        まむ（文章AI方式）への入力の束を data/mam/outbox/ に書く
   keiba mam import <file> まむの予想を検証して台帳に入れる（締切後は受け付けない）
-  keiba app [--port 8765] [--open]  確認アプリ（このMacの中だけ。予想を見る・購入を記録する）
+  keiba app [--port 8765] [--open] [--notify] [--lan]  確認アプリ（予想を見る・購入を記録する。ふだんはこのMacの中だけ）
   keiba all        上を順に全部
 """
 from __future__ import annotations
@@ -203,11 +203,13 @@ def main(argv=None):
     p.add_argument("--open", action="store_true", help="起動したらブラウザで開く")
     p.add_argument("--store", default=None, help="購入記録の保存先（試すとき用。既定 data/app/purchases.sqlite）")
     p.add_argument("--mode", choices=["live", "check"], default="live", help="最初に見るデータ（check＝検証データ。画面の確認用）")
+    p.add_argument("--notify", action="store_true", help="自信度Aと、買い目に取消馬が残るレースを発走20分前からMacに通知")
+    p.add_argument("--lan", action="store_true", help="同じWi-FiのiPhoneから開けるようにする（.env の KEIBA_APP_PASSPHRASE が要る）")
     args = ap.parse_args(argv)
     paths = load_paths(args.paths)
     if args.cmd == "app":
         from .app.server import serve
-        serve(paths, args.port, args.open, args.store, args.mode)
+        serve(paths, args.port, args.open, args.store, args.mode, args.lan, args.notify)
         return 0
     if args.cmd == "all":
         for f in (cmd_ingest, cmd_features, cmd_evaluate, cmd_report, cmd_verify):

@@ -14,6 +14,8 @@ from urllib.parse import urlencode
 
 from .data import (ALLOC_LABEL, ALLOC_STATUS, MAIN_WALLET, METHOD_LABEL, METHOD_TABS, MODES, TIME_POINTS, TP_LABEL,
                    WALLET_LABEL, allocation_of, distance_band, horse_probs, is_skip, marks_of)
+from .checks import (bias_check, card_flags, change_conditions, check_summary, horse_comment, now_jst, post_datetime,
+                     pre_publish_check)
 from .store import settle_purchase
 
 WEEK = "月火水木金土日"
@@ -95,6 +97,11 @@ input,textarea,select{font:inherit;width:100%;padding:9px 12px;border-radius:12p
 textarea{min-height:90px}.pair{display:grid;grid-template-columns:1.2fr 1fr;gap:8px;margin-bottom:8px}
 .opt{display:flex;gap:8px;flex-wrap:wrap}.opt label{display:flex;align-items:center;gap:6px;margin:0;padding:8px 12px;border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--fg)}
 .opt input{width:auto}.err{background:var(--warn-bg);color:var(--warn-fg);border-radius:12px;padding:8px 12px;margin:0 0 12px}
+.ok-msg{background:var(--soft);color:var(--accent-strong);border-radius:12px;padding:8px 12px;margin:0 0 12px;font-size:.88rem}
+.ck{display:flex;gap:8px;padding:5px 0;border-top:1px dashed var(--line)}.ck:first-of-type{border-top:0}
+.ck i{flex:none;font-style:normal;width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:.8rem;font-weight:700;background:var(--line);color:var(--muted)}
+.ck i.y{background:var(--accent);color:var(--on)}.ck i.n{background:var(--bad);color:var(--card)}
+.inline{display:inline}.inline button{width:100%}
 .mode{background:var(--warn-bg);color:var(--warn-fg);border-radius:12px;padding:6px 12px;font-size:.8rem;margin:0 0 10px}
 nav.tabs{position:fixed;left:0;right:0;bottom:0;z-index:5;background:var(--card);border-top:1px solid var(--line);padding:6px 0 calc(6px + env(safe-area-inset-bottom))}
 nav.tabs div{max-width:640px;margin:0 auto;display:flex}
@@ -166,7 +173,8 @@ def empty(title: str, body: str, link: str = "") -> str:
     return f'<div class="card flat empty"><b>{h(title)}</b><span class="muted">{h(body)}</span>{link}</div>'
 
 
-def layout(ctx, title: str, body: str, tab: str | None = None, back: str | None = None, top: str = "") -> str:
+def layout(ctx, title: str, body: str, tab: str | None = None, back: str | None = None, top: str = "",
+           refresh: bool = False) -> str:
     theme = ctx.get("theme", "auto")
     attrs = (f' data-theme="{h(theme)}"' if theme in ("light", "dark") else "") + (' data-size="large"' if ctx.get("size") == "large" else "")
     left = f'<a class="ib" href="{h(back)}" aria-label="戻る">{icon("back")}</a>' if back else ""
@@ -176,10 +184,22 @@ def layout(ctx, title: str, body: str, tab: str | None = None, back: str | None 
                    for k, lab, ic in TABS)
     return (f'<!doctype html><html lang="ja"{attrs}><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'
+            + (f'<meta http-equiv="refresh" content="{REFRESH_SEC}">' if refresh and ctx.get("refresh", "on") == "on" else "") +
             f'<meta name="theme-color" content="#639922"><title>{h(title)}｜三連複の確認</title><style>{CSS}</style></head>'
             f'<body><header class="top">{left}<span class="ttl">{h(top)}</span>'
             f'<a class="ib" href="/menu" aria-label="メニュー">{icon("menu")}</a></header>'
             f'<main>{mode}{body}</main><nav class="tabs" aria-label="タブ"><div>{tabs}</div></nav></body></html>')
+
+
+REFRESH_SEC = 60
+
+
+def auto_refresh(ctx, src) -> bool:
+    return src.mode == "live"
+
+
+def where_text(ctx) -> str:
+    return "同じWi-FiのiPhoneからも、合言葉で開けるようにしているよ" if ctx.get("lan") else "このMacの中だけで動いていて、外には公開していないよ"
 
 
 def seg(items, current, make) -> str:
@@ -211,15 +231,37 @@ def default_day(src) -> str | None:
 
 # ======================= レース =======================
 
+def _stale_banner(ctx, src) -> str:
+    """収集が止まっていそうなら、一覧のいちばん上に出す（古い情報を最新と見せない）。"""
+    if src.mode != "live":
+        return ""
+    health = ctx.get("health") or {}
+    checked = health.get("checked_at")
+    now = now_jst()
+    soon = [r for r in src.races.values() if (post_datetime(r) or now) > now and (post_datetime(r) - now).days < 7]
+    if not soon:
+        return ""
+    if not checked:
+        return '<div class="err small">収集の記録（health.json）が見つからないよ。データの状態を確かめてね</div>'
+    try:
+        age = (now - datetime.fromisoformat(checked)).total_seconds() / 60
+    except ValueError:
+        return ""
+    if age > 30:
+        return (f'<div class="err small">収集の最終確認が{age:.0f}分前。止まっているかも。'
+                f'表示は {checked[11:16]} 時点の情報だよ <a href="/status"><u>データの状態</u></a></div>')
+    return ""
+
+
 def races_page(ctx, src, store, q) -> str:
     days = src.days()
     day = q.get("day") or default_day(src)
     tp = q.get("tp") if q.get("tp") in TIME_POINTS else None
     if tp is None:  # その日にある一番新しい時点（検証データは 24時間前・1時間前だけ）
         have = {t for r in src.races_on(day or "") for t in TIME_POINTS if src.pick(r["race_key"], "ml", t)[1]}
-        tp = next((t for t in reversed(TIME_POINTS) if t in have), "15m")
+        tp = next((t for t in reversed(TIME_POINTS) if t in have), "24h")   # まだ何も無ければ、最初に出る24時間前
     if not day:
-        body = "<h1>レース</h1><p class='lead'>予想を選ぶ、見送る、振り返る</p>" + empty(
+        body = "<h1>レース</h1><p class='lead'>予想を選ぶ、見送る、振り返る</p>" + _stale_banner(ctx, src) + empty(
             "まだレースが無いよ", "収集が動くと、ここに開催日のレースが並ぶよ。", '<p><a class="chip ok" href="/status">データの状態を見る</a></p>')
         return layout(ctx, "レース", body, "races")
     i = days.index(day) if day in days else 0
@@ -231,47 +273,70 @@ def races_page(ctx, src, store, q) -> str:
     if venue and venue not in venues:
         venue = ""
     shown = [r for r in races if not venue or r["venue"] == venue]
-    bought = {e["race_key"] for e in store.entries(data_mode=src.mode) if e["kind"] == "buy"}
+    entries = store.entries(data_mode=src.mode)
+    bought = {e["race_key"] for e in entries if e["kind"] == "buy"}
+    skipped_me = {e["race_key"] for e in entries if e["kind"] == "skip"}
     nav = (f'<div class="row" style="margin:0 0 10px"><a class="ib" href="{h(url("/races", day=prev_d, tp=tp))}" aria-label="前の日"'
            f'{" style=visibility:hidden" if not prev_d else ""}>‹</a><b>{day_label(day)}</b>'
            f'<a class="ib" href="{h(url("/races", day=next_d, tp=tp))}" aria-label="次の日"{" style=visibility:hidden" if not next_d else ""}>›</a></div>')
-    body = ["<h1>レース</h1><p class='lead'>予想を選ぶ、見送る、振り返る</p>", nav,
+    body = ["<h1>レース</h1><p class='lead'>予想を選ぶ、見送る、振り返る</p>", _stale_banner(ctx, src), nav,
             seg([(t, TP_LABEL[t]) for t in TIME_POINTS], tp, lambda t: url("/races", day=day, tp=t, venue=venue))]
     if len(venues) > 1:
         body.append(chips([("", "すべて"), *[(v, v) for v in venues]], venue, lambda v: url("/races", day=day, tp=tp, venue=v)))
-    cards = []
+    cards, counts = [], Counter()
+    alloc = MAIN_WALLET[src.mode] if src.mode == "live" else None
+    now = now_jst()
     for r in shown:
         rk = r["race_key"]
         m, p = src.pick(rk, "ml", tp)
         res = src.results.get(rk)
-        alloc = MAIN_WALLET[src.mode] if src.mode == "live" else None
         status = []
+        a = allocation_of(p, alloc) if (p and alloc) else {}
+        stakes = a.get("stakes") or {}
         if rk in bought:
             status.append('<span class="chip ok">購入記録あり</span>')
+        elif rk in skipped_me:
+            status.append('<span class="chip">見送り（自分）</span>')
         if p and alloc and is_skip(p, alloc):
             status.append('<span class="chip">見送り</span>')
+            counts["skip"] += 1
         if res and res.get("actual"):
             status.append(f'<span class="chip">結果 {h(res["actual"])}</span>')
+        if src.mode == "live":
+            for cls, text in card_flags(p, stakes, r, bool(res and res.get("actual")), now, src.names.get(rk)):
+                status.append(f'<span class="chip {cls}">{h(text)}</span>')
+                counts["warn"] += cls == "warn"
         if p:
-            a = allocation_of(p, alloc) if alloc else {}
-            total = a.get("total") or sum((a.get("stakes") or {}).values())
-            foot = (f"三連複 {len(a.get('stakes') or {})}点・{yen(total)}" if total else
+            counts["pred"] += 1
+            counts["A"] += p.get("confidence") == "A"
+            counts["bet"] += bool(stakes)
+            total = sum(stakes.values())
+            foot = (f"三連複 {len(stakes)}点・{yen(total)}" if total else
                     ALLOC_STATUS.get(a.get("status"), "") if alloc else f"確率の高い組 {h(p['trios'][0]['combo']) if p.get('trios') else '—'}")
             inner = (f'<div class="row"><div><b>{h(race_title(r))}</b> <span class="muted">{h(r.get("post_time") or "")}</span>'
                      f'<div style="font-size:1.05rem;font-weight:700">{h(race_name(r)) or "&nbsp;"}</div></div>{conf_badge(p.get("confidence"))}</div>'
-                     f'<div>{marks_html(src, rk, p)}</div><div class="row muted small" style="margin-top:6px">'
-                     f'<span>{h(foot)}</span><span>{"".join(status)}</span></div>')
+                     f'<div>{marks_html(src, rk, p)}</div><div class="muted small" style="margin-top:6px">{h(foot)}</div>'
+                     f'<div style="margin-top:2px">{"".join(status)}</div>')
             hot = " hot" if p.get("confidence") == "A" else ""
         else:
             earlier = src.latest_tp(rk)
             inner = (f'<div class="row"><div><b>{h(race_title(r))}</b> <span class="muted">{h(r.get("post_time") or "")}</span>'
                      f'<div style="font-weight:700">{h(race_name(r)) or "&nbsp;"}</div></div>{conf_badge(None)}</div>'
                      f'<div class="muted small">{TP_LABEL[tp]}の予想はまだ無いよ'
-                     f'{"（" + TP_LABEL[earlier] + "はある）" if earlier else ""} {"".join(status)}</div>')
+                     f'{"（" + TP_LABEL[earlier] + "はある）" if earlier else ""}</div><div>{"".join(status)}</div>')
             hot = ""
         cards.append(f'<a class="card{hot}" style="display:block" href="{h(url("/race", rk=rk, tp=tp))}">{inner}</a>')
+    if shown:
+        bits = [f"{len(shown)}R", f"予想 {counts['pred']}", f"自信度A {counts['A']}"]
+        if alloc:
+            bits += [f"買い目あり {counts['bet']}", f"見送り {counts['skip']}"]
+        if counts["warn"]:
+            bits.append(f"警告 {counts['warn']}")
+        body.append(f'<p class="muted small" style="margin:-4px 0 10px">{h("・".join(bits))}'
+                    + (f'<br>読み込み {datetime.fromtimestamp(src.loaded_at):%H:%M}・1分ごとに読み直すよ' if auto_refresh(ctx, src)
+                       and ctx.get("refresh", "on") == "on" else "") + '</p>')
     body.append("".join(cards) or empty("この日のレースは無いよ", ""))
-    return layout(ctx, "レース", "".join(body), "races")
+    return layout(ctx, "レース", "".join(body), "races", refresh=auto_refresh(ctx, src))
 
 
 def _race_header(src, r, back_label="") -> str:
@@ -317,7 +382,8 @@ def race_page(ctx, src, store, q) -> str:
     tp = q.get("tp") if q.get("tp") in TIME_POINTS else (src.latest_tp(rk, tab) or "15m")
     alloc = q.get("a") if q.get("a") in ALLOC_LABEL else MAIN_WALLET["live"]
     back = url("/races", day=r["race_date"], tp=tp)
-    body = [_race_header(src, r),
+    flash = {"skip": "見送りを記録したよ（履歴でいつでも直せる）"}.get(q.get("saved", ""), "")
+    body = [_race_header(src, r), f'<div class="ok-msg">{h(flash)}</div>' if flash else "",
             chips([(k, v[0]) for k, v in METHOD_TABS.items()], tab, lambda k: url("/race", rk=rk, m=k, tp=tp, a=alloc)),
             seg([(t, TP_LABEL[t]) for t in TIME_POINTS], tp, lambda t: url("/race", rk=rk, m=tab, tp=t, a=alloc))]
     m, p = src.pick(rk, tab, tp)
@@ -328,12 +394,17 @@ def race_page(ctx, src, store, q) -> str:
         body.append(empty(f"{METHOD_TABS[tab][0]}の{TP_LABEL[tp]}の予想は無いよ",
                           msg + (f"ある時点：{hint}" if hint else "この方式の予想はまだ無いよ。")))
         body.append(link_list([("方式くらべ", "どの方式が何を選んだか", url("/race/compare", rk=rk, tp=tp))]))
-        return layout(ctx, race_title(r), "".join(body), "races", back, race_title(r))
+        return layout(ctx, race_title(r), "".join(body), "races", back, race_title(r), refresh=auto_refresh(ctx, src))
     body.append(f'<div class="card"><div class="row"><h2>印</h2>{conf_badge(p.get("confidence"))}</div>'
                 f'<div>{marks_html(src, rk, p, names=True)}</div>'
                 f'<a class="muted small" style="display:block;margin-top:8px" href="{h(url("/race/horses", rk=rk, m=tab, tp=tp))}">全頭の評価を見る ›</a></div>')
     a = allocation_of(p, alloc)
     stakes = a.get("stakes") or {}
+    ok_n, ng_n, na_n = check_summary(pre_publish_check(p, stakes, r, src.names.get(rk)))
+    check_link = (f'<a class="small" style="display:block;margin-top:8px" href="{h(url("/race/check", rk=rk, m=tab, tp=tp, a=alloc))}">'
+                  + (f'<span class="chip warn">チェック × {ng_n}件</span>' if ng_n else
+                     f'<span class="chip ok">チェック ✓ {ok_n}件</span>' if ok_n else '<span class="chip">チェック対象なし</span>')
+                  + '<span class="muted"> 偏り・変わる条件も ›</span></a>')
     pills = ""
     if src.mode == "live" and m not in ("rule",):
         pills = chips(list(ALLOC_LABEL.items()), alloc, lambda k: url("/race", rk=rk, m=tab, tp=tp, a=k))
@@ -343,13 +414,13 @@ def race_page(ctx, src, store, q) -> str:
         if len(rows) > 5:
             bets += f'<div class="bet muted"><span>ほか{len(rows) - 5}点</span><span>{yen(sum(v for _, v in rows[5:]))}</span></div>'
         bets += f'<div class="bet sum"><span>合計 {len(rows)}点</span><span>{yen(sum(stakes.values()))}</span></div>'
-        body.append(f'<div class="card"><div class="row"><h2>三連複の買い目</h2><span class="muted small">1レース上限 ¥10,000</span></div>{pills}{bets}</div>')
+        body.append(f'<div class="card"><div class="row"><h2>三連複の買い目</h2><span class="muted small">1レース上限 ¥10,000</span></div>{pills}{bets}{check_link}</div>')
     else:
         top = [t for t in p.get("trios", []) if t.get("p") is not None][:3]
         rows = "".join(f'<div class="bet"><span>{h(t["combo"])}</span><span class="muted">{t["p"] * 100:.1f}%</span></div>' for t in top)
         body.append(f'<div class="card"><h2>三連複の買い目</h2>{pills}<p class="muted small" style="margin:0 0 4px">'
                     f'{h(ALLOC_STATUS.get(a.get("status"), a.get("reason") or "配分なし"))}</p>'
-                    f'<p class="muted small" style="margin:6px 0 0">確率の高い組（参考）</p>{rows or "<span class=muted>—</span>"}</div>')
+                    f'<p class="muted small" style="margin:6px 0 0">確率の高い組（参考）</p>{rows or "<span class=muted>—</span>"}{check_link}</div>')
     body.append(_facts(src, rk, m, p, tp))
     res = src.results.get(rk)
     items = [("方式くらべ", "一致と不一致", url("/race/compare", rk=rk, tp=tp)),
@@ -359,9 +430,13 @@ def race_page(ctx, src, store, q) -> str:
         items.append((f"結果 {res['actual']}", ("当たり" if hit else "はずれ") + (f"・払戻 {yen(res['payout'])}" if res.get("payout") else ""),
                       url("/history/detail", rk=rk)))
     body.append(link_list(items))
-    body.append(f'<div class="btns"><a class="btn" href="{h(url("/buy/new", rk=rk, m=m, tp=tp, kind="skip"))}">見送る</a>'
-                f'<a class="btn pri" href="{h(url("/buy/new", rk=rk, m=m, tp=tp, a=alloc))}">購入を記録</a></div>')
-    return layout(ctx, race_title(r), "".join(body), "races", back, race_title(r))
+    skip = (f'<form method="post" action="/buy" class="inline" style="flex:1"><input type="hidden" name="token" value="{h(ctx["token"])}">'
+            f'<input type="hidden" name="rk" value="{h(rk)}"><input type="hidden" name="kind" value="skip">'
+            f'<input type="hidden" name="m" value="{h(m)}"><input type="hidden" name="tp" value="{h(tp)}">'
+            f'<input type="hidden" name="next" value="{h(url("/race", rk=rk, m=tab, tp=tp, a=alloc, saved="skip"))}">'
+            f'<button class="btn" type="submit">見送る（1タップ）</button></form>')
+    body.append(f'<div class="btns">{skip}<a class="btn pri" href="{h(url("/buy/new", rk=rk, m=m, tp=tp, a=alloc))}">購入を記録</a></div>')
+    return layout(ctx, race_title(r), "".join(body), "races", back, race_title(r), refresh=auto_refresh(ctx, src) and not q.get("saved"))
 
 
 def horses_page(ctx, src, store, q) -> str:
@@ -376,20 +451,24 @@ def horses_page(ctx, src, store, q) -> str:
     hp = horse_probs(p)
     marks = {n: mk for mk, n in marks_of(p)}
     groups = {int(x["n"]): x for x in p.get("horses", [])}
+    rule_p = p if m == "rule" else src.pick(rk, "rule", tp)[1]   # 一言はルールの8項目から作る
+    comments = {int(x["n"]): horse_comment(x) for x in (rule_p or {}).get("horses", []) if x.get("groups")}
     rows = []
     for n in sorted(hp, key=lambda k: (-hp[k], k)):
         g = groups.get(n, {})
         extra = ""
         if "coverage" in g:
             extra = f'<td>{g["score"] if g.get("score") is not None else "—"}</td>'
-        rows.append(f'<tr><td>{h(marks.get(n, ""))} {n} <span class="muted small">{h(src.name(rk, n))}</span></td>'
+        cm = f'<br><span class="small"><span class="tag g">推論</span>{h(comments[n])}</span>' if comments.get(n) else ""
+        rows.append(f'<tr><td>{h(marks.get(n, ""))} {n} <span class="muted small">{h(src.name(rk, n))}</span>{cm}</td>'
                     f'<td>{hp[n] * 100:.1f}%</td>{extra}</tr>')
     head = "<th>総合（10段階）</th>" if any("coverage" in g for g in groups.values()) else ""
     body = (f'<p class="muted" style="margin:0">{h(race_title(r))}・{TP_LABEL[tp]}</p><h1>全頭の評価</h1>'
             f'<p class="lead">{h(METHOD_LABEL.get(m, m))}。3着内に入る確率の高い順</p>'
             f'<div class="card"><table><tr><th>馬番・馬名</th><th>3着内</th>{head}</tr>{"".join(rows)}</table></div>'
             f'<p class="muted small">確率は過去のデータで較正した推定で、当たりの保証ではないよ。'
-            f'{"ルールの総合は、評価できた項目だけの平均。" if head else ""}</p>')
+            f'{"ルールの総合は、評価できた項目だけの平均。" if head else ""}'
+            f'{"一言はルールの8項目（10段階）から：◎は7.5以上、△は3以下。" if comments else ""}</p>')
     return layout(ctx, "全頭の評価", body, "races", back, "全頭の評価")
 
 
@@ -469,6 +548,41 @@ def timeline_page(ctx, src, store, q) -> str:
         prev = p
     body.append("".join(cards))
     return layout(ctx, "時点の変化", "".join(body), "races", back, "時点の変化")
+
+
+def check_page(ctx, src, store, q) -> str:
+    """買い目のチェック：公開前チェック・偏り・予想が変わる条件（3枚まで）。"""
+    rk = q.get("rk", "")
+    r = src.races.get(rk)
+    tab = q.get("m") if q.get("m") in METHOD_TABS else "ml"
+    tp = q.get("tp") if q.get("tp") in TIME_POINTS else (src.latest_tp(rk, tab) if r else None) or "15m"
+    alloc = q.get("a") if q.get("a") in ALLOC_LABEL else MAIN_WALLET["live"]
+    back = url("/race", rk=rk, m=tab, tp=tp, a=alloc)
+    m, p = src.pick(rk, tab, tp) if r else (None, None)
+    if not p:
+        return layout(ctx, "買い目のチェック", empty("予想が無いよ", "レースの詳細から開き直してね。"), "races", back, "買い目のチェック")
+    stakes = allocation_of(p, alloc).get("stakes") or {}
+    items = pre_publish_check(p, stakes, r, src.names.get(rk))
+    ok_n, ng_n, na_n = check_summary(items)
+    rows = "".join(f'<div class="ck"><i class="{"y" if i["ok"] else "n" if i["ok"] is False else ""}">'
+                   f'{"✓" if i["ok"] else "×" if i["ok"] is False else "—"}</i><div><div class="small">{h(i["label"])}</div>'
+                   f'<div class="muted small">{h(i["detail"])}</div></div></div>' for i in items)
+    body = [f'<p class="muted" style="margin:0">{h(race_title(r))}・{TP_LABEL[tp]}・{h(METHOD_LABEL.get(m, m))}</p>'
+            f'<h1>買い目のチェック</h1><p class="lead">買う前に、おかしな所が無いか</p>',
+            f'<div class="card"><div class="row"><h2>公開前チェック</h2>'
+            f'<span class="chip {"warn" if ng_n else "ok" if ok_n else ""}">{"× " + str(ng_n) + "件" if ng_n else "✓ " + str(ok_n) + "件" if ok_n else "対象なし"}</span></div>{rows}'
+            f'<p class="muted small" style="margin:6px 0 0">「—」は判定できない・対象が無い項目（{na_n}件）。配分：{h(ALLOC_LABEL.get(alloc, alloc))}</p></div>']
+    bias = bias_check(p, stakes)
+    tag = {"推論": "g", "注意": "w", "事実": "f"}
+    if bias:
+        body.append('<div class="card"><h2>買い目の偏り</h2>' + "".join(
+            f'<div style="padding:3px 0" class="small"><span class="tag {tag[t]}">{h(t)}</span>{h(x)}</div>' for t, x in bias) + "</div>")
+    else:
+        body.append('<div class="card"><h2>買い目の偏り</h2><p class="muted small" style="margin:0">買い目が無いので見ていないよ</p></div>')
+    cond = change_conditions(p, tp, r)
+    body.append('<div class="card"><h2>予想が変わる条件</h2>' + "".join(
+        f'<div style="padding:3px 0" class="small"><span class="tag {tag[t]}">{h(t)}</span>{h(x)}</div>' for t, x in cond) + "</div>")
+    return layout(ctx, "買い目のチェック", "".join(body), "races", back, "買い目のチェック")
 
 
 # ======================= 購入記録 =======================
@@ -748,9 +862,9 @@ def results_conditions_page(ctx, src, store, q) -> str:
     wallet = MAIN_WALLET[src.mode]
     methods = [m for m in METHOD_LABEL if any(s["method"] == m and s["wallet"] == wallet for s in src.settlements)]
     m = q.get("m") if q.get("m") in methods else ("ml_lgbm" if "ml_lgbm" in methods else (methods[0] if methods else None))
-    dim = q.get("d") if q.get("d") in ("dist", "surface", "class") else "dist"
+    dim = q.get("d") if q.get("d") in ("dist", "surface", "class", "month") else "dist"
     body = ["<h1>条件別</h1><p class='lead'>どんなレースで強い・弱い？</p>",
-            seg([("dist", "距離"), ("surface", "芝・ダート"), ("class", "クラス")], dim, lambda d: url("/results/conditions", n=n, m=m, d=d))]
+            seg([("dist", "距離"), ("surface", "芝・ダ"), ("class", "クラス"), ("month", "月別")], dim, lambda d: url("/results/conditions", n=n, m=m, d=d))]
     if not m:
         body.append(empty("まだ0件だよ", "精算が出ると、条件ごとの成績が並ぶよ。"))
         return layout(ctx, "条件別", "".join(body), "results", url("/results", n=n), "条件別")
@@ -763,15 +877,15 @@ def results_conditions_page(ctx, src, store, q) -> str:
             continue
         r = src.races.get(s["race_key"], {})
         key = {"dist": distance_band(r.get("distance_m")), "surface": r.get("surface") or "不明",
-               "class": r.get("race_class") or "不明"}[dim]
+               "class": r.get("race_class") or "不明", "month": s["race_key"][:7]}[dim]
         a = agg[key]
         a[0] += 1
         a[1] += int(bool(s.get("hits")))
         a[2] += s.get("stake") or 0
         a[3] += s.get("returned") or 0
     rows = "".join(f'<tr><td>{h(k)}</td><td>{v[0]}</td><td>{pct(v[1] / v[0]) if v[0] else "—"}</td><td>{pct(v[3] / v[2]) if v[2] else "—"}</td></tr>'
-                   for k, v in sorted(agg.items(), key=lambda x: -x[1][0])[:12])
-    body.append(f'<div class="card"><table><tr><th>{"距離" if dim == "dist" else "芝・ダート" if dim == "surface" else "クラス"}</th>'
+                   for k, v in (sorted(agg.items(), reverse=True) if dim == "month" else sorted(agg.items(), key=lambda x: -x[1][0]))[:12])
+    body.append(f'<div class="card"><table><tr><th>{ {"dist": "距離", "surface": "芝・ダート", "class": "クラス", "month": "月"}[dim]}</th>'
                 f'<th>R</th><th>的中率</th><th>回収率</th></tr>{rows or "<tr><td colspan=4 class=muted>—</td></tr>"}</table></div>'
                 f'<p class="muted small">件数が少ない条件は、たまたまの差が大きいよ（20R未満は参考）</p>')
     return layout(ctx, "条件別", "".join(body), "results", url("/results", n=n), "条件別")
@@ -822,7 +936,8 @@ def improve_page(ctx, src, store, q) -> str:
                 '<div class="small">・ルールの比較版（v1.1 ほか）：役割は説明・確認。配分なし</div>'
                 '<div class="small">・あいす統合 3版（市場のみ・市場＋学習・市場＋学習＋まむ）：別の財布</div>'
                 '<p class="muted small" style="margin:6px 0 0">採用・反映は別に決める（最初の数回は、たかむねが新旧をくらべて決める）</p></div>')
-    body.append(link_list([("比較の詳細", "検証データでの当たり具合", "/improve/compare"), ("変更履歴", "版ごとの記録", "/improve/history")]))
+    body.append(link_list([("新旧くらべ", "変更の前後の成績と、採用の判断", "/improve/versions"),
+                           ("比較の詳細", "検証データでの当たり具合", "/improve/compare"), ("変更履歴", "版ごとの記録", "/improve/history")]))
     return layout(ctx, "改善", "".join(body), "improve")
 
 
@@ -841,6 +956,65 @@ def improve_compare_page(ctx, src, store, q, metrics: dict | None) -> str:
                     f'<p class="muted small">版 {h((metrics or {}).get("version"))}。参考回収率はオッズを見ずに上位10組を100円ずつ買った仮定。'
                     f'人気順は確定オッズを使うので比較専用。これからのレースの成績は「結果」で見てね</p>')
     return layout(ctx, "比較の詳細", "".join(body), "improve", "/improve", "比較の詳細")
+
+
+DECISIONS = {"adopt": "採用したい", "hold": "保留（もう少し見る）", "reject": "見送る（今の版のまま）"}
+
+
+def decision_key(va: str, vb: str) -> str:
+    return f"improve|{va}|{vb}"
+
+
+def improve_versions_page(ctx, src, store, q, compare) -> str:
+    """新旧くらべ：2つの版を、両方にあるレースだけで比べる。本人の判断を記録する（運用の版は変えない）。"""
+    vs = [v["version"] for v in src.versions if not v["version"].startswith("live-")]
+    body = ["<h1>新旧くらべ</h1><p class='lead'>変更の前と後で、成績はどう変わった？</p>"]
+    if len(vs) < 2:
+        body.append(empty("くらべる版が足りないよ", "検証の版が2つ以上たまると、ここでくらべられるよ。"))
+        return layout(ctx, "新旧くらべ", "".join(body), "improve", "/improve", "新旧くらべ")
+    vb = q.get("b") if q.get("b") in vs else vs[-1]
+    va = q.get("a") if q.get("a") in vs and q.get("a") != vb else next(v for v in reversed(vs) if v != vb)
+    first = {v["version"]: v["first"][:16].replace("T", " ") for v in src.versions}
+
+    def select(name, cur):
+        return (f'<select name="{name}" aria-label="{"前の版" if name == "a" else "後の版"}">' + "".join(
+            f'<option value="{h(v)}"{" selected" if v == cur else ""}>{h(v)}（{h(first.get(v, ""))}）</option>'
+            for v in reversed(vs)) + "</select>")
+    body.append(f'<form method="get" action="/improve/versions" class="card"><label>前の版</label>{select("a", va)}'
+                f'<label style="margin-top:8px">後の版</label>{select("b", vb)}'
+                f'<div class="btns" style="margin:10px 0 0"><button class="btn" type="submit">くらべる</button></div></form>')
+    res = compare(va, vb)
+    if not res["rows"]:
+        body.append(empty("両方にあるレースが無いよ", "ほかの版を選んでね。"))
+    else:
+        def cell(x, key):
+            return pct(x[key]) if key == "roi" else f'{x[key]:,}'
+        rows = []
+        for x in res["rows"]:
+            d = None if x["a"]["roi"] is None or x["b"]["roi"] is None else x["b"]["roi"] - x["a"]["roi"]
+            hit_d = x["b"]["hit"] - x["a"]["hit"]
+            rows.append(f'<tr><td>{h(METHOD_LABEL.get(x["method"], x["method"]))}</td><td>{x["races"]:,}</td>'
+                        f'<td>{cell(x["a"], "hit")}→{cell(x["b"], "hit")}<br><span class="muted small">{hit_d:+d}</span></td>'
+                        f'<td>{pct(x["a"]["roi"])}→{pct(x["b"]["roi"])}<br><span class="muted small">'
+                        f'{"—" if d is None else "±0.0pt" if abs(d) < 0.0005 else f"{d * 100:+.1f}pt"}</span></td></tr>')
+        body.append(f'<div class="card"><h2>前 → 後（{TP_LABEL.get(res["tp"], res["tp"])}）</h2><table><tr><th>方式</th><th>R</th>'
+                    f'<th>的中R</th><th>参考回収率</th></tr>{"".join(rows)}</table>'
+                    f'<p class="muted small" style="margin:6px 0 0">両方の版にある {res["races"]:,}R だけで比べた。'
+                    f'{h(WALLET_LABEL.get(res["wallet"], res["wallet"]))}の仮定。たまたまの差もあるので、差が小さいときは決めつけないでね</p>'
+                    + ('<p class="small" style="margin:6px 0 0"><span class="tag f">事実</span>この2つの版では、どの方式も成績が同じ（予想が変わっていない）</p>'
+                       if all(x["a"] == x["b"] for x in res["rows"]) else "") + '</div>')
+    key = decision_key(va, vb)
+    prev = store.note(key)
+    opts = "".join(f'<label><input type="radio" name="decision" value="{k}"{" checked" if prev.startswith(v) else ""}> {h(v)}</label>'
+                   for k, v in DECISIONS.items())
+    body.append(f'<form method="post" action="/improve/decision"><input type="hidden" name="token" value="{h(ctx["token"])}">'
+                f'<input type="hidden" name="a" value="{h(va)}"><input type="hidden" name="b" value="{h(vb)}">'
+                f'<div class="card"><h2>たかむねの判断</h2>'
+                + (f'<p class="small" style="margin:0 0 8px;white-space:pre-wrap"><span class="tag f">記録</span>{h(prev)}</p>' if prev else "")
+                + f'<div class="opt">{opts}</div><textarea name="memo" style="margin-top:8px" placeholder="決めた理由"></textarea>'
+                f'<p class="muted small" style="margin:6px 0 0">ここは判断の記録だけ。運用の版の切り替えは別の作業で行うよ</p></div>'
+                f'<div class="btns"><button class="btn pri" type="submit">判断を記録する</button></div></form>')
+    return layout(ctx, "新旧くらべ", "".join(body), "improve", "/improve", "新旧くらべ")
 
 
 def improve_history_page(ctx, src, store, q) -> str:
@@ -908,7 +1082,7 @@ def purchases_page(ctx, src, store, q) -> str:
 def settings_page(ctx, src, store, q) -> str:
     def opt(name, value, label, cur):
         return f'<label><input type="radio" name="{name}" value="{value}"{" checked" if cur == value else ""}> {h(label)}</label>'
-    body = (f'<h1>表示の設定</h1><p class="lead">このMacのブラウザだけに保存するよ</p>'
+    body = (f'<h1>表示の設定</h1><p class="lead">このブラウザだけに保存するよ</p>'
             f'<form method="post" action="/settings"><input type="hidden" name="token" value="{h(ctx["token"])}">'
             f'<div class="card"><h2>見るデータ</h2><div class="opt">{opt("mode", "live", MODES["live"], src.mode)}{opt("mode", "check", MODES["check"], src.mode)}</div>'
             f'<p class="muted small" style="margin:8px 0 0">検証データは画面の確認用。発走前の予想ではないよ</p></div>'
@@ -916,6 +1090,9 @@ def settings_page(ctx, src, store, q) -> str:
             f'{opt("theme", "light", "明るい", ctx.get("theme"))}{opt("theme", "dark", "暗い", ctx.get("theme"))}</div></div>'
             f'<div class="card"><h2>文字の大きさ</h2><div class="opt">{opt("size", "normal", "ふつう", ctx.get("size", "normal"))}'
             f'{opt("size", "large", "大きめ", ctx.get("size"))}</div></div>'
+            f'<div class="card"><h2>自動で読み直す</h2><div class="opt">{opt("refresh", "on", "1分ごと", ctx.get("refresh", "on"))}'
+            f'{opt("refresh", "off", "しない", ctx.get("refresh"))}</div><p class="muted small" style="margin:8px 0 0">'
+            f'これからのレースの一覧と詳細だけ。入力の画面では読み直さないよ</p></div>'
             f'<div class="btns"><button class="btn pri" type="submit">保存する</button></div></form>')
     return layout(ctx, "表示の設定", body, None, "/menu", "表示の設定")
 
@@ -926,8 +1103,8 @@ def about_page(ctx, src, store, q) -> str:
              "「推論」は方式の推定。事実とは分けて表示しているよ",
              "仮想の財布（模擬）と、実際に買った記録は別々に集計するよ",
              "予想の台帳は読むだけ。購入記録とメモは別のファイルに追記して、消さずに残すよ",
-             "このMacの中だけで動いていて、外には公開していないよ"]
-    body = "<h1>このアプリについて</h1><p class='lead'>三連複の確認アプリ（Mac内で動く版）</p><div class='card'>" + \
+             where_text(ctx)]
+    body = "<h1>このアプリについて</h1><p class='lead'>三連複の確認アプリ</p><div class='card'>" + \
            "".join(f"<div class='small' style='padding:4px 0'>・{h(x)}</div>" for x in items) + "</div>"
     return layout(ctx, "このアプリについて", body, None, "/menu", "このアプリについて")
 
@@ -945,3 +1122,13 @@ def purchases_csv(src, store) -> str:
                     json.dumps(e["stakes"], ensure_ascii=False), e["total"], e["memo"], e["created_at"], e["updated_at"],
                     res.get("actual") or "", st["returned"] if st["status"] == "settled" else ""])
     return buf.getvalue()
+
+
+def login_page(ctx, error: str = "") -> str:
+    body = (f'<h1>合言葉</h1><p class="lead">同じWi-Fiから開くときだけ聞くよ</p>'
+            + (f'<div class="err">{h(error)}</div>' if error else "")
+            + '<form method="post" action="/login"><div class="card"><label for="pw">合言葉</label>'
+            '<input id="pw" name="passphrase" type="password" autocomplete="current-password" autofocus></div>'
+            '<div class="btns"><button class="btn pri" type="submit">開く</button></div></form>'
+            '<p class="muted small">合言葉は、アプリを動かしているMacの設定（.env）に書いてあるよ</p>')
+    return layout({**ctx, "mode": "live"}, "合言葉", body, None, None, "三連複の確認")

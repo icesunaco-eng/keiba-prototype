@@ -277,3 +277,34 @@ class Cache:
                 item = (stamp, Source(self.paths, mode))
                 self._items[mode] = item
             return item[1]
+
+
+def version_compare(ledger_path, va: str, vb: str, tp: str = "1h", wallet: str = "ref_top10_equal") -> dict:
+    """2つの版の精算を、両方にあるレースだけでくらべる（読むだけ）。"""
+    out = {"races": 0, "rows": [], "a": va, "b": vb, "tp": tp, "wallet": wallet}
+    if not Path(ledger_path).exists() or not va or not vb:
+        return out
+    conn = sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True)
+    agg: dict = defaultdict(dict)   # (version, method) → {race_key: (stake, returned, hit)}
+    for v, m, rk, payload in conn.execute(
+            "SELECT version,method,race_key,payload FROM settlements WHERE version IN (?,?) AND wallet=? AND time_point=?",
+            (va, vb, wallet, tp)):
+        s = json.loads(payload)
+        agg[(v, m)][rk] = (s.get("stake") or 0, s.get("returned") or 0, bool(s.get("hits")))
+    conn.close()
+    methods = sorted({m for (_, m) in agg}, key=lambda m: list(METHOD_LABEL).index(m) if m in METHOD_LABEL else 99)
+    all_races = set()
+    for m in methods:
+        a, b = agg.get((va, m), {}), agg.get((vb, m), {})
+        common = set(a) & set(b)
+        if not common:
+            continue
+        all_races |= common
+
+        def stat(d):
+            st = sum(d[k][0] for k in common)
+            rt = sum(d[k][1] for k in common)
+            return {"hit": sum(d[k][2] for k in common), "stake": st, "returned": rt, "roi": rt / st if st else None}
+        out["rows"].append({"method": m, "races": len(common), "a": stat(a), "b": stat(b)})
+    out["races"] = len(all_races)
+    return out

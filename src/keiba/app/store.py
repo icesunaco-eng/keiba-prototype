@@ -146,7 +146,8 @@ class Store:
 
     def noted_races(self) -> set[str]:
         return {r[0] for r in self.conn.execute(
-            "SELECT race_key FROM notes n WHERE id=(SELECT MAX(id) FROM notes m WHERE m.race_key=n.race_key) AND text<>''")}
+            "SELECT race_key FROM notes n WHERE id=(SELECT MAX(id) FROM notes m WHERE m.race_key=n.race_key) AND text<>''"
+            " AND race_key NOT LIKE 'improve|%'")}
 
 
 def settle_purchase(entry: dict, actual: str | None, payout_yen: int | None) -> dict:

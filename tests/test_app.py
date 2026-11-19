@@ -223,3 +223,155 @@ def test_server_buy_flow(server):
     assert code == 303 and app.store.entries() == []
     code, _, headers = _req(port, "/settings", {"token": app.token, "mode": "check", "theme": "dark", "size": "bogus"})
     assert code == 303 and "mode=check" in headers.get("Set-Cookie", "")
+
+
+# ---------------- 追加：チェック・新旧くらべ・合言葉・通知 ----------------
+
+from datetime import datetime, timedelta  # noqa: E402
+
+from keiba.app import checks  # noqa: E402
+from keiba.app.server import notify_loop  # noqa: E402
+
+
+def test_pre_publish_check_finds_problems():
+    p = _pred([3, 7, 11, 1, 2], scratched=[5])
+    race = {"race_date": "2026-11-22", "post_time": "15:40"}
+    ok = checks.pre_publish_check(p, {"3-7-11": 1200, "2-3-7": 800}, race)
+    assert checks.check_summary(ok)[1] == 0
+    bad = checks.pre_publish_check(p, {"3-5-7": 1200, "2-3-7": 150, "3-7-99": 100}, race)
+    labels = {i["label"]: i for i in bad if i["ok"] is False}
+    assert "5番" in labels["取消・除外の馬が買い目に無い"]["detail"]
+    assert "99" in labels["組の形（3頭・出走している馬番）"]["detail"]
+    assert "100円単位・1レース上限 ¥10,000" in labels
+    many = {f"1-2-{n}": 100 for n in range(3, 15)}
+    assert any(i["ok"] is False and "点数" in i["label"] for i in checks.pre_publish_check(p, many, race))
+    gate_ng = {**p, "odds_gate": {"pass": False, "reasons": ["古いオッズ（発表 15:00・取得 15:21）"]}}
+    assert any(i["ok"] is False and "オッズ" in i["label"] for i in checks.pre_publish_check(gate_ng, {}, race))
+
+
+def test_bias_conditions_comment_and_flags():
+    p = _pred([3, 7, 11, 1, 2])
+    bias = checks.bias_check(p, {"3-7-11": 900, "2-3-7": 100})
+    assert any("3番" in x and "全部はずれ" in x for _, x in bias) and any("90%" in x for _, x in bias)
+    assert any("◎" in x for _, x in checks.bias_check(p, {"1-2-7": 100, "2-7-11": 100}))
+    cond = checks.change_conditions(p, "1h")
+    assert any("★ 11番と4番手 1番" in x for _, x in cond) and any("15分前" in x for _, x in cond)
+    assert checks.horse_comment({"coverage": 0.9, "groups": {"distance": 9, "course": 8, "recent": 2, "pace": None}}) == "距離◎ ／ コース◎ ／ 近走△"
+    assert checks.horse_comment({"coverage": 0.25, "groups": {"draw": 5}}) == "目立つ項目なし（データ少なめ）"
+    race = {"race_date": "2026-11-22", "post_time": "15:40"}
+    after = datetime(2026, 11, 22, 16, 0, tzinfo=checks.JST)
+    flags = [t for _, t in checks.card_flags(_pred([3, 7, 11], scratched=[5]), {"3-5-7": 100}, race, False, after)]
+    assert flags[:3] == ["発走済み", "取消あり", "チェック×"]
+
+
+def test_new_pages_render(live_paths, tmp_path, monkeypatch):
+    monkeypatch.setattr(pages, "now_jst", lambda: datetime(2026, 11, 22, 10, 0, tzinfo=checks.JST))
+    src = Source(live_paths, "live")
+    store = Store(tmp_path / "p.sqlite")
+    ctx = {"mode": "live", "theme": "auto", "size": "normal", "token": "t", "refresh": "on"}
+    race = pages.race_page(ctx, src, store, {"rk": RK, "tp": "15m"})
+    assert "チェック ✓" in race and "見送る（1タップ）" in race and 'http-equiv="refresh"' in race
+    chk = pages.check_page(ctx, src, store, {"rk": RK, "tp": "15m"})
+    assert "公開前チェック" in chk and "買い目の偏り" in chk and "予想が変わる条件" in chk
+    assert chk.count('class="card') <= 4
+    off = pages.races_page({**ctx, "refresh": "off"}, src, store, {"day": "2026-11-22"})
+    assert 'http-equiv="refresh"' not in off and "自信度A 1" in off
+    form = pages.buy_form(ctx, src, store, {"rk": RK, "m": "ml_lgbm", "tp": "15m"})
+    assert 'http-equiv="refresh"' not in form          # 入力の画面は読み直さない
+    stale = pages.races_page({**ctx, "health": {"checked_at": "2026-11-01T10:00:00+09:00"}}, src, store, {"day": "2026-11-22"})
+    assert "止まっているかも" in stale
+    fresh = pages.races_page({**ctx, "health": {"checked_at": "2026-11-22T09:55:00+09:00"}}, src, store, {"day": "2026-11-22"})
+    assert "止まっているかも" not in fresh
+    store.set_note("improve|a|b", "採用したい")
+    assert "improve|a|b" not in store.noted_races()
+
+
+def test_horse_comments_use_rule_groups(live_paths, tmp_path):
+    led = Ledger(live_paths.ledger_path)
+    rule = {**_pred([7, 3, 2, 1, 11], "C"), "allocation": {"status": "not_allocated_role_a"}}
+    rule["horses"] = [{"n": 3, "p_top3": 0.6, "coverage": 1, "score": 7, "groups": {"distance": 9, "recent": 2}},
+                      {"n": 7, "p_top3": 0.7, "coverage": 1, "score": 8, "groups": {"course": 8}}]
+    led.add_prediction(RK, "1h", "rule", "live-test0001", rule, "i", "m", "c")
+    led.commit()
+    led.close()
+    src = Source(live_paths, "live")
+    out = pages.horses_page({"mode": "live", "token": "t"}, src, Store(tmp_path / "p.sqlite"), {"rk": RK, "tp": "1h"})
+    assert "距離◎ ／ 近走△" in out and "推論" in out
+
+
+def _versions_ledger(paths):
+    led = Ledger(paths.ledger_path)
+    for v, hit in (("v0.1+aaaa", False), ("v0.1+bbbb", True)):
+        led.add_prediction(RK, "1h", "ml_lgbm", v, _pred([3, 7, 11]), "i", "m", "c")
+        led.add_settlement(RK, "1h", "ml_lgbm", v, "ref_top10_equal",
+                           {"status": "settled", "stake": 1000, "returned": 3000 if hit else 0, "hits": ["3-7-11"] if hit else []})
+    led.commit()
+    led.close()
+
+
+def test_versions_compare_and_decision(server, live_paths):
+    app, port = server
+    _versions_ledger(live_paths)
+    code, body, _ = _req(port, "/improve/versions")
+    assert code == 200 and "0%→300%" in body and "+300.0pt" in body
+    data = {"token": app.token, "a": "v0.1+aaaa", "b": "v0.1+bbbb", "decision": "adopt", "memo": "回収率が上がった"}
+    code, _, headers = _req(port, "/improve/decision", data)
+    assert code == 303
+    assert app.store.note("improve|v0.1+aaaa|v0.1+bbbb").startswith("採用したい")
+    assert _req(port, "/improve/decision", {**data, "decision": "bogus"})[0] == 400
+
+
+def test_one_tap_skip_returns_to_race(server):
+    app, port = server
+    nxt = pages.url("/race", rk=RK, saved="skip")
+    data = {"token": app.token, "rk": RK, "kind": "skip", "m": "ml_lgbm", "tp": "15m", "next": nxt}
+    code, _, headers = _req(port, "/buy", data)
+    assert code == 303 and headers["Location"] == nxt and app.store.entries()[0]["kind"] == "skip"
+    code, _, headers = _req(port, "/buy", {**data, "next": "//evil.example/race?x"})
+    assert headers["Location"].startswith("/history/detail")     # よそへは飛ばさない
+    code, body, _ = _req(port, nxt)
+    assert "見送りを記録したよ" in body
+
+
+def test_lan_login_required_from_other_devices(live_paths, tmp_path):
+    app = App(live_paths, tmp_path / "p.sqlite", passphrase="kusamochi-2026")
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
+    port = httpd.server_address[1]
+    handler = make_handler(app, port, [f"192.168.1.20:{port}"])
+    handler._local = lambda self: False      # よその機械から来たことにする
+    httpd.RequestHandlerClass = handler
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        host = f"192.168.1.20:{port}"
+        code, body, _ = _req(port, "/races", host=host)
+        assert code == 401 and "合言葉" in body and "レース</h1>" not in body
+        assert _req(port, "/buy", {"token": app.token, "rk": RK, "kind": "skip"}, host=host)[0] == 303  # ログインへ
+        assert app.store.entries() == []
+        code, body, _ = _req(port, "/login", {"passphrase": "wrong"}, host=host)
+        assert code == 401
+        code, _, headers = _req(port, "/login", {"passphrase": "kusamochi-2026"}, host=host)
+        assert code == 303 and "auth=" in headers["Set-Cookie"] and "HttpOnly" in headers["Set-Cookie"]
+        cookie = headers["Set-Cookie"].split(";")[0]
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/races", headers={"Host": host, "Cookie": cookie})
+        assert urllib.request.urlopen(req).status == 200
+        for _ in range(5):
+            _req(port, "/login", {"passphrase": "nope"}, host="192.168.1.20:%d" % port)
+        assert _req(port, "/login", {"passphrase": "kusamochi-2026"}, host=host)[0] == 429   # 続けてまちがえたら止める
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_notify_loop_sends_once(live_paths, tmp_path, monkeypatch):
+    app = App(live_paths, tmp_path / "p.sqlite")
+    post = checks.post_datetime(app.cache.get("live").races[RK])
+    monkeypatch.setattr(checks, "now_jst", lambda: post - timedelta(minutes=10))
+    sent = []
+    stop = threading.Event()
+
+    def sender(title, text):
+        sent.append((title, text))
+        if len(sent) >= 1:
+            stop.set()
+    notify_loop(app, stop, interval=0, sender=sender)
+    assert sent and sent[0][0].startswith("京都11R") and "自信度A" in sent[0][1]
