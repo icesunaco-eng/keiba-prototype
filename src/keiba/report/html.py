@@ -46,6 +46,14 @@ def _fmt(v, pct=False):
     return f"{v*100:.1f}%" if pct else (f"{v:,}" if isinstance(v, int) else f"{v:.3f}")
 
 
+OLD_MARKS = {"判定できない（ルールの総合点が未評価）": "判定できず", "なし": "食い違いなし"}  # 古い記録の表記を読み替える
+
+
+def _mark(view: dict | None) -> str:
+    m = (view or {}).get("disagreement", "–")
+    return OLD_MARKS.get(m, m)
+
+
 def _slug(race_key: str) -> str:
     return re.sub(r"[^0-9A-Za-z]+", "_", race_key.encode("unicode_escape").decode()) + ".html"
 
@@ -111,17 +119,20 @@ def build_report(ledger_path: Path, out_dir: Path, build_report_path: Path | Non
         if p.get("period") == "holdout":
             preds[p["race_key"]][(p["method"], p["time_point"])] = p
     sett = {(s["race_key"], s["method"], s["time_point"], s["wallet"]): s for s in led.settlements(run_id)}
-    items = []
+    items, marks = [], {}
     for rk in sorted(preds, key=lambda k: (k.split("|")[0], k), reverse=True):
         main_p = preds[rk].get(("ml_lgbm", "1h")) or next(iter(preds[rk].values()))
         s10 = sett.get((rk, main_p["method"], main_p["time_point"], "ref_top10_equal"), {})
         hit = bool(s10.get("hits"))
         top = main_p["trios"][0]["combo"] if main_p["trios"] else "–"
+        mark = _mark(main_p.get("rule_view"))
+        marks[mark] = marks.get(mark, 0) + 1
         items.append(f"<tr class='{'hit' if hit else ''}'><td><a href='race/{_slug(rk)}'>{html.escape(rk)}</a></td>"
-                     f"<td>{main_p['confidence']}</td><td>{top}</td><td>{'的中' if hit else ''}</td></tr>")
+                     f"<td>{main_p['confidence']}</td><td>{top}</td><td>{html.escape(mark)}</td><td>{'的中' if hit else ''}</td></tr>")
         _race_page(out_dir / "race" / _slug(rk), rk, preds[rk], sett)
     body = ("<h1>レース一覧（封印期間）</h1><p class='muted'>学習モデル・1時間前の予想。的中＝上位10組に実際の三連複が入った。</p>"
-            "<div class='scroll'><table><tr><th>レース</th><th>信頼度</th><th>本命の組</th><th></th></tr>" + "".join(items) + "</table></div>")
+            "<p class='muted'>ルールとの食い違いの印（配分には使わない）：" + "・".join(f"{html.escape(k)} {v}R" for k, v in sorted(marks.items())) + "</p>"
+            "<div class='scroll'><table><tr><th>レース</th><th>信頼度</th><th>本命の組</th><th>食い違い</th><th></th></tr>" + "".join(items) + "</table></div>")
     (out_dir / "races.html").write_text(_page("レース一覧", body), encoding="utf-8")
     led.close()
     return out_dir / "index.html"
@@ -146,11 +157,12 @@ def _race_page(path: Path, rk: str, preds: dict, sett: dict):
             body = "".join("<tr><td>" + str(h["n"]) + "</td>" +
                            "".join(f"<td>{html.escape(str(h['groups'][k]))}</td>" for k in labels) +
                            f"<td>{h['evaluated']}</td><td>{h['total']}</td></tr>" for h in view["top"])
-            mark = view["disagreement"]
+            mark = _mark(view)
             parts.append("<h2>学習モデルの上位3頭：別基準（ルール）の評価</h2>"
                          f"<p class='muted'>{html.escape(view['note'])}。基準 {html.escape(view['basis'])}。"
                          f"10段階、評価できなかった項目は「未評価」。</p>"
                          f"<div class='scroll'><table><tr><th>馬番</th>{head}<th>評価できた項目</th><th>総合</th></tr>{body}</table></div>"
-                         f"<p class='{'warn' if mark == '食い違い' else 'muted'}'>食い違いの印：{html.escape(mark)}"
-                         f"（{html.escape(view['disagreement_rule'])}。配分には使わない）</p>")
+                         f"<p class='{'warn' if mark == '食い違い' else 'muted'}'>食い違いの印：<b>{html.escape(mark)}</b>"
+                         f"{'（学習モデルの1位にルールの総合点が付いていない）' if mark == '判定できず' else ''}"
+                         f"<br>基準：{html.escape(view['disagreement_rule'])}。配分には使わない</p>")
     path.write_text(_page(rk, "".join(parts), depth=1), encoding="utf-8")

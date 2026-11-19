@@ -7,8 +7,8 @@
   配分：equal_payout・ev_weighted・kelly。次の「オッズの合格判定」を全部満たしたときだけ：
     - 三連複の組が、出走する頭数から決まる数とちょうど一致（欠落なし）で、重複なし
     - オッズの発表時刻が読めて、取得時刻との差が STALE_MINUTES 分以内（古いオッズでない）
-    - 取得時刻が発走時刻より前
-  取消・除外は、その時点までに取った出馬表に載っていたものだけ反映する
+    - 取得時刻も発表時刻も、その時点の締切（1h＝発走60分前、15m＝発走15分前）以前
+  出馬表・取消・除外も、その時点の締切までに取った出馬表に載っていたものだけ反映する
   精算：15m の配分を使う（無ければ 1h）
   台帳の版は "live-<コードのハッシュ>"。過去の検証の版とは混ぜない
 """
@@ -30,6 +30,7 @@ from ..models import rule_v1
 from ..models.trio import fit_calibration
 from ..settle import settle_trio
 from . import jra
+from .collector import DEADLINE_MIN, deadline
 
 WALLET_METHODS = ("ml_lgbm", "ml_market")
 RULE_METHODS = {"rule": "v1.0", **{f"rule_{v.replace('.', '').replace('-', '_')}": v for v in rule_v1.COMPARISON_VARIANTS}}
@@ -50,7 +51,7 @@ def _read(root: Path, rec) -> str:
     return (root / rec["path"]).read_text(encoding="utf-8")
 
 
-def odds_gate(trio: dict, trio_rec, race: dict) -> dict:
+def odds_gate(trio: dict, trio_rec, race: dict, tp: str) -> dict:
     """三連複オッズの合格判定（週末の確認の物差し）。"""
     g = {"trio_found": trio.get("found"), "trio_expected": trio.get("expected"), "duplicates": trio.get("duplicates"),
          "unreadable": trio.get("unreadable"), "fetched_at": None, "odds_time": None, "snapshot_sha256": None}
@@ -63,13 +64,16 @@ def odds_gate(trio: dict, trio_rec, race: dict) -> dict:
         if not trio.get("ok"):
             reasons.append(f"組の数が合わない・重複（{trio.get('found')}/{trio.get('expected')}・重複{trio.get('duplicates')}）")
         fetched = datetime.fromisoformat(trio_rec["fetched_at"])
-        post = datetime.fromisoformat(f"{race['race_date']}T{race['post_time']}:00{JST}")
-        if fetched >= post:
-            reasons.append("取得が発走後")
+        dl = deadline(race["race_date"], race["post_time"], tp)
+        g["deadline"] = dl.isoformat(timespec="minutes")
+        if fetched > dl:
+            reasons.append(f"締切後の取得（締切 {dl:%H:%M}・取得 {fetched:%H:%M}）")
         if not g["odds_time"]:
             reasons.append("オッズの時刻が分からない")
         else:
             t = datetime.fromisoformat(f"{race['race_date']}T{g['odds_time']}:00{JST}")
+            if t > dl:
+                reasons.append(f"締切後のオッズ（発表 {g['odds_time']}）")
             if fetched - t > timedelta(minutes=STALE_MINUTES) or t - fetched > timedelta(minutes=1):
                 reasons.append(f"古いオッズ（発表 {g['odds_time']}・取得 {fetched:%H:%M}）")
     g["pass"] = not reasons
@@ -96,7 +100,11 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame) -> tuple[pd.DataFr
             inputs[(rk, "result")] = parsed
             continue
         for tp in ("24h", "1h", "15m"):
-            cards = s[(s["kind"] == "card") & s["time_point"].map(lambda x: TP_ORDER.get(x, 9) <= TP_ORDER[tp])] if len(s) else s
+            if not r.get("post_time"):
+                continue
+            dl = deadline(r["race_date"], r["post_time"], tp)
+            before = s["fetched_at"].map(lambda x: datetime.fromisoformat(x) <= dl) if len(s) else s
+            cards = s[(s["kind"] == "card") & before] if len(s) else s
             if not len(cards):
                 continue
             card_all = [c for c in jra.parse_card(_read(root, cards.iloc[-1])) if c["horse_number"]]
@@ -104,8 +112,8 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame) -> tuple[pd.DataFr
             card = [c for c in card_all if not c.get("scratch")]
             if len(card) < 3:
                 continue
-            win = s[(s["kind"].isin(["odds_win", "odds_first"])) & (s["time_point"] == tp)]
-            trio = s[(s["kind"] == "odds_trio") & (s["time_point"] == tp)]
+            win = s[(s["kind"].isin(["odds_win", "odds_first"])) & (s["time_point"] == tp) & before]
+            trio = s[(s["kind"] == "odds_trio") & (s["time_point"] == tp)]  # 締切後のものも判定に出して不合格にする
             if tp == "15m" and not (len(win) or len(trio)):
                 continue  # 15分前は配分の見直しだけ。新しいオッズが無ければ作らない
             w = jra.parse_win_odds(_read(root, win.iloc[-1]), len(card)) if len(win) else {"ok": False, "odds": {}}
@@ -116,7 +124,7 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame) -> tuple[pd.DataFr
                 t = jra.parse_trio_odds(page, len(card))
                 t["odds_time"] = jra.parse_odds_time(page)
             inputs[(rk, tp)] = {"card": card, "scratched": scratched, "win": w, "trio": t,
-                                "gate": odds_gate(t, trio_rec, r) if tp != "24h" or trio_rec is not None else
+                                "gate": odds_gate(t, trio_rec, r, tp) if tp != "24h" or trio_rec is not None else
                                 {"pass": False, "reasons": ["前日はオッズを使わない（未発売のことが多い）"]},
                                 "card_fetched_at": cards.iloc[-1]["fetched_at"],
                                 "snapshots": [cards.iloc[-1]["sha256"], *win["sha256"].tolist()[-1:], *trio["sha256"].tolist()[-1:]]}
@@ -268,7 +276,7 @@ def odds_check(paths) -> pd.DataFrame:
         if tp == "result":
             continue
         g = inp["gate"]
-        rows.append({"race_key": rk, "time_point": tp, "pass": g["pass"], "reasons": " / ".join(g["reasons"]),
+        rows.append({"race_key": rk, "time_point": tp, "deadline": g.get("deadline"), "pass": g["pass"], "reasons": " / ".join(g["reasons"]),
                      "trio": f"{g.get('trio_found')}/{g.get('trio_expected')}", "duplicates": g.get("duplicates"),
                      "odds_time": g.get("odds_time"), "fetched_at": g.get("fetched_at"),
                      "scratched_known": ",".join(map(str, inp["scratched"])), "snapshot_sha256": g.get("snapshot_sha256")})

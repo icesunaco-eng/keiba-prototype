@@ -387,10 +387,11 @@ def rule_view(g: pd.DataFrame, p_top3, time_point: str, top: int = 3) -> dict:
     totals = pd.to_numeric(sr["rule_total"], errors="coerce")
     first = order[0]
     if pd.isna(totals.iloc[first]) or totals.notna().sum() < 3:
-        flag = "判定できない（ルールの総合点が未評価）"
+        flag = "判定できず"
     else:
         pct = (totals.rank(ascending=False, method="average").iloc[first] - 1) / (totals.notna().sum() - 1)
-        flag = "食い違い" if pct >= 1 - DISAGREE_BOTTOM else "なし"
+        flag = "食い違い" if pct >= 1 - DISAGREE_BOTTOM else "食い違いなし"
     return {"basis": f"{RULE_V1_VERSION}（{MODE}）", "note": "学習モデルの選んだ理由ではなく、別基準での評価",
-            "top": horses, "disagreement": flag, "disagreement_rule": f"学習モデルの1位がルール総合点の下位{int(DISAGREE_BOTTOM*100)}%（暫定）",
+            "top": horses, "disagreement": flag,
+            "disagreement_reason": ("学習モデルの1位にルールの総合点が付いていない（未評価）" if flag == "判定できず" else ""), "disagreement_rule": f"学習モデルの1位がルール総合点の下位{int(DISAGREE_BOTTOM*100)}%（暫定）",
             "used_for_allocation": False}
