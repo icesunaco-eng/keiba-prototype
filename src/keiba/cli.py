@@ -120,6 +120,9 @@ def cmd_mam(paths, args):
 def cmd_review(paths, args):
     from datetime import date
     from .review import write_review
+    if args.start or args.end:
+        print(f"期間の振り返り（8週の点検など） → {write_review(paths, None, args.start, args.end)}")
+        return
     month = args.month or date.today().strftime("%Y-%m")
     print(f"月次の振り返り → {write_review(paths, month)}")
 
@@ -190,6 +193,8 @@ def main(argv=None):
     p.add_argument("file", nargs="?")
     p = sub.add_parser("review")
     p.add_argument("--month", default=None)
+    p.add_argument("--from", dest="start", default=None, help="期間の始め YYYY-MM-DD（8週の点検など）")
+    p.add_argument("--to", dest="end", default=None, help="期間の終わり YYYY-MM-DD")
     p = sub.add_parser("live")
     p.add_argument("action", choices=["run", "check", "wallets"])
     args = ap.parse_args(argv)

@@ -85,7 +85,7 @@ def test_live_predict_allocate_settle(tmp_path):
     try:
         paths, col = _setup(tmp_path)
         out = run_live(paths)
-        assert out["predicted"] == 2 + 6  # 財布2方式 ＋ ルール6版（比較用・配分なし）
+        assert out["predicted"] == 2 + 6 + 3  # 財布2方式 ＋ ルール6版（比較用・配分なし）＋ 統合3版
         assert run_live(paths)["predicted"] == 0  # 二度目は何もしない
         from keiba.ledger import Ledger
         led = Ledger(paths.ledger_path, read_only=True)
@@ -97,7 +97,7 @@ def test_live_predict_allocate_settle(tmp_path):
         assert len(view["top"]) == 3 and view["top"][0]["evaluated"].endswith("/8") and view["used_for_allocation"] is False
         col._save(RK, "result", "result", "/JRADB/x", "c", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
         out = run_live(paths)
-        assert out["settled"] == 6  # 財布2方式 × 3配分
+        assert out["settled"] == 3 * 5  # （財布2方式＋統合3版）× 3配分
         w = wallet_summary(paths)
         assert set(w["wallet"]) == {"equal_payout", "ev_weighted", "kelly"} and (w["stake"] <= 10_000).all()
     finally:
@@ -214,5 +214,52 @@ def test_mam_export_and_import(tmp_path):
         run_live(paths)
         w = wallet_summary(paths)
         assert "text_ai" in set(w["method"])
+    finally:
+        jra.parse_card = orig
+
+
+def test_integrated_versions(tmp_path):
+    from keiba.ledger import Ledger
+    from keiba.review import build_review
+    orig = jra.parse_card
+    jra.parse_card = lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)]
+    try:
+        paths, col = _setup(tmp_path)
+        run_live(paths)
+        led = Ledger(paths.ledger_path, read_only=True)
+        p = {x["method"]: x for x in led.predictions()}
+        led.close()
+        mk, mm, mam = p["int_market"], p["int_market_ml"], p["int_market_ml_mam"]
+        assert mk["formal_probability"] and abs(sum(mk["trio_probs_full"].values()) - 1) < 1e-4
+        assert mm["weights"] == {"market": 1.0, "ml": 0.2} and mm["allocation"]["kelly"]["status"] != "not_allocated"
+        # まむの予想が締切までに無い → 黙って外さず、理由つきで未配分
+        assert not mam["formal_probability"] and "まむ：締切までに予想が無い" in mam["reasons"]
+        assert mam["allocation"]["ev_weighted"]["status"] == "not_allocated"
+        col._save(RK, "result", "result", "/JRADB/x", "c", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
+        run_live(paths)
+        cmp = build_review(paths, "2025-08")["comparison"]
+        assert {c["method"] for c in cmp} == {"市場のみ（基準）", "学習のみ", "市場＋学習 1.0/0.2"} and all(c["races"] == 1 for c in cmp)
+    finally:
+        jra.parse_card = orig
+
+
+def test_mam_partial_trios_are_reference_only(tmp_path):
+    from keiba.ledger import Ledger
+    from keiba.live import wallet
+    from keiba.live.mam import import_predictions
+    orig = jra.parse_card
+    jra.parse_card = lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)]
+    try:
+        paths, col = _setup(tmp_path)
+        f = tmp_path / "mam.json"
+        f.write_text(json.dumps({"schema": "keiba-mam-prediction-v1", "race_key": RK, "time_point": "1h",
+                                 "generated_at": "2025-08-30T14:35:00+09:00", "trios": [{"combo": "1-2-3", "p": 0.3}]}))
+        assert import_predictions(paths, f)["accepted"] == 1
+        run_live(paths)
+        led = Ledger(paths.ledger_path, read_only=True)
+        p = next(x for x in led.predictions() if x["method"] == "int_market_ml_mam")
+        led.close()
+        assert not p["formal_probability"] and p["trio_probs_full"] is None and p["trios"]
+        assert any("全組の確率がそろっていない" in r for r in p["reasons"])
     finally:
         jra.parse_card = orig

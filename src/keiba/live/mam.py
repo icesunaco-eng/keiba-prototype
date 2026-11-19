@@ -131,6 +131,8 @@ def import_predictions(paths, file: Path) -> dict:
             "race_date": v["race"]["race_date"], "method_kind": "text_ai", "uses_post_race_odds": False,
             "horses": [{"n": n, "rank": (v["ranking"].index(n) + 1) if n in v["ranking"] else None} for n in nums],
             "trios": [{"combo": c, "p": round(probs[c], 6) if c in probs else None} for c in ranked[:20]],
+            "trios_all": {c: round(p, 7) for c, p in probs.items()},
+            "complete": bool(probs) and set(probs) == {"-".join(map(str, c)) for c in combinations(sorted(nums), 3)},
             "confidence": pred.get("confidence", "Z"),
             "allocation": {a: (lambda x: {"status": x.status if gate.get("pass") else "not_allocated_gate", "stakes": x.stakes,
                                           "total": x.total})(allocate(probs, odds, a, calibrated=calibrated)) for a in ALLOC_METHODS},
