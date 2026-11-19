@@ -13,6 +13,7 @@
   keiba review [--month YYYY-MM]  月次の振り返り（data/review/<月>.html・.json）
   keiba mam export        まむ（文章AI方式）への入力の束を data/mam/outbox/ に書く
   keiba mam import <file> まむの予想を検証して台帳に入れる（締切後は受け付けない）
+  keiba app [--port 8765] [--open]  確認アプリ（このMacの中だけ。予想を見る・購入を記録する）
   keiba all        上を順に全部
 """
 from __future__ import annotations
@@ -197,8 +198,17 @@ def main(argv=None):
     p.add_argument("--to", dest="end", default=None, help="期間の終わり YYYY-MM-DD")
     p = sub.add_parser("live")
     p.add_argument("action", choices=["run", "check", "wallets"])
+    p = sub.add_parser("app")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--open", action="store_true", help="起動したらブラウザで開く")
+    p.add_argument("--store", default=None, help="購入記録の保存先（試すとき用。既定 data/app/purchases.sqlite）")
+    p.add_argument("--mode", choices=["live", "check"], default="live", help="最初に見るデータ（check＝検証データ。画面の確認用）")
     args = ap.parse_args(argv)
     paths = load_paths(args.paths)
+    if args.cmd == "app":
+        from .app.server import serve
+        serve(paths, args.port, args.open, args.store, args.mode)
+        return 0
     if args.cmd == "all":
         for f in (cmd_ingest, cmd_features, cmd_evaluate, cmd_report, cmd_verify):
             f(paths, args)

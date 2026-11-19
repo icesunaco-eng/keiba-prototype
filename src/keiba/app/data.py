@@ -1,0 +1,279 @@
+"""確認アプリが見るデータ（読むだけ）。
+
+2つの見方がある：
+  live   これからのレース（収集の state.json と、台帳の版 live-* の予想・精算）
+  check  検証データ（最新の評価の封印期間。過去のレースを、画面の確認のために表示する。発走前の予想ではない）
+台帳は読取専用で開く。予想を作り直したり書き換えたりはしない。
+"""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import threading
+import time
+from collections import defaultdict
+from pathlib import Path
+
+import pandas as pd
+
+TIME_POINTS = ("24h", "1h", "15m")
+TP_LABEL = {"24h": "24時間前", "1h": "1時間前", "15m": "15分前"}
+MODES = {"live": "これからのレース", "check": "検証データ（過去）"}
+
+# 画面のタブ（キー → 表示名・台帳の方式。左が優先）
+METHOD_TABS = {
+    "ml": ("学習", ("ml_lgbm",)),
+    "rule": ("ルール", ("rule",)),
+    "mam": ("まむ", ("text_ai",)),
+    "int": ("統合", ("int_market_ml", "int_market_ml_mam", "int_market")),
+}
+METHOD_LABEL = {
+    "ml_lgbm": "学習", "ml_market": "学習＋単勝オッズ", "rule": "ルール v1.0", "rule_v11": "ルール 案v1.1",
+    "rule_v01": "ルール 暫定v0.1", "text_ai": "まむ", "int_market": "市場のみ（基準）",
+    "int_market_ml": "統合：市場＋学習", "int_market_ml_mam": "統合：市場＋学習＋まむ",
+    "base_pop": "基準：人気順（確定オッズ）", "base_logit": "比較：ロジスティック",
+}
+ALLOC_LABEL = {"ev_weighted": "期待値", "equal_payout": "均等払戻", "kelly": "ケリー"}
+ALLOC_STATUS = {
+    "allocated": "配分あり", "zero_no_value": "見送り（期待値が1を超える組が無い）",
+    "zero_no_probability": "見送り（確率の裏づけが足りない）", "unallocated_no_odds": "未配分（オッズ未発売）",
+    "not_allocated_gate": "未配分（オッズの確認が不合格）", "not_allocated": "未配分（入力が足りない）",
+    "not_allocated_role_a": "配分しない（ルールは説明・確認役）",
+}
+# 方式ごとに、仮想の財布の成績で主に見る配分
+MAIN_WALLET = {"live": "ev_weighted", "check": "ref_top10_equal"}
+WALLET_LABEL = {**ALLOC_LABEL, "ref_top10_equal": "参考：上位10組を100円ずつ", "ref_top5_equal": "参考：上位5組を100円ずつ"}
+MARKS = ("◎", "○", "★")
+
+
+def distance_band(d) -> str:
+    if d is None or pd.isna(d):
+        return "不明"
+    d = int(d)
+    return "短距離（〜1400m）" if d <= 1400 else "マイル・中距離（〜2000m）" if d <= 2000 else "長距離（2100m〜）"
+
+
+def horse_probs(p: dict) -> dict[int, float]:
+    """馬ごとの3着内の確率。方式によって持ち方が違うので、組の確率から足し上げる。"""
+    if p.get("horses") and p["horses"][0].get("p_top3") is not None:
+        return {int(h["n"]): float(h["p_top3"]) for h in p["horses"]}
+    full = p.get("trio_probs_full") or p.get("trios_all")
+    pairs = full.items() if full else [(t["combo"], t["p"]) for t in p.get("trios", []) if t.get("p") is not None]
+    out: dict[int, float] = defaultdict(float)
+    for combo, prob in pairs:
+        for n in combo.split("-"):
+            out[int(n)] += prob or 0.0
+    return dict(out)
+
+
+def marks_of(p: dict) -> list[tuple[str, int]]:
+    hp = horse_probs(p)
+    top = sorted(hp, key=lambda n: (-hp[n], n))[:3]
+    return list(zip(MARKS, top))
+
+
+def allocation_of(p: dict, alloc: str) -> dict:
+    a = p.get("allocation") or {}
+    if alloc in a and isinstance(a[alloc], dict):
+        return a[alloc]
+    if "status" in a:  # 検証の予想（配分は1つだけ）
+        return a
+    return {"status": "unallocated_no_odds", "stakes": {}, "total": 0}
+
+
+def is_skip(p: dict, alloc: str) -> bool:
+    return allocation_of(p, alloc).get("status") in ("zero_no_value", "zero_no_probability")
+
+
+class Source:
+    """1つの見方のデータ。台帳と表のファイルが変わったら読み直す。"""
+
+    def __init__(self, paths, mode: str):
+        self.paths, self.mode = paths, mode
+        self.races: dict[str, dict] = {}
+        self.preds: dict[str, dict] = defaultdict(dict)     # race_key → {(method, tp): payload}
+        self.names: dict[str, dict] = defaultdict(dict)     # race_key → {馬番: 馬名}
+        self.results: dict[str, dict] = {}                  # race_key → {actual, payout}
+        self.settlements: list[dict] = []
+        self.versions: list[dict] = []
+        self.version = None
+        self.loaded_at = time.time()
+        self.notes: list[str] = []
+        (self._load_live if mode == "live" else self._load_check)()
+
+    # ---- 共通 ----
+    def _ledger(self):
+        lp = self.paths.ledger_path
+        if not lp.exists():
+            return None
+        return sqlite3.connect(f"file:{lp}?mode=ro", uri=True)
+
+    def _version_list(self, conn):
+        rows = conn.execute("SELECT version, MIN(created_at), MAX(created_at), COUNT(*), COUNT(DISTINCT race_key) "
+                            "FROM predictions GROUP BY version ORDER BY MIN(created_at)").fetchall()
+        self.versions = [{"version": v, "first": a, "last": b, "predictions": n, "races": r} for v, a, b, n, r in rows]
+
+    # ---- これからのレース ----
+    def _load_live(self):
+        root = self.paths.data_dir / "live"
+        state_f = root / "state.json"
+        state = json.loads(state_f.read_text(encoding="utf-8")) if state_f.exists() else {"races": {}}
+        for rk, r in state.get("races", {}).items():
+            self.races[rk] = {"race_key": rk, "race_date": r.get("race_date"), "venue": r.get("venue"),
+                              "race_number": r.get("race_number"), "race_name": r.get("race_name") or "",
+                              "post_time": r.get("post_time"), "surface": r.get("surface"),
+                              "distance_m": r.get("distance_m"), "field_size": r.get("field_size"),
+                              "going": None, "race_class": None}
+        conn = self._ledger()
+        if conn is not None:
+            self._version_list(conn)
+            latest: dict = {}
+            for rk, tp, m, v, created, payload in conn.execute(
+                    "SELECT race_key,time_point,method,version,created_at,payload FROM predictions "
+                    "WHERE version LIKE 'live-%' OR method='text_ai'"):
+                key = (rk, m, tp)
+                if key not in latest or created > latest[key][0]:
+                    latest[key] = (created, v, payload)
+            for (rk, m, tp), (_, v, payload) in latest.items():
+                self.preds[rk][(m, tp)] = {**json.loads(payload), "version": v}
+            for rk, tp, m, v, w, payload in conn.execute(
+                    "SELECT race_key,time_point,method,version,wallet,payload FROM settlements WHERE version LIKE 'live-%' "
+                    "OR method='text_ai'"):
+                self.settlements.append({"race_key": rk, "time_point": tp, "method": m, "version": v, "wallet": w,
+                                         **json.loads(payload)})
+            conn.close()
+            live_versions = [v["version"] for v in self.versions if v["version"].startswith("live-")]
+            self.version = live_versions[-1] if live_versions else None
+        self._live_pages(root, state)
+
+    def _live_pages(self, root: Path, state: dict):
+        """集めた原本から馬名と結果を読む（読めなければ空のまま。画面は「不明」と出す）。"""
+        if not (root / "snapshots.jsonl").exists():
+            return
+        try:
+            from ..live import jra
+            from ..live.wallet import _read, _snapshots, live_tables
+            snaps = _snapshots(root)
+            for rk in self.races:
+                s = snaps[(snaps["race_key"] == rk) & (snaps["kind"] == "card")]
+                if len(s):
+                    for c in jra.parse_card(_read(root, s.iloc[-1])):
+                        if c.get("horse_number"):
+                            self.names[rk][int(c["horse_number"])] = c.get("horse_name") or ""
+            _, _, inputs = live_tables(root, state, snaps)
+            for (rk, tp), res in inputs.items():
+                if tp != "result":
+                    continue
+                fin = sorted((r for r in res["rows"] if r["status"] == "finished" and r["finish_position"]),
+                             key=lambda r: r["finish_position"])
+                top = sorted(r["horse_number"] for r in fin if r["finish_position"] <= 3)
+                pay = {p["combo"]: p["payout_yen"] for p in res.get("trio_payouts", [])}
+                actual = "-".join(map(str, top)) if len(top) == 3 else None
+                self.results[rk] = {"actual": actual, "payout": pay.get(actual) if actual else None}
+        except Exception as exc:  # 原本の読取の失敗で画面を止めない
+            self.notes.append(f"原本の読取に失敗：{exc!r}"[:200])
+
+    # ---- 検証データ ----
+    def _load_check(self):
+        conn = self._ledger()
+        if conn is None:
+            return
+        self._version_list(conn)
+        run = conn.execute("SELECT run_id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()
+        if not run:
+            conn.close()
+            return
+        self.version = run[0]
+        for rk, tp, m, payload in conn.execute(
+                "SELECT race_key,time_point,method,payload FROM predictions WHERE version=? "
+                "AND json_extract(payload,'$.period')='holdout'", (self.version,)):
+            self.preds[rk][(m, tp)] = {**json.loads(payload), "version": self.version}
+        for rk, tp, m, w, payload in conn.execute(
+                "SELECT race_key,time_point,method,wallet,payload FROM settlements WHERE version=?", (self.version,)):
+            if rk in self.preds:
+                self.settlements.append({"race_key": rk, "time_point": tp, "method": m, "version": self.version,
+                                         "wallet": w, **json.loads(payload)})
+        conn.close()
+        t = self.paths.tables_dir
+        if (t / "races.parquet").exists():
+            races = pd.read_parquet(t / "races.parquet")
+            races = races[races["race_key"].isin(self.preds.keys())]
+            races = races.astype(object).where(races.notna(), None)  # 欠損（NaN）は None にそろえる
+            for r in races.to_dict("records"):
+                self.races[r["race_key"]] = {
+                    "race_key": r["race_key"], "race_date": str(r["race_date"])[:10], "venue": r["venue"],
+                    "race_number": int(r["race_number"]), "race_name": "", "post_time": r.get("post_time"),
+                    "surface": r.get("surface"), "distance_m": r.get("distance_m"), "field_size": r.get("field_size"),
+                    "going": r.get("going"), "race_class": r.get("race_class")}
+        if (t / "runners.parquet").exists():
+            run = pd.read_parquet(t / "runners.parquet", columns=["race_key", "horse_number", "horse_name", "finish_position", "status"])
+            run = run[run["race_key"].isin(self.preds.keys())]
+            for r in run.itertuples():
+                self.names[r.race_key][int(r.horse_number)] = r.horse_name or ""
+            fin = run[run["finish_position"].notna() & (run["finish_position"] <= 3)]
+            top = fin.groupby("race_key")["horse_number"].apply(lambda s: "-".join(map(str, sorted(int(x) for x in s))) if len(s) == 3 else None)
+            pay = {}
+            if (t / "payouts.parquet").exists():
+                p = pd.read_parquet(t / "payouts.parquet")
+                pay = {(r.race_key, r.combo): int(r.payout_yen) for r in p[p["bet_type"] == "trio"].itertuples()}
+            for rk, actual in top.items():
+                self.results[rk] = {"actual": actual, "payout": pay.get((rk, actual)) if actual else None}
+        for rk in self.preds:
+            self.races.setdefault(rk, {"race_key": rk, "race_date": rk.split("|")[0], "venue": rk.split("|")[1],
+                                       "race_number": int(rk.split("|")[2]), "race_name": "", "post_time": None,
+                                       "surface": None, "distance_m": None, "field_size": None, "going": None,
+                                       "race_class": None})
+
+    # ---- 画面から使う ----
+    def days(self) -> list[str]:
+        return sorted({r["race_date"] for r in self.races.values() if r.get("race_date")})
+
+    def races_on(self, day: str) -> list[dict]:
+        return sorted((r for r in self.races.values() if r["race_date"] == day),
+                      key=lambda r: (r.get("post_time") or "99:99", r["venue"], r["race_number"]))
+
+    def pick(self, race_key: str, tab: str, tp: str) -> tuple[str | None, dict | None]:
+        """タブ（学習・ルール・まむ・統合）と時点で予想を1つ選ぶ。その時点に無ければ None。"""
+        for m in METHOD_TABS[tab][1]:
+            p = self.preds.get(race_key, {}).get((m, tp))
+            if p:
+                return m, p
+        return None, None
+
+    def latest_tp(self, race_key: str, tab: str = "ml") -> str | None:
+        for tp in reversed(TIME_POINTS):
+            if self.pick(race_key, tab, tp)[1]:
+                return tp
+        return None
+
+    def name(self, race_key: str, n: int) -> str:
+        return self.names.get(race_key, {}).get(int(n), "")
+
+
+class Cache:
+    """見方ごとに Source を持ち、元のファイルが変わったら作り直す。"""
+
+    def __init__(self, paths):
+        self.paths = paths
+        self._lock = threading.Lock()
+        self._items: dict[str, tuple[tuple, Source]] = {}
+
+    def _stamp(self, mode: str) -> tuple:
+        files = [self.paths.ledger_path]
+        if mode == "live":
+            root = self.paths.data_dir / "live"
+            files += [root / "state.json", root / "snapshots.jsonl"]
+        else:
+            files += [self.paths.tables_dir / f for f in ("races.parquet", "runners.parquet", "payouts.parquet")]
+        return tuple(os.stat(f).st_mtime_ns if f.exists() else 0 for f in files)
+
+    def get(self, mode: str) -> Source:
+        mode = mode if mode in MODES else "live"
+        with self._lock:
+            stamp = self._stamp(mode)
+            item = self._items.get(mode)
+            if item is None or item[0] != stamp:
+                item = (stamp, Source(self.paths, mode))
+                self._items[mode] = item
+            return item[1]
