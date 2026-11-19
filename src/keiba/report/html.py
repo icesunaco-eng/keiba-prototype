@@ -12,7 +12,7 @@ import pandas as pd
 from ..ledger import Ledger
 from ..models.rule import GROUP_LABELS, GROUPS
 
-METHOD_LABEL = {"ml_lgbm": "学習モデル", "rule": "ルール（あいす v1.0）", "rule_v11": "ルール（案 v1.1）", "rule_v01": "ルール（暫定 v0.1）", "base_logit": "比較：ロジスティック",
+METHOD_LABEL = {"ml_lgbm": "学習モデル", "ml_market": "学習＋市場（確定オッズ近似）", "rule": "ルール（あいす v1.0）", "rule_v11": "ルール（案 v1.1）", "rule_v01": "ルール（暫定 v0.1）", "base_logit": "比較：ロジスティック",
                 "base_pop": "比較：人気順（確定オッズ）"}
 TP_LABEL = {"24h": "前日", "1h": "1時間前", "15m": "15分前"}
 PERIOD_LABEL = {"walk_forward": "時間順の検証", "holdout": "封印期間（1回だけ評価）"}

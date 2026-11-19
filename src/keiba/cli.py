@@ -7,6 +7,8 @@
   keiba verify     台帳の中身がハッシュと一致するか確かめる
   keiba collect tick      これからのレースの出馬表・オッズ・結果をJRA公式から時刻つきで集める（5分ごとに呼ぶ）
   keiba collect install   上を5分ごとに動かす launchd の設定ファイルを書く（読み込みは表示するコマンドで）
+  keiba live run          集めたページで予想・配分・精算（tick が新しいページを取ったときにも自動で動く）
+  keiba live wallets      仮想の財布（方式×配分）の成績
   keiba all        上を順に全部
 """
 from __future__ import annotations
@@ -75,11 +77,35 @@ def cmd_verify(paths, args):
     led.close()
 
 
+def _notify(title: str, body: str):
+    """Mac の通知センターに出す（手元だけ。外部には送らない）。"""
+    import subprocess
+    t = title.replace('"', "'")
+    b = body.replace('"', "'")
+    subprocess.run(["osascript", "-e", f'display notification "{b}" with title "keiba 収集" subtitle "{t}"'], check=False)
+
+
+def cmd_live(paths, args):
+    from .live.wallet import run_live, wallet_summary
+    if args.action == "run":
+        print(json.dumps(run_live(paths), ensure_ascii=False))
+    else:
+        print(wallet_summary(paths).to_string(index=False))
+
+
 def cmd_collect(paths, args):
     from .live.collector import Collector
     root = paths.data_dir / "live"
     if args.action == "tick":
-        print(json.dumps(Collector(root).tick(), ensure_ascii=False))
+        out = Collector(root).tick(notify=_notify)
+        if out["saved"]:
+            from .live.wallet import run_live
+            try:
+                out["live"] = run_live(paths)
+            except Exception as exc:  # 予想の失敗で収集を止めない
+                out["live_error"] = repr(exc)
+                _notify("予想・精算に失敗", repr(exc)[:120])
+        print(json.dumps(out, ensure_ascii=False))
     elif args.action == "install":
         import os
         from pathlib import Path
@@ -122,6 +148,8 @@ def main(argv=None):
     sub.add_parser("verify")
     p = sub.add_parser("collect")
     p.add_argument("action", choices=["tick", "install"])
+    p = sub.add_parser("live")
+    p.add_argument("action", choices=["run", "wallets"])
     args = ap.parse_args(argv)
     paths = load_paths(args.paths)
     if args.cmd == "all":
@@ -129,7 +157,7 @@ def main(argv=None):
             f(paths, args)
     else:
         {"ingest": cmd_ingest, "features": cmd_features, "evaluate": cmd_evaluate,
-         "report": cmd_report, "verify": cmd_verify, "collect": cmd_collect}[args.cmd](paths, args)
+         "report": cmd_report, "verify": cmd_verify, "collect": cmd_collect, "live": cmd_live}[args.cmd](paths, args)
     return 0
 
 

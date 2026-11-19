@@ -22,6 +22,7 @@ from .models.baseline import LogitModel, PopularityModel
 from .models.ranker import RankerModel
 from .models.rule import GROUPS, RULE_VERSION, RuleModel, score_groups
 from .models import rule_v1
+from .models.market import MarketBlendModel
 from .models.trio import Calibration, fit_calibration, trio_probs, win_probs
 from .settle import settle_trio
 
@@ -29,7 +30,7 @@ CALIB_DAYS = 60
 TOP_TRIOS_SAVED = 20
 REF_WALLETS = {"ref_top5_equal": 5, "ref_top10_equal": 10}
 HIT_K = (1, 5, 10, 20)
-METHOD_KIND = {"rule": "rule", "rule_v11": "rule", "rule_v01": "rule", "ml_lgbm": "ml", "base_logit": "baseline", "base_pop": "baseline"}
+METHOD_KIND = {"ml_market": "ml", "rule": "rule", "rule_v11": "rule", "rule_v01": "rule", "ml_lgbm": "ml", "base_logit": "baseline", "base_pop": "baseline"}
 TIME_POINTS_EVAL = ("24h", "1h")
 
 
@@ -38,7 +39,7 @@ class EvalConfig:
     first_month: str = "2025-05-01"
     holdout_start: str = "2026-08-16"   # 直近3か月（データの最終日 2026-11-15 から）
     min_field: int = 5
-    methods: tuple = ("rule", "rule_v01", "ml_lgbm", "base_logit", "base_pop")
+    methods: tuple = ("rule", "rule_v11", "rule_v01", "ml_lgbm", "ml_market", "base_logit", "base_pop")
     time_points: tuple = TIME_POINTS_EVAL
     version_label: str = "v0.1"
     run_holdout: bool = True
@@ -67,6 +68,7 @@ def actual_order(g: pd.DataFrame) -> tuple | None:
 def make_model(method: str, tp: str):
     feats = feature_columns(tp)
     return {"rule": lambda: rule_v1.RuleV1Model(tp), "rule_v11": lambda: rule_v1.RuleV1Model(tp, "v1.1"), "rule_v01": lambda: RuleModel(tp), "ml_lgbm": lambda: RankerModel(feats),
+            "ml_market": lambda: MarketBlendModel(feats),
             "base_logit": lambda: LogitModel(feats), "base_pop": lambda: PopularityModel()}[method]()
 
 
@@ -124,6 +126,8 @@ def predict_race(g: pd.DataFrame, scores: np.ndarray, calib: Calibration, method
     notes = []
     if method == "base_pop":
         notes.append("確定単勝オッズを使う比較専用。発走前には作れない")
+    if method == "ml_market":
+        notes.append("過去の検証では確定単勝オッズで近似（発走前オッズが無いため）。これからのレースは発走前オッズを使う")
     if method == "rule_v01":
         notes.append(f"尺度は {RULE_VERSION}（Claude の暫定版。比較用）")
     if method == "rule_v11":
@@ -159,7 +163,12 @@ def run_period(train, calib_df, test, tp, cfg, version, ledger, label, payout_ma
         model = make_model(method, tp)
         if len(train):
             model.fit(train)
+        if hasattr(model, "fit_blend") and len(calib_df):
+            model.fit_blend(calib_df, _calibration_set)
         calib = fit_calibration(_calibration_set(calib_df, model.score(calib_df))) if len(calib_df) else Calibration()
+        if method == "ml_market":
+            importance.setdefault(f"{label}:{tp}:market_v", []).append(
+                {"from": str(test["race_date"].min().date()), "v": model.w})
         if method == "ml_lgbm":
             importance[f"{label}:{tp}"] = dict(list(model.importance().items())[:15])
         scores_all = model.score(test)
@@ -170,7 +179,7 @@ def run_period(train, calib_df, test, tp, cfg, version, ledger, label, payout_ma
         test = test.assign(_s=scores_all)
         for rk, g in test.groupby("race_key", sort=False):
             sc = g["_s"].to_numpy(dtype=float)
-            if method == "base_pop" and not np.isfinite(sc).all():
+            if method in ("base_pop", "ml_market") and g["final_win_odds"].isna().any():
                 continue  # 確定オッズが無いレース（取消など）は比較から外す
             rg = rule_all.loc[g.index] if rule_all is not None else None
             payload = predict_race(g, sc, calib, method, tp, version, rg)

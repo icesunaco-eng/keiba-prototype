@@ -9,6 +9,7 @@ JRAのページは「cname」という値をPOST（またはGETの ?CNAME=）で
 """
 from __future__ import annotations
 
+import math
 import re
 import time
 import unicodedata
@@ -150,6 +151,8 @@ def parse_card(page: str) -> list[dict]:
             "age": int(am.group(2)) if am else None,
             "weight_carried": float(wt.group(1)) if wt else None,
             "jockey_name": _t(tr.xpath('.//td[contains(@class,"jockey")]//p[@class="jockey"]')[0]) if tr.xpath('.//td[contains(@class,"jockey")]//p[@class="jockey"]') else None,
+            "jockey_key": (lambda m: f"nk:{m.group(1)}" if m else None)(_JOCKEY.search(lxml_html.tostring(tr.xpath('./td[contains(@class,"jockey")]')[0], encoding="unicode"))) if tr.xpath('./td[contains(@class,"jockey")]') else None,
+            "trainer_key": (lambda m: f"nk:{m.group(1)}" if m else None)(_TRAINER.search(lxml_html.tostring(horse, encoding="unicode"))),
             "trainer_name": _t(horse.xpath('.//p[@class="trainer"]/a')[0]) if horse.xpath('.//p[@class="trainer"]/a') else None,
             "sire": _t(horse.xpath('.//li[@class="sire"]')[0]).replace("父:", "").strip() if horse.xpath('.//li[@class="sire"]') else None,
             "dam": mare_text or None,
@@ -157,3 +160,95 @@ def parse_card(page: str) -> list[dict]:
             "past_runs": past,
         })
     return rows
+
+
+# ---------- 結果・オッズ ----------
+
+_JOCKEY = re.compile(r"pw04kmk0(\d{5})")
+_TRAINER = re.compile(r"pw05cmk0(\d{5})")
+
+
+def parse_result(page: str) -> dict:
+    """レース結果ページ。着順の表と三連複の払戻（同着なら複数）。"""
+    doc = lxml_html.fromstring(page)
+    rows = []
+    for tr in doc.xpath('//table[contains(@class,"striped")]/tbody/tr'):
+        cell = lambda c: _t(tr.xpath(f'./td[contains(@class,"{c}")]')[0]) if tr.xpath(f'./td[contains(@class,"{c}")]') else ""
+        num = cell("num")
+        if not num.isdigit():
+            continue
+        place = cell("place")
+        a = tr.xpath('./td[contains(@class,"horse")]//a')
+        hid = re.search(r"pw01dud\d{2}(\d{10})", a[0].get("href", "")) if a else None
+        hw = re.match(r"(\d{3})\s*\(([+\-]?\d+)\)", cell("h_weight"))
+        corners = [_t(li) for li in tr.xpath('.//div[@class="corner_list"]//li')]
+        html_row = lxml_html.tostring(tr, encoding="unicode")
+        status = "finished" if place.isdigit() else {"取消": "withdrawn", "除外": "excluded", "中止": "did_not_finish"}.get(
+            next((k for k in ("取消", "除外", "中止") if k in place), ""), "did_not_finish" if place else "finished")
+        jm, tm_ = _JOCKEY.search(html_row), _TRAINER.search(html_row)
+        rows.append({"horse_number": int(num), "finish_position": int(place) if place.isdigit() else None, "status": status,
+                     "horse_id": hid.group(1) if hid else None, "last3f_s": float(cell("f_time")) if re.fullmatch(r"\d+\.\d", cell("f_time")) else None,
+                     "passage_raw": "-".join(corners) if corners else None,
+                     "body_weight": int(hw.group(1)) if hw else None, "body_weight_diff": int(hw.group(2)) if hw else None,
+                     "jockey_key": f"nk:{jm.group(1)}" if jm else None, "trainer_key": f"nk:{tm_.group(1)}" if tm_ else None,
+                     "final_popularity": int(cell("pop")) if cell("pop").isdigit() else None,
+                     "finish_time_s": _clock(cell("time"))})
+    trio = []
+    for line in doc.xpath('//li[contains(@class,"trio")]//div[@class="line"]'):
+        combo = _t(line.xpath('./div[@class="num"]')[0]) if line.xpath('./div[@class="num"]') else ""
+        yen = re.sub(r"[^\d]", "", _t(line.xpath('./div[@class="yen"]')[0])) if line.xpath('./div[@class="yen"]') else ""
+        nums = [int(x) for x in re.findall(r"\d+", combo)]
+        if len(nums) == 3 and yen:
+            trio.append({"combo": "-".join(map(str, sorted(nums))), "payout_yen": int(yen)})
+    return {"rows": rows, "trio_payouts": trio}
+
+
+def _clock(text: str):
+    m = re.fullmatch(r"(?:(\d+):)?(\d{1,2})\.(\d)", text.strip())
+    return int(m.group(1) or 0) * 60 + int(m.group(2)) + int(m.group(3)) / 10 if m else None
+
+
+def _num(text: str):
+    t = text.replace(",", "").strip()
+    return float(t) if re.fullmatch(r"\d+(\.\d+)?", t) else None
+
+
+def parse_win_odds(page: str, field: int | None = None) -> dict:
+    """単勝オッズ（馬番 → 倍）。表の「馬番」と、単勝の列（class に tan を含むセル、無ければ行の最初の小数）を読む。
+    読めた頭数が field と違えば ok=False（使わない）。最初の実物で確かめるまでは、この自己照合だけが頼り。"""
+    doc = lxml_html.fromstring(page)
+    odds = {}
+    for tr in doc.xpath("//table//tr"):
+        num = tr.xpath('./*[contains(@class,"num")]')
+        if not num or not _t(num[0]).isdigit():
+            continue
+        tan = tr.xpath('./td[contains(@class,"tan")]') or tr.xpath('./td[contains(@class,"odds")]')
+        vals = [_num(_t(x)) for x in tan] if tan else [_num(x) for x in re.findall(r"\d+\.\d", _t(tr))]
+        vals = [v for v in vals if v]
+        if vals:
+            odds.setdefault(int(_t(num[0])), vals[0])
+    ok = bool(odds) and (field is None or len(odds) == field)
+    return {"odds": odds, "ok": ok}
+
+
+def parse_trio_odds(page: str, field: int) -> dict:
+    """三連複オッズ（"a-b-c" → 倍）。表ごとに見出し（例「1-2」）の2頭と、行の馬番・オッズで組を作る。
+    取消の馬がいれば組は減るので、C(出走頭数,3) と一致したときだけ ok=True。"""
+    doc = lxml_html.fromstring(page)
+    odds = {}
+    for table in doc.xpath("//table"):
+        cap = table.xpath("./caption") or table.xpath("preceding-sibling::*[1]")
+        head = [int(x) for x in re.findall(r"\d+", _t(cap[0]))] if cap else []
+        if len(head) != 2:
+            continue
+        for tr in table.xpath(".//tr"):
+            num = tr.xpath('./*[contains(@class,"num")]')
+            val = tr.xpath('./td[contains(@class,"odds")]')
+            if not (num and val and _t(num[0]).isdigit()):
+                continue
+            v = _num(_t(val[0]))
+            third = int(_t(num[0]))
+            if v and third not in head:
+                odds["-".join(map(str, sorted(head + [third])))] = v
+    expected = math.comb(field, 3) if field and field >= 3 else None
+    return {"odds": odds, "ok": expected is not None and len(odds) == expected, "expected": expected}

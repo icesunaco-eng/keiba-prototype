@@ -93,8 +93,10 @@ class Collector:
                 continue
             for r in meeting["races"]:
                 rk = f"{meeting['race_date']}|{meeting['venue']}|{r['race_number']}"
+                prev = self.state["races"].get(rk, {})
                 self.state["races"][rk] = {**r, "race_date": meeting["race_date"], "venue": meeting["venue"],
-                                           "list_cname": cname}
+                                           "list_cname": cname,
+                                           "known_at": prev.get("known_at", self.now().isoformat(timespec="seconds"))}
         self.state["refreshed_at"] = self.now().isoformat(timespec="seconds")
         self._write_state()
 
@@ -148,17 +150,43 @@ class Collector:
         self._write_state()
         return saved
 
-    def tick(self, log=print) -> dict:
+    def missed(self) -> list[str]:
+        """窓が過ぎたのに取れていない（Macが寝ていた・失敗したなど）。結果は6時間の窓が過ぎたら。"""
+        out = []
+        now = self.now()
+        for rk, r in self.state["races"].items():
+            if not r.get("post_time"):
+                continue
+            post = datetime.fromisoformat(f"{r['race_date']}T{r['post_time']}:00+09:00")
+            known = datetime.fromisoformat(r.get("known_at", self.state.get("refreshed_at") or now.isoformat()))
+            for tp, (a, b) in WINDOWS.items():
+                key = f"{rk}|{tp}"
+                if key not in self.state["taken"] and now >= post + timedelta(minutes=b) and known <= post + timedelta(minutes=a):
+                    out.append(key)
+        return out
+
+    def tick(self, log=print, notify=None) -> dict:
         self.refresh()
-        done = []
+        done, errors = [], []
         for rk, tp in self.due():
             try:
                 done += self.capture(rk, tp)
             except Exception as exc:  # 1レースの失敗で全体を止めない
-                log(f"{rk} {tp}: {exc!r}")
+                errors.append(f"{rk} {tp}: {exc!r}")
+                log(errors[-1])
+        missed = self.missed()
+        notified = self.state.setdefault("missed_notified", [])
+        new_missed = [k for k in missed if k not in notified]
+        if (new_missed or errors) and notify:
+            notify(f"取れなかった {len(new_missed)}件・失敗 {len(errors)}件", "; ".join((new_missed + errors)[:3]))
+        self.state["missed_notified"] += new_missed
+        health = {"checked_at": self.now().isoformat(timespec="seconds"), "missed": missed, "errors": errors,
+                  "races_known": len(self.state["races"]), "taken": len(self.state["taken"])}
+        (self.root / "health.json").write_text(json.dumps(health, ensure_ascii=False, indent=1))
         # 終わった開催は state から外す（7日より前）
         cutoff = (self.now() - timedelta(days=7)).date().isoformat()
         for rk in [k for k, v in self.state["races"].items() if v["race_date"] < cutoff]:
             self.state["races"].pop(rk)
         self._write_state()
-        return {"requests": self.client.count, "saved": len(done), "races_known": len(self.state["races"])}
+        return {"requests": self.client.count, "saved": len(done), "races_known": len(self.state["races"]),
+                "missed": len(missed), "errors": len(errors)}
