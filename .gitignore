@@ -12,3 +12,13 @@ ref/
 logs/
 *.pem
 *.key
+.venv/
+data/
+scratch/
+*.html
+!src/keiba/report/templates/*.html
+*.parquet
+*.zip
+.pytest_cache/
+*.egg-info/
+.notion-sync-pending/

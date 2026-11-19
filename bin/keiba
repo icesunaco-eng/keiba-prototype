@@ -1,0 +1,7 @@
+#!/bin/sh
+# macOS で Homebrew の libomp が無いとき、scikit-learn 同梱の libomp を LightGBM に使わせる
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+PY="$HERE/.venv/bin/python"
+SK=$("$PY" -c 'import os,sklearn;print(os.path.join(os.path.dirname(sklearn.__file__),".dylibs"))' 2>/dev/null)
+[ -d "$SK" ] && export DYLD_FALLBACK_LIBRARY_PATH="$SK${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
+exec "$PY" -m keiba.cli "$@"

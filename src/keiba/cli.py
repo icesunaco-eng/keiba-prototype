@@ -1,0 +1,165 @@
+"""keiba コマンド。
+
+  keiba ingest     正規の表（races/runners/payouts）を作る
+  keiba features   時点つき特徴の表を作る
+  keiba evaluate   時間順の検証＋封印期間の評価。予想を台帳に保存し、検証Aの参考買い目で精算する
+  keiba report     iPhone幅のHTMLレポートを作る
+  keiba verify     台帳の中身がハッシュと一致するか確かめる
+  keiba collect tick      これからのレースの出馬表・オッズ・結果をJRA公式から時刻つきで集める（5分ごとに呼ぶ）
+  keiba collect install   上を5分ごとに動かす launchd の設定ファイルを書く（読み込みは表示するコマンドで）
+  keiba live run          集めたページで予想・配分・精算（tick が新しいページを取ったときにも自動で動く）
+  keiba live wallets      仮想の財布（方式×配分）の成績
+  keiba all        上を順に全部
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+import pandas as pd
+
+from .config import load_paths
+
+
+def _tables(paths):
+    t = paths.tables_dir
+    return (pd.read_parquet(t / "races.parquet"), pd.read_parquet(t / "runners.parquet"),
+            pd.read_parquet(t / "payouts.parquet"))
+
+
+def cmd_ingest(paths, args):
+    from .ingest.build import build
+    report = build(paths, pdf_workers=args.workers)
+    print(json.dumps(report, ensure_ascii=False, indent=1, default=str))
+
+
+def cmd_features(paths, args):
+    from .features.asof import build_features
+    races, runners, _ = _tables(paths)
+    from .models.rule_v1 import build_utilities
+    feat = build_features(races, runners)
+    feat = feat.merge(build_utilities(races, runners), on=["runner_key", "race_key"], how="left")
+    feat = feat.merge(build_utilities(races, runners, "v1.1").drop(columns=["is_flat"]), on=["runner_key", "race_key"], how="left")
+    feat.to_parquet(paths.tables_dir / "features.parquet", index=False)
+    print(f"特徴 {feat.shape[0]:,}行 × {feat.shape[1]}列 → {paths.tables_dir / 'features.parquet'}")
+
+
+def cmd_evaluate(paths, args):
+    from .evaluate import EvalConfig, run_evaluation
+    from .ledger import Ledger
+    races, runners, payouts = _tables(paths)
+    feat = pd.read_parquet(paths.tables_dir / "features.parquet")
+    cfg = EvalConfig(first_month=args.first_month, holdout_start=args.holdout_start)
+    led = Ledger(paths.ledger_path)
+    result, rows = run_evaluation(feat, races, runners, payouts, led, cfg)
+    led.close()
+    out = paths.data_dir / "eval"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "metrics.json").write_text(json.dumps(result, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    rows.drop(columns=["horse_p_top3"]).to_csv(out / "race_scores.csv", index=False)
+    for s in result["summary"]:
+        print(f"{s['period']:12s} {s['time_point']:3s} {s['method']:10s} races={s['races']:5d} "
+              f"logloss={s['trio_logloss']} hit@10={s['hit@10']} ref10_roi={s['ref_top10_equal']['roi']}")
+    print(f"版 {result['version']} → {out / 'metrics.json'}")
+
+
+def cmd_report(paths, args):
+    from .report.html import build_report
+    index = build_report(paths.ledger_path, paths.report_dir, paths.tables_dir / "build_report.json", args.version)
+    print(f"レポート → {index}")
+
+
+def cmd_verify(paths, args):
+    from .ledger import Ledger
+    led = Ledger(paths.ledger_path, read_only=True)
+    print(json.dumps(led.verify(), ensure_ascii=False))
+    led.close()
+
+
+def _notify(title: str, body: str):
+    """Mac の通知センターに出す（手元だけ。外部には送らない）。"""
+    import subprocess
+    t = title.replace('"', "'")
+    b = body.replace('"', "'")
+    subprocess.run(["osascript", "-e", f'display notification "{b}" with title "keiba 収集" subtitle "{t}"'], check=False)
+
+
+def cmd_live(paths, args):
+    from .live.wallet import run_live, wallet_summary
+    if args.action == "run":
+        print(json.dumps(run_live(paths), ensure_ascii=False))
+    else:
+        print(wallet_summary(paths).to_string(index=False))
+
+
+def cmd_collect(paths, args):
+    from .live.collector import Collector
+    root = paths.data_dir / "live"
+    if args.action == "tick":
+        out = Collector(root).tick(notify=_notify)
+        if out["saved"]:
+            from .live.wallet import run_live
+            try:
+                out["live"] = run_live(paths)
+            except Exception as exc:  # 予想の失敗で収集を止めない
+                out["live_error"] = repr(exc)
+                _notify("予想・精算に失敗", repr(exc)[:120])
+        print(json.dumps(out, ensure_ascii=False))
+    elif args.action == "install":
+        import os
+        from pathlib import Path
+        from .config import REPO_ROOT
+        label = "com.heroines.keiba-collect"
+        plist = Path("~/Library/LaunchAgents").expanduser() / f"{label}.plist"
+        root.mkdir(parents=True, exist_ok=True)
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>{label}</string>
+<key>ProgramArguments</key><array><string>{REPO_ROOT / 'bin' / 'keiba'}</string><string>collect</string><string>tick</string></array>
+<key>StartInterval</key><integer>300</integer>
+<key>StandardOutPath</key><string>{root / 'collect.log'}</string>
+<key>StandardErrorPath</key><string>{root / 'collect.log'}</string>
+</dict></plist>
+""", encoding="utf-8")
+        print(f"書いた：{plist}")
+        print(f"動かす：launchctl bootstrap gui/{os.getuid()} {plist}")
+        print(f"止める：launchctl bootout gui/{os.getuid()}/{label}")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="keiba", description="三連複予想の検証（実購入はしない）")
+    ap.add_argument("--paths", help="paths.json の場所（既定 ~/.heroines/paths.json）")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("ingest")
+    p.add_argument("--workers", type=int, default=6)
+    sub.add_parser("features")
+    for name in ("evaluate", "all"):
+        p = sub.add_parser(name)
+        p.add_argument("--first-month", default="2025-05-01")
+        p.add_argument("--holdout-start", default="2026-08-16")
+        if name == "all":
+            p.add_argument("--workers", type=int, default=6)
+            p.add_argument("--version", default=None)
+    p = sub.add_parser("report")
+    p.add_argument("--version", default=None)
+    sub.add_parser("verify")
+    p = sub.add_parser("collect")
+    p.add_argument("action", choices=["tick", "install"])
+    p = sub.add_parser("live")
+    p.add_argument("action", choices=["run", "wallets"])
+    args = ap.parse_args(argv)
+    paths = load_paths(args.paths)
+    if args.cmd == "all":
+        for f in (cmd_ingest, cmd_features, cmd_evaluate, cmd_report, cmd_verify):
+            f(paths, args)
+    else:
+        {"ingest": cmd_ingest, "features": cmd_features, "evaluate": cmd_evaluate,
+         "report": cmd_report, "verify": cmd_verify, "collect": cmd_collect, "live": cmd_live}[args.cmd](paths, args)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
