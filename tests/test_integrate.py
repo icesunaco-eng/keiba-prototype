@@ -6,7 +6,7 @@ B = {"1-2-3": 0.2, "1-2-4": 0.6, "2-3-4": 0.2}
 
 def test_single_method_weight_one_is_identity():
     out = pool({"a": A, "b": B}, {"a": 1.0, "b": 0.0})
-    assert out == A
+    assert out.keys() == A.keys() and all(abs(out[c] - A[c]) < 1e-12 for c in A)
 
 
 def test_agreement_is_rewarded_and_sums_to_one():
