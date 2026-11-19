@@ -283,7 +283,8 @@ def run_live(paths, log=print) -> dict:
 
 
 def market_probs(trio_odds: dict) -> dict:
-    """発走前の三連複オッズ → 市場の確率（1/オッズ を合計1に直したもの。控除分は割合で消える）。"""
+    """発走前の三連複オッズ → 市場推定確率（1/オッズ を合計1に直したもの）。
+    比較の基準には使うが、的中確率としての正確さは未確認。補正は入れない（8週点検で偏りが見えたら候補にする）。"""
     inv = {c: 1 / o for c, o in trio_odds.items() if o and o > 0}
     total = sum(inv.values())
     return {c: v / total for c, v in inv.items()}
@@ -308,7 +309,7 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) ->
         if gate["pass"]:
             sources["market"] = market_probs(inp["trio"]["odds"])
         else:
-            reasons.append("市場：三連複オッズが合格していない（" + " / ".join(gate.get("reasons", [])) + "）")
+            reasons.append("市場推定確率：三連複オッズが合格していない（" + " / ".join(gate.get("reasons", [])) + "）")
         if "ml" in w:
             sources["ml"] = ml
         if "mam" in w:
@@ -340,7 +341,8 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) ->
             "trios": [{"combo": c, "p": round(p, 6)} for c, p in list(pooled.items())[:20]],
             "trio_probs_full": {c: round(p, 7) for c, p in pooled.items()} if formal else None,
             "allocation": alloc, "odds_gate": gate, "reasons": reasons, "period": "live",
-            "notes": ["あいす統合（別枠の参考予想）。ルールは入れない"],
+            "notes": ["あいす統合（別枠の参考予想）。ルールは入れない",
+                      "市場推定確率＝発走前の三連複オッズの逆数を合計1に直したもの（的中確率としての正確さは未確認・補正なし）"],
             "horses": [{"n": n} for n in nums], "confidence": "Z" if not allow else "–",
         }
         led.add_prediction(rk, tp, m, version, payload, sha(canonical(inp["snapshots"]))[:16],

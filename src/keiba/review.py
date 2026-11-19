@@ -44,7 +44,7 @@ def _results(paths) -> dict:
 
 
 CMP_METHODS = ["int_market", "ml_lgbm", "int_market_ml", "int_market_ml_mam"]
-CMP_LABELS = {"int_market": "市場のみ（基準）", "ml_lgbm": "学習のみ", "int_market_ml": "市場＋学習 1.0/0.2",
+CMP_LABELS = {"int_market": "市場推定確率のみ（基準）", "ml_lgbm": "学習のみ", "int_market_ml": "市場＋学習 1.0/0.2",
               "int_market_ml_mam": "市場＋学習＋まむ 1.0/0.2/0.2"}
 
 
@@ -172,7 +172,8 @@ def write_review(paths, month: str | None, start: str | None = None, end: str | 
              "<h2>比較：市場のみ・学習のみ・統合（同じレース・同じ時点）</h2>",
              table(r["comparison"], ["set", "method", "races", "logloss", "hit10", "roi_ev", "bet_races"],
                    ["組", "方式", "対象", "対数損失（主）", "上位10組", "仮想回収率（期待値配分）", "賭けたレース"]),
-             "<p class='muted'>対数損失は小さいほど良い。全組の確率が正式なものだけで計算。8週ごとの点検は --from/--to で期間を指定</p>",
+             "<p class='muted'>対数損失は小さいほど良い。全組の確率が正式なものだけで計算。8週ごとの点検は --from/--to で期間を指定。"
+             "市場推定確率＝発走前の三連複オッズの逆数を合計1に直したもの（比較の基準。的中確率としての正確さは未確認。補正なし）</p>",
              "<h2>仮想の財布</h2>", table(r["wallets"], ["method", "wallet", "races", "bet_races", "stake", "returned", "roi", "hit_races"],
                                       ["方式", "配分", "レース", "賭けたレース", "賭け金", "払戻", "回収率", "的中レース"]),
              "<h2>予想の当たり具合</h2>", table(r["accuracy"], ["method", "time_point", "races", "上位5", "上位10", "上位20"],
