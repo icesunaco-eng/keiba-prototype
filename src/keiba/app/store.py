@@ -182,7 +182,8 @@ class Store:
             " AND race_key NOT LIKE 'improve|%'")}
 
 
-SETTLE_LABEL = {"pending": "結果待ち", "unsettled_no_payout": "払戻待ち（払戻がまだ分からない）",
+SETTLE_LABEL = {"pending": "結果待ち", "partial_result": "保留（結果を一部しか読めていない）",
+                "unsettled_no_payout": "払戻待ち（払戻がまだ分からない）",
                 "refunded_void": "返還（レース不成立）", "settled": "精算ずみ"}
 
 
@@ -199,12 +200,20 @@ def settle_purchase(entry: dict, res: dict | None) -> dict:
     if not res.get("has_result"):
         return {"status": "pending", "stake": stake, "returned": 0, "hit": None, "refund": 0, "counted": False}
     payouts = res.get("payouts") or None
-    missing = set(res.get("payouts_missing") or ()) & set(entry["stakes"])
+    scratched = {int(n) for n in res.get("scratched") or ()}
+    # 取消・除外の馬が入った組の返還は、結果の残りが分からなくても確定している（保留中も金額を出す。集計には入れない）
+    sure_refund = sum(v for c, v in entry["stakes"].items() if {int(x) for x in c.split("-")} & scratched)
+    if res.get("complete") is False:
+        # 結果を一部しか読めていない：不成立（全額返還）とは決めず、保留
+        return {"status": "partial_result", "stake": stake, "returned": sure_refund, "hit": None,
+                "refund": sure_refund, "counted": False, "reason": res.get("incomplete")}
+    live = {c for c in entry["stakes"] if not ({int(x) for x in c.split("-")} & scratched)}
+    missing = set(res.get("payouts_missing") or ()) & live
     if missing:
-        # 同着で的中組の払戻が一部欠けている：その組を買っているなら、0円にせず払戻待ち
-        return {"status": "unsettled_no_payout", "stake": stake, "returned": 0, "hit": "・".join(sorted(missing)),
-                "refund": 0, "counted": False}
-    st = settle_trio(entry["stakes"], int(res.get("finishers") or 0), set(res.get("scratched") or ()), payouts)
+        # 同着で的中組の払戻が一部欠けている：その組を買っているなら、0円にせず払戻待ち（確定した返還は残す）
+        return {"status": "unsettled_no_payout", "stake": stake, "returned": sure_refund, "hit": "・".join(sorted(missing)),
+                "refund": sure_refund, "counted": False}
+    st = settle_trio(entry["stakes"], int(res.get("finishers") or 0), scratched, payouts)
     refund = sum(entry["stakes"][c] for c in st.refunds) if st.status != "refunded_void" else stake
     return {"status": st.status, "stake": stake, "returned": st.returned, "hit": "・".join(st.hits) or None,
             "refund": refund, "counted": st.status in ("settled", "refunded_void")}

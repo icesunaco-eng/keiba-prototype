@@ -110,10 +110,13 @@ def winning_combos(finished: list) -> set[str]:
     return out
 
 
-def make_result(finished: list, finishers: int, scratched: set, payouts: dict) -> dict:
+def make_result(finished: list, finishers: int, scratched: set, payouts: dict, rows: int | None = None,
+                field_size=None) -> dict:
     """結果1レース分。finished：（馬番, 着順）。同着で3着内が4頭以上なら actual は無く、payouts に的中組が複数入る。
 
     winners は着順から出した的中組。払戻にその組が欠けていれば payouts_missing に入れる（その組は払戻待ち）。
+    complete が False なら結果を一部しか読めていない（incomplete に理由）。精算は保留する（不成立の返還にはしない）。
+    rows：読めた結果の行数（取消・除外も含む）。field_size：予定の頭数。
     """
     top = sorted(int(n) for n, pos in finished if pos and pos <= 3)
     actual = "-".join(map(str, top)) if len(top) == 3 else None
@@ -123,9 +126,48 @@ def make_result(finished: list, finishers: int, scratched: set, payouts: dict) -
     if actual is None and len(payouts) == 1:
         actual = next(iter(payouts))
     label = actual or ("・".join(sorted(payouts)) if payouts else None)
+    placed = [n for n, pos in finished if pos and pos <= 3]
+    try:
+        size = int(field_size) if field_size is not None else None
+    except (TypeError, ValueError):
+        size = None
+    incomplete = None
+    if size and rows is not None and rows < size:
+        incomplete = f"結果は{size}頭のうち{rows}頭分しか読めていない"
+    elif int(finishers) >= 3 and len(placed) < 3:
+        incomplete = f"3着までの着順が{len(placed)}頭分しか読めていない"
+    elif int(finishers) < 3 and payouts:
+        incomplete = "完走が3頭未満なのに払戻がある（結果の読取が足りない）"
     return {"actual": actual, "label": label, "payout": payouts.get(actual) if actual else None,
             "payouts": payouts, "finishers": int(finishers), "scratched": set(scratched), "has_result": True,
-            "winners": winners, "payouts_missing": missing}
+            "winners": winners, "payouts_missing": missing, "complete": incomplete is None, "incomplete": incomplete}
+
+
+def card_problem(card: list, field_size=None) -> str | None:
+    """出馬表（jra.parse_card）を取消・馬番の照合に使えない理由。使えれば None。
+
+    取消の欄は None（取消なし）か "取消"／"除外"。馬番が読めない行・欄が無い行・決まっていない値の行、
+    馬番の重複や欠け（1〜頭数がそろっていない）、予定の頭数と行数のちがいがあれば「取消なし」とは言えない。
+    """
+    if not card:
+        return "出馬表を読めない"
+    nums = [c.get("horse_number") for c in card]
+    if not all(isinstance(n, int) and not isinstance(n, bool) and n > 0 for n in nums):
+        return "馬番を読めない行がある"
+    if not all("scratch" in c and c["scratch"] in SCRATCH_VALUES for c in card):
+        return "取消の欄を読めない行がある"
+    if len(set(nums)) != len(nums):
+        dup = sorted({n for n in nums if nums.count(n) > 1})
+        return "馬番が重複している：" + "、".join(f"{n}番" for n in dup)
+    try:
+        size = int(field_size) if field_size is not None else None
+    except (TypeError, ValueError):
+        size = None
+    expect = set(range(1, max(size or 0, max(nums)) + 1))
+    lack = sorted(expect - set(nums))
+    if lack:
+        return f"{len(expect)}頭のうち " + "、".join(f"{n}番" for n in lack) + " の行が無い"
+    return None
 
 
 def race_sort_key(src, rk: str) -> tuple:
@@ -161,6 +203,8 @@ class Source:
         self.results: dict[str, dict] = {}                  # race_key → {actual, payout, payouts, finishers, scratched}
         self.scratched_now: dict[str, set] = {}             # race_key → 今わかっている取消・除外（予想を保存した後の分も）。読めなければ入れない
         self.card_checked_at: dict[str, str] = {}           # race_key → 取消を照合した出馬表の取得時刻
+        self.card_problem: dict[str, str] = {}              # race_key → 出馬表を照合に使えなかった理由
+        self.past_keys: set[str] = set()                    # 収集の予定表（7日で整理）から外れた、過去14日のレース（原本の記録から）
         self.settlements: list[dict] = []
         self.versions: list[dict] = []
         self.version = None
@@ -221,6 +265,12 @@ class Source:
             from ..live import jra
             from ..live.wallet import _read, _snapshots, live_tables
             snaps = _snapshots(root)
+            # 収集は終わった開催を7日で予定表から外す。2週間の履歴のために、原本の記録に残っているレースを拾う
+            from datetime import date, timedelta
+            today = date.today()
+            start = (today - timedelta(days=13)).isoformat()
+            self.past_keys = {k for k in set(snaps["race_key"]) if isinstance(k, str) and k not in self.races
+                              and start <= k[:10] <= today.isoformat()}
             for rk in self.races:
                 s = snaps[(snaps["race_key"] == rk) & (snaps["kind"] == "card")]
                 if len(s):
@@ -228,11 +278,10 @@ class Source:
                     for c in card:
                         if c.get("horse_number"):
                             self.names[rk][int(c["horse_number"])] = c.get("horse_name") or ""
-                    # jra.parse_card の取消の欄は None（取消なし）か "取消"／"除外"。馬番が読めない行、欄そのものが無い行、
-                    # 決まっていない値の行があれば「取消なし」とは言えないので入れない（チェックは判定できないになる）
-                    readable = bool(card) and all(isinstance(c.get("horse_number"), int) and c["horse_number"] > 0
-                                                  and "scratch" in c and c["scratch"] in SCRATCH_VALUES for c in card)
-                    if readable:
+                    problem = card_problem(card, self.races[rk].get("field_size"))
+                    if problem:
+                        self.card_problem[rk] = problem
+                    else:
                         self.scratched_now[rk] = {int(c["horse_number"]) for c in card if c["scratch"]}
                         self.card_checked_at[rk] = str(s.iloc[-1]["fetched_at"])
             _, _, inputs = live_tables(root, state, snaps)
@@ -248,7 +297,8 @@ class Source:
                 self.results[rk] = make_result(
                     [(r["horse_number"], r["finish_position"]) for r in rows if r["status"] == "finished"],
                     sum(r["status"] == "finished" for r in rows), scr,
-                    {p["combo"]: p["payout_yen"] for p in res.get("trio_payouts", [])})
+                    {p["combo"]: p["payout_yen"] for p in res.get("trio_payouts", [])},
+                    len(rows), self.races[rk].get("field_size"))
         except Exception as exc:  # 原本の読取の失敗で画面を止めない
             self.notes.append(f"原本の読取に失敗：{exc!r}"[:200])
 
@@ -292,10 +342,11 @@ class Source:
                 p = pd.read_parquet(t / "payouts.parquet")
                 for r in p[p["bet_type"] == "trio"].itertuples():
                     pay[r.race_key][r.combo] = int(r.payout_yen)
-            per: dict = defaultdict(lambda: {"fin": [], "n": 0, "scr": set()})
+            per: dict = defaultdict(lambda: {"fin": [], "n": 0, "scr": set(), "rows": 0})
             for r in run.itertuples():
                 self.names[r.race_key][int(r.horse_number)] = r.horse_name or ""
                 x = per[r.race_key]
+                x["rows"] += 1
                 if r.status == "finished":
                     x["n"] += 1
                     if pd.notna(r.finish_position):
@@ -305,7 +356,8 @@ class Source:
             for rk, x in per.items():
                 self.scratched_now[rk] = x["scr"]
                 if x["n"] or pay.get(rk):
-                    self.results[rk] = make_result(x["fin"], x["n"], x["scr"], pay.get(rk, {}))
+                    self.results[rk] = make_result(x["fin"], x["n"], x["scr"], pay.get(rk, {}), x["rows"],
+                                                   (self.races.get(rk) or {}).get("field_size"))
         for rk in self.preds:
             self.races.setdefault(rk, {"race_key": rk, "race_date": rk.split("|")[0], "venue": rk.split("|")[1],
                                        "race_number": int(rk.split("|")[2]), "race_name": "", "post_time": None,

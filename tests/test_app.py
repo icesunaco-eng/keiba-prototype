@@ -1,5 +1,6 @@
 """確認アプリ：購入記録（追記専用）・精算・画面・サーバーの守り（合成データ。ネットにはつながない）。"""
 import json
+from pathlib import Path
 import sqlite3
 import threading
 import urllib.error
@@ -120,13 +121,14 @@ def test_concurrent_revisions_do_not_break(tmp_path):
 
 # ---------------- 合成の「これからのレース」 ----------------
 
-def _pred(order, conf="A", stakes=None, status="allocated", scratched=()):
+def _pred(order, conf="A", stakes=None, status="allocated", scratched=(), card_at="2026-11-22T15:15:00+09:00"):
+    # card_at：出馬表の取得時刻。発走15:40の15分前の締切（15:25）の収集の窓（15:10〜15:25）の中が既定
     horses = [{"n": n, "p_top3": round(0.9 - i * 0.1, 3)} for i, n in enumerate(order)]
     alloc = {a: {"status": status, "stakes": stakes or {}, "total": sum((stakes or {}).values())}
              for a in ("ev_weighted", "equal_payout", "kelly")}
     return {"race_date": "2026-11-22", "horses": horses, "confidence": conf, "period": "live",
             "trios": [{"combo": "-".join(map(str, sorted(order[:3]))), "p": 0.2}], "allocation": alloc,
-            "inputs": {"card_fetched_at": "2026-11-22T14:30:00+09:00", "scratched_known": list(scratched), "win_odds_ok": True},
+            "inputs": {"card_fetched_at": card_at, "scratched_known": list(scratched), "win_odds_ok": True},
             "odds_gate": {"pass": True, "reasons": [], "odds_time": "15:20", "fetched_at": "2026-11-22T15:21:00+09:00"}}
 
 
@@ -140,7 +142,8 @@ def live_paths(tmp_path):
         "distance_m": 1600, "field_size": 8, "race_name": "マイルチャンピオンS 3歳以上オープン"}}}, ensure_ascii=False))
     led = Ledger(paths.ledger_path)
     v = "live-test0001"
-    led.add_prediction(RK, "1h", "ml_lgbm", v, _pred([3, 7, 9, 1, 2], "B", {"3-7-9": 600}), "i", "m", "c")
+    led.add_prediction(RK, "1h", "ml_lgbm", v, _pred([3, 7, 9, 1, 2], "B", {"3-7-9": 600}, card_at="2026-11-22T14:30:00+09:00"),
+                       "i", "m", "c")
     led.add_prediction(RK, "15m", "ml_lgbm", v, _pred([3, 7, 11, 1, 2], "A", {"3-7-11": 1200, "2-3-7": 800}, scratched=[5]), "i", "m", "c")
     led.add_prediction(RK, "15m", "rule", v, {**_pred([7, 3, 2, 1, 11], "C"), "allocation": {"status": "not_allocated_role_a"}}, "i", "m", "c")
     led.add_prediction(RK, "15m", "int_market_ml", v, {**_pred([3, 11, 7, 1, 2]), "horses": [{"n": n} for n in (3, 11, 7, 1, 2)],
@@ -323,7 +326,7 @@ def test_new_pages_render(live_paths, tmp_path, monkeypatch):
     store = Store(tmp_path / "p.sqlite")
     ctx = {"mode": "live", "theme": "auto", "size": "normal", "token": "t", "refresh": "on"}
     race = pages.race_page(ctx, src, store, {"rk": RK, "tp": "15m"})
-    assert "確認できない 1件" in race   # 最新の出馬表で取消を照合できていない
+    assert "確認できない 2件" in race   # 最新の出馬表で取消・全頭の馬番を照合できていない
     src.scratched_now[RK] = {5}
     src.card_checked_at[RK] = "2026-11-22T15:00:00+09:00"
     race = pages.race_page(ctx, src, store, {"rk": RK, "tp": "15m"})
@@ -707,13 +710,187 @@ def test_notify_once_when_scratch_and_a_overlap(live_paths, tmp_path, monkeypatc
 
 
 def test_card_readability_rule():
-    from keiba.app.data import SCRATCH_VALUES
+    from keiba.app.data import card_problem
     ok = [{"horse_number": 1, "scratch": None}, {"horse_number": 2, "scratch": "取消"}]
-    bad_key = [{"horse_number": 1}]
-    bad_val = [{"horse_number": 1, "scratch": "?"}]
-    bad_num = [{"horse_number": None, "scratch": None}]
+    assert card_problem(ok) is None and card_problem(ok, 2) is None
+    assert card_problem([{"horse_number": 1}])                                   # 取消の欄が無い
+    assert card_problem([{"horse_number": 1, "scratch": "?"}])                   # 決まっていない値
+    assert card_problem([{"horse_number": None, "scratch": None}])               # 馬番を読めない
+    assert card_problem([])
 
-    def readable(card):
-        return bool(card) and all(isinstance(c.get("horse_number"), int) and c["horse_number"] > 0
-                                  and "scratch" in c and c["scratch"] in SCRATCH_VALUES for c in card)
-    assert readable(ok) and not readable(bad_key) and not readable(bad_val) and not readable(bad_num) and not readable([])
+
+# ---------------- 再々検証（💚20261120-5）の反例 ----------------
+
+def _card(nums):
+    return [{"horse_number": n, "scratch": None} for n in nums]
+
+
+def test_card_missing_or_duplicate_rows_are_not_checked():
+    from keiba.app.data import card_problem
+    assert "3番" in card_problem(_card([1, 2, 4, 5, 6]), 6)          # 6頭中3番の行が無い
+    assert "重複" in card_problem(_card([1, 2, 2, 4, 5, 6]), 6)      # 行数は6でも馬番2が重複
+    assert "4番" in card_problem(_card([1, 2, 3]), 4)                # 予定4頭で3頭しか読めない
+    assert "3番" in card_problem(_card([1, 2, 4]))                   # 頭数が分からなくても、番号の欠けは分かる
+    race = {"race_date": "2026-11-22", "post_time": "15:40"}
+    p = _pred([1, 2, 3, 4, 5, 6])
+    note = card_problem(_card([1, 2, 4, 5, 6]), 6)
+    items = {i["label"]: i for i in checks.pre_publish_check(p, {"1-2-3": 100}, race, None, None, None, None, note)}
+    assert items["取消・除外の馬が買い目に無い"]["ok"] is None and "3番" in items["取消・除外の馬が買い目に無い"]["detail"]
+    assert items["組の形（3頭・出走している馬番）"]["ok"] is None
+    flags = checks.card_flags(p, {"1-2-3": 100}, race, False, None, None, None, None, None, note)
+    assert ("warn", "確認できない項目あり") in flags
+
+
+def test_source_skips_partial_card(live_paths, monkeypatch):
+    from keiba.app import data as d
+    monkeypatch.setattr(d, "card_problem", lambda card, size: "8頭のうち 3番 の行が無い")
+    src = Source(live_paths, "live")
+    assert RK not in src.scratched_now      # 原本が無い／欠けていれば「取消なし」にしない
+
+
+def test_partial_result_is_held_not_refunded():
+    from keiba.app.data import make_result
+    from keiba.app.store import settle_purchase
+    res = make_result([(1, 1), (2, 2)], 2, set(), {"1-2-3": 500}, rows=2, field_size=4)
+    assert res["complete"] is False
+    st = settle_purchase({"kind": "buy", "total": 100, "stakes": {"1-2-3": 100}}, res)
+    assert st["status"] == "partial_result" and not st["counted"]       # 全額返還済みにはしない
+    whole = make_result([(1, 1), (2, 2)], 2, set(), {}, rows=2, field_size=2)
+    assert whole["complete"] is True                                      # 全部読めて完走2頭なら不成立
+    assert settle_purchase({"kind": "buy", "total": 100, "stakes": {"1-2-3": 100}}, whole)["status"] == "refunded_void"
+    top = make_result([(1, 1), (2, 2), (3, None), (4, None)], 4, set(), {}, rows=4, field_size=4)
+    assert top["complete"] is False                                       # 完走4頭なのに3着が読めない
+
+
+def test_missing_tie_payout_keeps_sure_refund():
+    from keiba.app.data import make_result
+    from keiba.app.store import settle_purchase
+    res = make_result([(1, 1), (2, 2), (4, 3), (6, 3)], 4, {5}, {"1-2-6": 900}, rows=6, field_size=6)
+    assert res["payouts_missing"] == ["1-2-4"]
+    st = settle_purchase({"kind": "buy", "total": 400, "stakes": {"1-2-4": 200, "1-2-5": 200}}, res)
+    assert st["status"] == "unsettled_no_payout" and st["refund"] == 200 and not st["counted"]
+
+
+def test_material_timing_window():
+    race = {"race_date": "2026-11-22", "post_time": "15:40"}
+
+    def t(at):
+        return checks.material_timing({"inputs": {"card_fetched_at": at}}, race, "1h")[0]
+    assert t("2026-11-22T14:25:00+09:00") == "ok"            # 締切14:40の15分前（窓の始まり）
+    assert t("2026-11-22T14:40:00+09:00") == "ok"
+    assert t("2026-11-22T14:00:00+09:00") == "early"         # 発走100分前：窓より前は早めの参考
+    assert t("2026-11-22T15:10:00+09:00") == "late"          # 締切の30分後
+    assert t("not-a-time") == "unknown"
+    p = {**_pred([1, 2, 3]), "inputs": {"card_fetched_at": "2026-11-22T15:10:00+09:00"}}
+    item = {i["label"]: i for i in checks.pre_publish_check(p, {}, race, tp="1h")}["時点の材料"]
+    assert item["ok"] is False and "締切" in item["detail"]
+    broken = {**p, "inputs": {"card_fetched_at": "??"}}
+    assert {i["label"]: i for i in checks.pre_publish_check(broken, {}, race, tp="1h")}["時点の材料"]["ok"] is None
+    assert ("warn", "締切後の材料") in checks.card_flags(p, {}, race, False, tp="1h")
+
+
+def test_timeline_shows_early_material(live_paths, tmp_path):
+    led = Ledger(live_paths.ledger_path)
+    led.add_prediction(RK, "24h", "ml_lgbm", "live-test0001",
+                       _pred([1, 2, 3], card_at="2026-11-20T10:00:00+09:00"), "i", "m", "c")
+    led.commit()
+    led.close()
+    src = Source(live_paths, "live")
+    out = pages.timeline_page({"token": "t", "mode": "live"}, src, Store(tmp_path / "p.sqlite"), {"rk": RK})
+    assert "早めの参考予想" in out and "11/20 10:00" in out
+
+
+def test_compare_counts_shown_integrated_candidate(live_paths, tmp_path):
+    src = Source(live_paths, "live")
+    src.preds[RK].pop(("int_market_ml", "15m"))
+    src.preds[RK][("int_market_ml_mam", "15m")] = _pred([3, 11, 7, 1, 2])
+    src.preds[RK].pop(("rule", "15m"))
+    assert src.pick(RK, "int", "15m")[0] == "int_market_ml_mam"
+    out = pages.compare_page({"token": "t", "mode": "live"}, src, Store(tmp_path / "p.sqlite"), {"rk": RK, "tp": "15m"})
+    assert "1つだけ" not in out and "一致" in out
+
+
+def test_notify_scratch_after_a_was_sent(live_paths, tmp_path, monkeypatch):
+    from keiba.app import server as srv
+    app = App(live_paths, tmp_path / "p.sqlite")
+    monkeypatch.setattr(checks, "now_jst", lambda: datetime(2026, 11, 22, 15, 30, tzinfo=checks.JST))
+    src = app.cache.get("live")
+    sent = []
+    stop = threading.Event()
+    t = threading.Thread(target=srv.notify_loop, args=(app, stop, 0.05, 20, lambda a, b: sent.append(b)), daemon=True)
+    t.start()
+    import time
+    time.sleep(0.3)
+    assert len(sent) == 1 and "自信度A" in sent[0] and "取消" not in sent[0]
+    src.scratched_now[RK] = {11}          # 自信度Aを知らせた後に取消が分かった
+    time.sleep(0.3)
+    stop.set()
+    t.join(2)
+    assert len(sent) == 2 and "取消" in sent[1] and "11番" in sent[1] and "自信度A" not in sent[1]
+
+
+def test_old_form_after_mode_switch_asks_first(server):
+    app, port = server
+    form = {"token": app.token, "rk": RK, "kind": "buy", "m": "ml_lgbm", "tp": "15m", "fm": "check",
+            "combo": ["3-7-11"], "yen": ["100"], "memo": ""}
+    origin = f"http://127.0.0.1:{port}"
+    code, body, _ = _req(port, "/buy", form, origin=origin)     # 表示は live（Cookie なし）、フォームは練習で開いた
+    assert code == 409 and "どちらに記録する" in body and app.store.entries(data_mode="live") == []
+    assert app.store.entries() == []
+    code, _, _ = _req(port, "/buy", {**form, "as_mode": "check"}, origin=origin)
+    assert code == 303
+    (e,) = app.store.entries(data_mode="check")
+    assert e["data_mode"] == "check" and e["total"] == 100
+    code, _, _ = _req(port, "/buy", {**form, "fm": "live"}, origin=origin)   # 同じモードならそのまま
+    assert code == 303 and len(app.store.entries(data_mode="live")) == 1
+
+
+def test_two_weeks_reads_archived_snapshots(live_paths, tmp_path, monkeypatch):
+    import datetime as dt
+    from datetime import date as real_date
+    old = (real_date.today() - dt.timedelta(days=10)).isoformat()
+    too_old = (real_date.today() - dt.timedelta(days=20)).isoformat()
+    live = live_paths.data_dir / "live"
+    rows = [{"race_key": f"{old}|東京|5", "kind": "odds_unavailable", "time_point": "24h", "fetched_at": f"{old}T09:00:00+09:00"},
+            {"race_key": f"{too_old}|東京|6", "kind": "odds_unavailable", "time_point": "24h", "fetched_at": f"{too_old}T09:00:00+09:00"}]
+    (live / "snapshots.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+    src = Source(live_paths, "live")
+    assert f"{old}|東京|5" in src.past_keys and f"{too_old}|東京|6" not in src.past_keys
+    out = pages.history_page({"token": "t", "mode": "live"}, src, Store(tmp_path / "p.sqlite"), {"f": "2w"})
+    assert "東京5R" in out.replace(" ", "")
+
+
+def _autostart(tmp_path, *args, stop="ok", start="ok", loaded=True):
+    import subprocess
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    (bindir / "launchctl").write_text(f"""#!/bin/sh
+echo "launchctl $1" >> "{tmp_path}/calls"
+case "$1" in
+print) {"exit 0" if loaded else 'echo "Could not find service" >&2; exit 113'} ;;
+bootout) {"exit 0" if stop == "ok" else 'echo "fake bootout failed" >&2; exit 5'} ;;
+bootstrap) {"exit 0" if start == "ok" else 'echo "fake bootstrap failed" >&2; exit 5'} ;;
+esac
+""")
+    (bindir / "launchctl").chmod(0o755)
+    home = tmp_path / "home"
+    env = {"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(home)}
+    repo = Path(__file__).resolve().parents[1]
+    return subprocess.run(["sh", str(repo / "tools/app/autostart.sh"), *args], env=env, capture_output=True, text=True)
+
+
+def test_failed_reinstall_keeps_current_plist(tmp_path):
+    plist = tmp_path / "home/Library/LaunchAgents/com.heroines.keiba-app.plist"
+    plist.parent.mkdir(parents=True)
+    plist.write_text("OLD")
+    r = _autostart(tmp_path, "install", stop="refused")
+    assert r.returncode != 0 and plist.read_text() == "OLD"          # 止められなければ触らない
+    r = _autostart(tmp_path, "install", start="refused")
+    assert r.returncode != 0 and plist.read_text() == "OLD"          # 新しい設定で登録できなければ前のまま
+    assert "前の設定でも登録し直せなかった" in r.stderr                # 模擬は前の設定の登録も断る：そう伝える
+    r = _autostart(tmp_path, "install")
+    assert r.returncode == 0 and "com.heroines.keiba-app" in plist.read_text()
+    first = tmp_path / "first"
+    first.mkdir()
+    r = _autostart(first, "install", loaded=False)                    # 初めて：LaunchAgents のフォルダも無い
+    assert r.returncode == 0 and (first / "home/Library/LaunchAgents/com.heroines.keiba-app.plist").exists()

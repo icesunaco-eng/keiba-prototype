@@ -315,7 +315,18 @@ def make_handler(app: App, port: int, extra_hosts=()):
             combos, yens = form.get("combo", []), form.get("yen", [])
             rows = list(zip(combos, yens))
             stakes: list[tuple[str, str]] = []
+            fm = one.get("fm") if one.get("fm") in MODES else None      # フォームを開いたときのモード
+            as_mode = one.get("as_mode") if one.get("as_mode") in MODES else None   # 確認で本人が選んだモード
+            mode = as_mode or ctx["mode"]
             src = app.cache.get(ctx["mode"])
+            if not src.races.get(rk) and fm:
+                src = app.cache.get(fm)
+            if not one.get("entry") and not as_mode and fm and fm != ctx["mode"]:
+                # 別のタブで表示を切り替えた後に、前に開いたフォームを送った：黙って入れず、どちらに入れるか確認する
+                q = {"rk": rk, "m": one.get("m"), "tp": one.get("tp"), "kind": kind}
+                body = pages.buy_form(ctx, src, app.store, q, "",
+                                      {"kind": kind, "rows": rows, "memo": one.get("memo", ""), "fm": fm, "confirm": True})
+                return self._send(HTTPStatus.CONFLICT, body)
             try:
                 if not rk:
                     raise InputError("レースが分からない")
@@ -328,10 +339,11 @@ def make_handler(app: App, port: int, extra_hosts=()):
                         raise InputError(f"{c} の金額が空だよ")
                     stakes.append((c.strip(), y.strip()))
                 app.store.add(rk, kind, stakes, one.get("memo", ""), one.get("m") or None, one.get("tp") or None,
-                              ctx["mode"], one.get("entry") or None)
+                              mode, one.get("entry") or None)
             except InputError as exc:
                 q = {"rk": rk, "m": one.get("m"), "tp": one.get("tp"), "kind": kind, "entry": one.get("entry")}
-                body = pages.buy_form(ctx, src, app.store, q, str(exc), {"kind": kind, "rows": rows, "memo": one.get("memo", "")})
+                body = pages.buy_form(ctx, src, app.store, q, str(exc), {"kind": kind, "rows": rows, "memo": one.get("memo", ""),
+                                                                       "fm": as_mode or fm})
                 return self._send(HTTPStatus.BAD_REQUEST, body)
             if one.get("back") == "race":   # 戻り先は、送られた文字ではなく決まった画面からサーバーが組み立てる
                 tab = one.get("tab") if one.get("tab") in METHOD_TABS else "ml"
@@ -344,7 +356,11 @@ def make_handler(app: App, port: int, extra_hosts=()):
 
 
 def notify_loop(app: App, stop: threading.Event, interval: int = 60, lead_min: int = 20, sender=None):
-    """自信度Aで買い目のあるレースと、買い目に取消馬が残っているレースを、発走の少し前にMacの通知で知らせる（1レース1回）。"""
+    """自信度Aで買い目のあるレースと、買い目に取消馬が残っているレースを、発走の少し前にMacの通知で知らせる。
+
+    理由（自信度A・取消）ごとに1回。同じ周回で両方なら1つの通知にまとめる。自信度Aを知らせた後に取消が分かったら、
+    取消をあらためて知らせる（取消馬の番号が増えたときも）。
+    """
     from .checks import now_jst, post_datetime, pre_publish_check
     from .data import MAIN_WALLET, allocation_of
     sent: set = set()
@@ -367,19 +383,21 @@ def notify_loop(app: App, stop: threading.Event, interval: int = 60, lead_min: i
                 if not p:
                     continue
                 stakes = allocation_of(p, MAIN_WALLET["live"]).get("stakes") or {}
-                if rk in sent:   # 1レース1回（取消と自信度Aが重なっても1つの通知にまとめる）
-                    continue
                 bad = [i for i in pre_publish_check(p, stakes, r, src.names.get(rk), src.scratched_now.get(rk))
                        if i["ok"] is False and i["label"].startswith("取消")]
                 title = f"{r['venue']}{r['race_number']}R {r.get('post_time') or ''}"
-                lines = []
+                lines, keys = [], []
                 if bad:
-                    lines.append("買い目に取消馬が残っているよ。確認アプリで見てね")
-                if p.get("confidence") == "A" and stakes:
+                    key = (rk, "scratch", bad[0]["detail"])   # 残っている取消馬が変われば、もう一度知らせる
+                    if key not in sent:
+                        lines.append("買い目に取消馬が残っているよ（" + bad[0]["detail"].replace("残っている：", "") + "）。確認アプリで見てね")
+                        keys.append(key)
+                if p.get("confidence") == "A" and stakes and (rk, "A") not in sent:
                     lines.append(f"自信度A・三連複 {len(stakes)}点 ¥{sum(stakes.values()):,}")
+                    keys.append((rk, "A"))
                 if lines:
                     sender(title, "／".join(lines))
-                    sent.add(rk)
+                    sent.update(keys)
         except Exception:
             traceback.print_exc()
         stop.wait(interval)

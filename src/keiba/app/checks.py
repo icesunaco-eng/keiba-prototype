@@ -20,9 +20,10 @@ TP_MINUTES = {"24h": 24 * 60, "1h": 60, "15m": 15}
 GROUP_LABEL = {"ability": "能力", "course": "コース", "distance": "距離", "draw": "枠", "going": "馬場",
                "pace": "展開", "recent": "近走", "weight_rider": "斤量・騎手"}
 CLOSE_GAP = 0.03   # 3着内の確率の差がこれより小さければ「入れ替わりやすい」
-# 時点ごとの「材料の締切」：発走のこの分数前。材料（出馬表）がこれよりずっと前なら、その時点の予想とは呼ばない
+# 時点ごとの「材料の締切」：発走のこの分数前（収集の DEADLINE_MIN と同じ）。収集はその前の15分の窓で取る。
+# 窓より前に取った材料なら「早めの参考」、締切より後なら「その時点の予想ではない（×）」
 TP_LEAD_MIN = {"24h": 24 * 60, "1h": 60, "15m": 15}
-TP_EARLY_MARGIN_MIN = {"24h": 12 * 60, "1h": 120, "15m": 60}
+TP_WINDOW_MIN = 15   # 収集の CAPTURE_LEAD_MIN
 # 買う前に必ず確かめたい項目（判定できなければ「要確認」にする）
 REQUIRED = ("取消・除外の馬が買い目に無い", "組の形（3頭・出走している馬番）", "出馬表の新しさ", "時点の材料")
 
@@ -58,28 +59,52 @@ def _parse_time(text) -> datetime | None:
     return (t.replace(tzinfo=JST) if t.tzinfo is None else t).astimezone(JST)
 
 
-def early_prediction(p: dict, race: dict | None, tp: str | None) -> str | None:
-    """その時点の材料がそろう前に作った予想なら、理由の文。そうでなければ None。
+def _lead_text(tp: str) -> str:
+    m = TP_LEAD_MIN[tp]
+    return f"{m // 60}時間前" if m >= 60 else f"{m}分前"
+
+
+def material_timing(p: dict, race: dict | None, tp: str | None) -> tuple[str, str]:
+    """時点の材料の判定。（状態, 文）。状態は ok／early（窓より前＝早めの参考）／late（締切の後）／unknown。
 
     例：1時間前の枠でも、前日の出馬表から作った予想は「1時間前の予想」ではなく早めの参考。
     """
     post = post_datetime(race or {})
-    fetched = _parse_time((p.get("inputs") or {}).get("card_fetched_at"))
-    if not post or not fetched or tp not in TP_LEAD_MIN:
-        return None
+    raw = (p.get("inputs") or {}).get("card_fetched_at")
+    if tp not in TP_LEAD_MIN:
+        return "unknown", "時点が分からない"
+    if not post:
+        return "unknown", "発走時刻が無いので判定できない"
+    if not raw:
+        return "unknown", "取得時刻が無いので判定できない"
+    fetched = _parse_time(raw)
+    if not fetched:
+        return "unknown", f"取得時刻が読めない（{str(raw)[:30]}）ので判定できない"
     nominal = post - timedelta(minutes=TP_LEAD_MIN[tp])
-    gap = (nominal - fetched).total_seconds() / 60
-    if gap > TP_EARLY_MARGIN_MIN[tp]:
-        return f"出馬表は {fetched:%m/%d %H:%M} 取得（{TP_LEAD_MIN[tp] // 60 if TP_LEAD_MIN[tp] >= 60 else TP_LEAD_MIN[tp]}" \
-               f"{'時間' if TP_LEAD_MIN[tp] >= 60 else '分'}前の {nominal:%m/%d %H:%M} より{gap / 60:.1f}時間早い）"
-    return None
+    start = nominal - timedelta(minutes=TP_WINDOW_MIN)
+    if fetched > nominal:
+        return "late", (f"出馬表は {fetched:%m/%d %H:%M} 取得。{_lead_text(tp)}の締切 {nominal:%m/%d %H:%M} より後なので、"
+                        f"この時点の予想として使えない")
+    if fetched < start:
+        gap = (nominal - fetched).total_seconds() / 60
+        return "early", (f"出馬表は {fetched:%m/%d %H:%M} 取得（{_lead_text(tp)}の締切 {nominal:%m/%d %H:%M} より"
+                         + (f"{gap / 60:.1f}時間" if gap >= 60 else f"{gap:.0f}分") + "早い）")
+    return "ok", f"この時点の材料で作った予想（出馬表 {fetched:%m/%d %H:%M} 取得）"
+
+
+def early_prediction(p: dict, race: dict | None, tp: str | None) -> str | None:
+    """その時点の材料がそろう前に作った予想なら、理由の文。そうでなければ None。"""
+    state, text = material_timing(p, race, tp)
+    return text if state == "early" else None
 
 
 def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: dict | None = None,
-                      scratched_now: set | None = None, checked_at: str | None = None, tp: str | None = None) -> list[dict]:
+                      scratched_now: set | None = None, checked_at: str | None = None, tp: str | None = None,
+                      card_note: str | None = None) -> list[dict]:
     """1行＝1項目。ok は True（合格）／False（不合格）／None（判定できない・対象なし）。
 
-    材料が無いときは合格にしない（None＝判定できない）。scratched_now は予想を保存した後に分かった取消も含む最新の取消。
+    材料が無いときは合格にしない（None＝判定できない）。scratched_now は予想を保存した後に分かった取消も含む最新の取消で、
+    出馬表の全頭（頭数どおり・馬番の欠け／重複なし）を読めたときだけ入る。card_note は読めなかった理由。
     """
     out = []
 
@@ -101,7 +126,8 @@ def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: di
                 f"{n}番" + ("（予想の後に取消）" if n in later else "") for n in bad_scr))
         elif not known:
             add(None, "取消・除外の馬が買い目に無い",
-                "最新の出馬表で取消を照合できていない" + ("（予想のときの情報だけ）" if "scratched_known" in inp else "") + "ので判定できない")
+                "最新の出馬表で取消を照合できていない" + (f"（{card_note}）" if card_note else "")
+                + ("（予想のときの情報だけ）" if "scratched_known" in inp else "") + "ので判定できない")
         else:
             when = _parse_time(checked_at)
             stamp = f"（{when:%m/%d %H:%M} 取得の出馬表で照合）" if when else "（最新の出馬表で照合）"
@@ -115,8 +141,13 @@ def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: di
             add(None, "組の形（3頭・出走している馬番）", "出走表が無いので、馬番が出走しているか照合できない")
         else:
             out_field = sorted({n for c in stakes for n in combo_horses(c)} - field)
-            add(not out_field, "組の形（3頭・出走している馬番）",
-                ("出走表に無い馬番：" + "、".join(map(str, out_field))) if out_field else f"{len(stakes)}組すべてOK")
+            if out_field:
+                add(False, "組の形（3頭・出走している馬番）", "出走表に無い馬番：" + "、".join(map(str, out_field)))
+            elif not known:   # 予想の出走表には合っているが、最新の出馬表の全頭とは照合できていない
+                add(None, "組の形（3頭・出走している馬番）",
+                    "最新の出馬表で全頭の馬番を照合できていない" + (f"（{card_note}）" if card_note else "") + "ので判定できない")
+            else:
+                add(True, "組の形（3頭・出走している馬番）", f"{len(stakes)}組すべてOK")
         norm = ["-".join(map(str, sorted(set(combo_horses(c))))) for c in stakes]
         dup = len(norm) - len(set(norm))
         add(dup == 0, "同じ組の重複が無い", f"重複 {dup}組" if dup else "重複なし")
@@ -133,10 +164,9 @@ def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: di
             "合格" + (f"（発表 {gate['odds_time']}）" if gate.get("odds_time") else "") if gate.get("pass")
             else "・".join(gate.get("reasons") or ["不合格"]))
     if tp:
-        why = early_prediction(p, race, tp)
-        add(False if why else (True if post_datetime(race or {}) and inp.get("card_fetched_at") else None), "時点の材料",
-            ("早めに作った参考の予想：" + why) if why else
-            ("この時点の材料で作った予想" if post_datetime(race or {}) and inp.get("card_fetched_at") else "取得時刻が無いので判定できない"))
+        state, text = material_timing(p, race, tp)
+        add({"ok": True, "early": False, "late": False}.get(state), "時点の材料",
+            ("早めに作った参考の予想：" + text) if state == "early" else text)
     fetched = inp.get("card_fetched_at")
     post = post_datetime(race or {})
     if fetched and post:
@@ -234,7 +264,7 @@ def horse_comment(h: dict) -> str:
 
 def card_flags(p: dict | None, stakes: dict, race: dict, has_result: bool, now: datetime | None = None,
                names: dict | None = None, scratched_now: set | None = None, checked_at: str | None = None,
-               tp: str | None = None) -> list[tuple[str, str]]:
+               tp: str | None = None, card_note: str | None = None) -> list[tuple[str, str]]:
     """（cls, 文）。cls は warn（気をつける）か ''（ふつう）。"""
     now = now or now_jst()
     out = []
@@ -246,10 +276,13 @@ def card_flags(p: dict | None, stakes: dict, race: dict, has_result: bool, now: 
     inp = p.get("inputs") or {}
     if inp.get("scratched_known") or scratched_now:
         out.append(("warn", "取消あり"))
-    if tp and early_prediction(p, race, tp):
+    timing = material_timing(p, race, tp)[0] if tp else None
+    if timing == "early":
         out.append(("warn", "早めの参考予想"))
+    elif timing == "late":
+        out.append(("warn", "締切後の材料"))
     if stakes:
-        items = [i for i in pre_publish_check(p, stakes, race, names, scratched_now, checked_at)
+        items = [i for i in pre_publish_check(p, stakes, race, names, scratched_now, checked_at, None, card_note)
                  if i["label"] != "三連複オッズの確認"]
         if check_summary(items)[1]:
             out.append(("warn", "チェック×"))

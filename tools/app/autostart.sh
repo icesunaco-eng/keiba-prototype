@@ -22,7 +22,10 @@ job_state() {
 case "$1" in
 install)
   mkdir -p "$REPO/data/app" "$(dirname "$PLIST")"
-  cat > "$PLIST" <<PL
+  # 新しい plist は一時フォルダに書き、登録できてから置き換える（失敗したら今の plist をそのまま残す）
+  TMPD=$(mktemp -d "${TMPDIR:-/tmp}/keiba-app.XXXXXX")
+  NEW="$TMPD/$LABEL.plist"
+  cat > "$NEW" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -36,8 +39,35 @@ install)
 <key>StandardErrorPath</key><string>$LOG</string>
 </dict></plist>
 PL
-  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  ST=$(job_state)
+  if [ "$ST" = unknown ]; then
+    rm -f "$NEW"; rmdir "$TMPD"
+    echo "自動起動の状態を調べられなかったので、入れ直すのをやめたよ。今の plist はそのまま：${PLIST}" >&2
+    exit 1
+  fi
+  if [ "$ST" = loaded ] && ! launchctl bootout "gui/$(id -u)/$LABEL"; then
+    rm -f "$NEW"; rmdir "$TMPD"
+    echo "今の自動起動を止められなかったよ（launchctl bootout が失敗）。今の plist はそのまま：${PLIST}" >&2
+    exit 1
+  fi
+  if ! launchctl bootstrap "gui/$(id -u)" "$NEW"; then
+    rm -f "$NEW"; rmdir "$TMPD"
+    echo "新しい設定で登録できなかったよ（launchctl bootstrap が失敗）。plist は前のまま：${PLIST}" >&2
+    if [ "$ST" = loaded ] && [ -f "$PLIST" ]; then
+      if launchctl bootstrap "gui/$(id -u)" "$PLIST"; then
+        echo "前の設定で登録し直したよ" >&2
+      else
+        echo "前の設定でも登録し直せなかったよ。sh ${0} status で確認してね" >&2
+      fi
+    fi
+    exit 1
+  fi
+  if ! mv "$NEW" "$PLIST"; then
+    rmdir "$TMPD" 2>/dev/null
+    echo "登録はできたけど plist を置き換えられなかったよ（次のログインでは前の設定になる）：${PLIST}" >&2
+    exit 1
+  fi
+  rmdir "$TMPD"
   echo "入れたよ：${PLIST}（ログ ${LOG}）"
   ;;
 uninstall)
