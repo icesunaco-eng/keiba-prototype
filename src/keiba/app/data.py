@@ -69,6 +69,9 @@ def horse_probs(p: dict) -> dict[int, float]:
 
 def marks_of(p: dict) -> list[tuple[str, int]]:
     hp = horse_probs(p)
+    if not hp:  # 確率が無く順位だけの予想（まむ）は、順位の上から印にする
+        ranked = sorted((h for h in p.get("horses") or [] if h.get("rank")), key=lambda h: h["rank"])
+        return list(zip(MARKS, [int(h["n"]) for h in ranked]))
     top = sorted(hp, key=lambda n: (-hp[n], n))[:3]
     return list(zip(MARKS, top))
 
@@ -86,6 +89,40 @@ def is_skip(p: dict, alloc: str) -> bool:
     return allocation_of(p, alloc).get("status") in ("zero_no_value", "zero_no_probability")
 
 
+def make_result(finished: list, finishers: int, scratched: set, payouts: dict) -> dict:
+    """結果1レース分。finished：（馬番, 着順）。同着で3着内が4頭以上なら actual は無く、payouts に的中組が複数入る。"""
+    top = sorted(int(n) for n, pos in finished if pos and pos <= 3)
+    actual = "-".join(map(str, top)) if len(top) == 3 else None
+    payouts = {str(c): int(v) for c, v in (payouts or {}).items()}
+    if actual is None and len(payouts) == 1:
+        actual = next(iter(payouts))
+    label = actual or ("・".join(sorted(payouts)) if payouts else None)
+    return {"actual": actual, "label": label, "payout": payouts.get(actual) if actual else None,
+            "payouts": payouts, "finishers": int(finishers), "scratched": set(scratched), "has_result": True}
+
+
+def race_sort_key(src, rk: str) -> tuple:
+    """日付 → 発走時刻 → 場 → レース番号（数字として）。race_key の文字列順だと 12R が 9R より前になる。"""
+    r = (src.races.get(rk) if src is not None else None) or {}
+    parts = rk.split("|")
+    try:
+        num = int(parts[2])
+    except (IndexError, ValueError):
+        num = 0
+    return (parts[0], r.get("post_time") or "", parts[1] if len(parts) > 1 else "", num)
+
+
+def probs_complete(p: dict) -> bool:
+    """馬ごとの確率が「全部の組」から出ているか（上位の組だけ・順位だけなら False＝目安）。"""
+    if p.get("horses") and p["horses"][0].get("p_top3") is not None:
+        return True
+    if p.get("trio_probs_full"):
+        return True
+    if p.get("trios_all"):
+        return bool(p.get("complete"))
+    return False
+
+
 class Source:
     """1つの見方のデータ。台帳と表のファイルが変わったら読み直す。"""
 
@@ -94,7 +131,8 @@ class Source:
         self.races: dict[str, dict] = {}
         self.preds: dict[str, dict] = defaultdict(dict)     # race_key → {(method, tp): payload}
         self.names: dict[str, dict] = defaultdict(dict)     # race_key → {馬番: 馬名}
-        self.results: dict[str, dict] = {}                  # race_key → {actual, payout}
+        self.results: dict[str, dict] = {}                  # race_key → {actual, payout, payouts, finishers, scratched}
+        self.scratched_now: dict[str, set] = {}             # race_key → 今わかっている取消・除外（予想を保存した後の分も）
         self.settlements: list[dict] = []
         self.versions: list[dict] = []
         self.version = None
@@ -158,19 +196,22 @@ class Source:
             for rk in self.races:
                 s = snaps[(snaps["race_key"] == rk) & (snaps["kind"] == "card")]
                 if len(s):
-                    for c in jra.parse_card(_read(root, s.iloc[-1])):
+                    card = jra.parse_card(_read(root, s.iloc[-1]))
+                    for c in card:
                         if c.get("horse_number"):
                             self.names[rk][int(c["horse_number"])] = c.get("horse_name") or ""
+                    self.scratched_now[rk] = {int(c["horse_number"]) for c in card if c.get("horse_number") and c.get("scratch")}
             _, _, inputs = live_tables(root, state, snaps)
             for (rk, tp), res in inputs.items():
                 if tp != "result":
                     continue
-                fin = sorted((r for r in res["rows"] if r["status"] == "finished" and r["finish_position"]),
-                             key=lambda r: r["finish_position"])
-                top = sorted(r["horse_number"] for r in fin if r["finish_position"] <= 3)
-                pay = {p["combo"]: p["payout_yen"] for p in res.get("trio_payouts", [])}
-                actual = "-".join(map(str, top)) if len(top) == 3 else None
-                self.results[rk] = {"actual": actual, "payout": pay.get(actual) if actual else None}
+                rows = res["rows"]
+                scr = {int(r["horse_number"]) for r in rows if r["status"] in ("withdrawn", "excluded")}
+                self.scratched_now[rk] = self.scratched_now.get(rk, set()) | scr
+                self.results[rk] = make_result(
+                    [(r["horse_number"], r["finish_position"]) for r in rows if r["status"] == "finished"],
+                    sum(r["status"] == "finished" for r in rows), scr,
+                    {p["combo"]: p["payout_yen"] for p in res.get("trio_payouts", [])})
         except Exception as exc:  # 原本の読取の失敗で画面を止めない
             self.notes.append(f"原本の読取に失敗：{exc!r}"[:200])
 
@@ -209,16 +250,25 @@ class Source:
         if (t / "runners.parquet").exists():
             run = pd.read_parquet(t / "runners.parquet", columns=["race_key", "horse_number", "horse_name", "finish_position", "status"])
             run = run[run["race_key"].isin(self.preds.keys())]
-            for r in run.itertuples():
-                self.names[r.race_key][int(r.horse_number)] = r.horse_name or ""
-            fin = run[run["finish_position"].notna() & (run["finish_position"] <= 3)]
-            top = fin.groupby("race_key")["horse_number"].apply(lambda s: "-".join(map(str, sorted(int(x) for x in s))) if len(s) == 3 else None)
-            pay = {}
+            pay: dict = defaultdict(dict)
             if (t / "payouts.parquet").exists():
                 p = pd.read_parquet(t / "payouts.parquet")
-                pay = {(r.race_key, r.combo): int(r.payout_yen) for r in p[p["bet_type"] == "trio"].itertuples()}
-            for rk, actual in top.items():
-                self.results[rk] = {"actual": actual, "payout": pay.get((rk, actual)) if actual else None}
+                for r in p[p["bet_type"] == "trio"].itertuples():
+                    pay[r.race_key][r.combo] = int(r.payout_yen)
+            per: dict = defaultdict(lambda: {"fin": [], "n": 0, "scr": set()})
+            for r in run.itertuples():
+                self.names[r.race_key][int(r.horse_number)] = r.horse_name or ""
+                x = per[r.race_key]
+                if r.status == "finished":
+                    x["n"] += 1
+                    if pd.notna(r.finish_position):
+                        x["fin"].append((int(r.horse_number), int(r.finish_position)))
+                elif r.status in ("withdrawn", "excluded"):
+                    x["scr"].add(int(r.horse_number))
+            for rk, x in per.items():
+                self.scratched_now[rk] = x["scr"]
+                if x["n"] or pay.get(rk):
+                    self.results[rk] = make_result(x["fin"], x["n"], x["scr"], pay.get(rk, {}))
         for rk in self.preds:
             self.races.setdefault(rk, {"race_key": rk, "race_date": rk.split("|")[0], "venue": rk.split("|")[1],
                                        "race_number": int(rk.split("|")[2]), "race_name": "", "post_time": None,

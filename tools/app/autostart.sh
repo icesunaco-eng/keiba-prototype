@@ -33,14 +33,34 @@ PL
   echo "入れたよ：${PLIST}（ログ ${LOG}）"
   ;;
 uninstall)
-  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+    if ! launchctl bootout "gui/$(id -u)/$LABEL"; then
+      echo "止められなかったよ（launchctl bootout が失敗）。plist はそのまま残した：${PLIST}" >&2
+      exit 1
+    fi
+  fi
   if [ -f "$PLIST" ]; then
     if command -v trash >/dev/null; then trash "$PLIST"; else mv "$PLIST" "$HOME/.Trash/"; fi
+  fi
+  if [ -f "$PLIST" ] || launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+    echo "外しきれなかったよ。status で確かめてね" >&2
+    exit 1
   fi
   echo "外したよ（plist はゴミ箱）"
   ;;
 status)
-  launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -E "state|pid" | head -3 || echo "入っていないよ"
+  if INFO=$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null); then
+    echo "入っているよ：${PLIST}"
+    echo "$INFO" | grep -E "^[[:space:]]*(state|pid) =" | head -2
+    if curl -s --max-time 2 "http://127.0.0.1:8765/app-id" | grep -q "keiba-confirm-app"; then
+      echo "応答あり：http://127.0.0.1:8765/"
+    else
+      echo "まだ応答が無いよ（ログ ${LOG}）"
+    fi
+  else
+    echo "入っていないよ（自動起動は未登録）"
+    exit 3
+  fi
   ;;
 *) echo "使い方: sh ${0} install|uninstall|status"; exit 2 ;;
 esac

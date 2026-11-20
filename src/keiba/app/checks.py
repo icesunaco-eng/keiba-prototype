@@ -45,29 +45,46 @@ def field_numbers(p: dict, names: dict | None = None) -> set[int]:
     return nums or {int(n) for n in (names or {})}
 
 
-def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: dict | None = None) -> list[dict]:
-    """1行＝1項目。ok は True（合格）／False（不合格）／None（判定できない・対象なし）。"""
+def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: dict | None = None,
+                      scratched_now: set | None = None) -> list[dict]:
+    """1行＝1項目。ok は True（合格）／False（不合格）／None（判定できない・対象なし）。
+
+    材料が無いときは合格にしない（None＝判定できない）。scratched_now は予想を保存した後に分かった取消も含む最新の取消。
+    """
     out = []
 
     def add(ok, label, detail=""):
         out.append({"ok": ok, "label": label, "detail": detail})
 
     inp = p.get("inputs") or {}
-    scratched = set(int(n) for n in inp.get("scratched_known") or [])
+    known = "scratched_known" in inp or scratched_now is not None
+    at_pred = set(int(n) for n in inp.get("scratched_known") or [])
+    later = set(int(n) for n in scratched_now or ()) - at_pred
+    scratched = at_pred | later
     field = field_numbers(p, names)
     if not stakes:
         add(None, "買い目", "買い目が無いので、組のチェックはしない")
     else:
         bad_scr = sorted({n for c in stakes for n in combo_horses(c)} & scratched)
-        add(not bad_scr, "取消・除外の馬が買い目に無い",
-            ("残っている：" + "、".join(f"{n}番" for n in bad_scr)) if bad_scr else
-            (f"取消 {len(scratched)}頭はどの組にも入っていない" if scratched else "取消・除外は把握していない"))
-        shape_bad = [c for c in stakes if len(set(combo_horses(c))) != 3 or combo_horses(c) != sorted(combo_horses(c))]
-        out_field = sorted({n for c in stakes for n in combo_horses(c)} - field) if field else []
-        add(not shape_bad and not out_field, "組の形（3頭・出走している馬番）",
-            ("形がおかしい：" + "、".join(shape_bad)) if shape_bad else
-            ("出走表に無い馬番：" + "、".join(map(str, out_field))) if out_field else f"{len(stakes)}組すべてOK")
-        norm = ["-".join(map(str, sorted(combo_horses(c)))) for c in stakes]
+        if bad_scr:
+            add(False, "取消・除外の馬が買い目に無い", "残っている：" + "、".join(
+                f"{n}番" + ("（予想の後に取消）" if n in later else "") for n in bad_scr))
+        elif not known:
+            add(None, "取消・除外の馬が買い目に無い", "取消・除外の情報が無いので判定できない")
+        else:
+            add(True, "取消・除外の馬が買い目に無い",
+                f"取消 {len(scratched)}頭はどの組にも入っていない" if scratched else "取消・除外は出ていない（最新の出馬表）")
+        shape_bad = [c for c in stakes if len(combo_horses(c)) != 3 or len(set(combo_horses(c))) != 3
+                     or combo_horses(c) != sorted(combo_horses(c))]
+        if shape_bad:
+            add(False, "組の形（3頭・出走している馬番）", "形がおかしい：" + "、".join(shape_bad))
+        elif not field:
+            add(None, "組の形（3頭・出走している馬番）", "出走表が無いので、馬番が出走しているか照合できない")
+        else:
+            out_field = sorted({n for c in stakes for n in combo_horses(c)} - field)
+            add(not out_field, "組の形（3頭・出走している馬番）",
+                ("出走表に無い馬番：" + "、".join(map(str, out_field))) if out_field else f"{len(stakes)}組すべてOK")
+        norm = ["-".join(map(str, sorted(set(combo_horses(c))))) for c in stakes]
         dup = len(norm) - len(set(norm))
         add(dup == 0, "同じ組の重複が無い", f"重複 {dup}組" if dup else "重複なし")
         total = sum(stakes.values())
@@ -87,9 +104,15 @@ def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: di
     if fetched and post:
         try:
             f = datetime.fromisoformat(fetched)
+            if f.tzinfo is None:   # 時差の書いていない時刻は日本時間として読む
+                f = f.replace(tzinfo=JST)
+            f = f.astimezone(JST)
             hours = (post - f).total_seconds() / 3600
-            add(hours <= 30, "出馬表の新しさ", f"取得 {f:%m/%d %H:%M}（発走の{hours:.1f}時間前）")
-        except ValueError:
+            if hours < 0:
+                add(False, "出馬表の新しさ", f"取得 {f:%m/%d %H:%M}（発走の{-hours:.1f}時間後に取得。発走前の予想として使えない）")
+            else:
+                add(hours <= 30, "出馬表の新しさ", f"取得 {f:%m/%d %H:%M}（発走の{hours:.1f}時間前）")
+        except (TypeError, ValueError):
             add(None, "出馬表の新しさ", "取得時刻が読めない")
     else:
         add(None, "出馬表の新しさ", "取得時刻の記録が無い")
@@ -145,8 +168,10 @@ def change_conditions(p: dict, tp: str, race: dict | None = None) -> list[tuple[
     if inp and not inp.get("win_odds_ok"):
         out.append(("推論", "単勝オッズがまだ入っていない。入ると「学習＋単勝オッズ」と統合の予想が動く"))
     out.append(("推論", "取消・除外が出たら、その馬を抜いて次の時点で作り直す"))
-    if p.get("confidence") in ("C", "D", "Z"):
+    if p.get("confidence") in ("C", "D"):
         out.append(("注意", f"自信度 {p.get('confidence')}：上位の馬の差が小さく、もともと割れやすいレース"))
+    elif p.get("confidence") == "Z":
+        out.append(("注意", "自信度 Z：材料が足りず、自信度を付けていない（割れやすいかどうかは分からない）"))
     return out
 
 
@@ -165,7 +190,7 @@ def horse_comment(h: dict) -> str:
 
 
 def card_flags(p: dict | None, stakes: dict, race: dict, has_result: bool, now: datetime | None = None,
-               names: dict | None = None) -> list[tuple[str, str]]:
+               names: dict | None = None, scratched_now: set | None = None) -> list[tuple[str, str]]:
     """（cls, 文）。cls は warn（気をつける）か ''（ふつう）。"""
     now = now or now_jst()
     out = []
@@ -175,10 +200,10 @@ def card_flags(p: dict | None, stakes: dict, race: dict, has_result: bool, now: 
     if not p:
         return out
     inp = p.get("inputs") or {}
-    if inp.get("scratched_known"):
+    if inp.get("scratched_known") or scratched_now:
         out.append(("warn", "取消あり"))
     if stakes:
-        items = [i for i in pre_publish_check(p, stakes, race, names) if i["label"] != "三連複オッズの確認"]
+        items = [i for i in pre_publish_check(p, stakes, race, names, scratched_now) if i["label"] != "三連複オッズの確認"]
         if check_summary(items)[1]:
             out.append(("warn", "チェック×"))
     gate = p.get("odds_gate")

@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import pages
-from .data import MODES, Cache
+from .data import ALLOC_LABEL, METHOD_TABS, MODES, TIME_POINTS, Cache
 from .store import InputError, Store
 
 HOST = "127.0.0.1"
@@ -54,18 +54,21 @@ def lan_address() -> str | None:
         return None
 
 
+APP_ID = "keiba-confirm-app"
+
 class App:
     def __init__(self, paths, store_path=None, default_mode="live", passphrase: str | None = None):
         self.paths = paths
         self.default_mode = default_mode if default_mode in MODES else "live"
         self.cache = Cache(paths)
-        self.store = Store(store_path or paths.data_dir / "app" / "purchases.sqlite")
+        self.store = Store(store_path or paths.data_dir / "app" / "purchases.sqlite", protect=(paths.ledger_path,))
         self.token = secrets.token_urlsafe(24)
         self.lan = bool(passphrase)
         self.passphrase = passphrase or ""
         # 合言葉が変わると古いログインは無効になる（再起動しても同じ値）
         self.auth_value = hmac.new(self.passphrase.encode(), b"keiba-app-login-v1", hashlib.sha256).hexdigest() if passphrase else ""
         self.failures: dict[str, list[float]] = {}
+        self._fail_lock = threading.Lock()   # 合言葉の失敗回数は、同時のログインでも取りこぼさない
         self._cmp_cache: dict = {}
 
     def compare(self, va: str, vb: str) -> dict:
@@ -78,8 +81,24 @@ class App:
 
     def locked(self, ip: str) -> bool:
         now = time.time()
-        self.failures[ip] = [t for t in self.failures.get(ip, []) if now - t < LOGIN_LOCK_SEC]
-        return len(self.failures[ip]) >= LOGIN_LIMIT
+        with self._fail_lock:
+            self.failures[ip] = [t for t in self.failures.get(ip, []) if now - t < LOGIN_LOCK_SEC]
+            return len(self.failures[ip]) >= LOGIN_LIMIT
+
+    def try_login(self, ip: str, given: str) -> str:
+        """'ok' / 'ng' / 'locked'。判定と回数の記録を1つのロックの中で行う（同時に何回送っても上限を超えない）。"""
+        now = time.time()
+        with self._fail_lock:
+            fails = [t for t in self.failures.get(ip, []) if now - t < LOGIN_LOCK_SEC]
+            if len(fails) >= LOGIN_LIMIT:
+                self.failures[ip] = fails
+                return "locked"
+            if hmac.compare_digest(given.encode(), self.passphrase.encode()):
+                self.failures.pop(ip, None)
+                return "ok"
+            fails.append(now)
+            self.failures[ip] = fails
+            return "ng"
 
     def extra_status(self) -> dict:
         root = self.paths.data_dir / "live"
@@ -200,6 +219,8 @@ def make_handler(app: App, port: int, extra_hosts=()):
                     return self._redirect("/races")
                 if u.path == "/favicon.ico":
                     return self._send(HTTPStatus.NO_CONTENT, "")
+                if u.path == "/app-id":   # 起動スクリプトが「このアプリが動いているか」を見分ける印
+                    return self._send(200, APP_ID, "text/plain; charset=utf-8")
                 src = app.cache.get(ctx["mode"])
                 if u.path == "/purchases.csv":
                     return self._send(200, "﻿" + pages.purchases_csv(src, app.store), "text/csv; charset=utf-8",
@@ -280,12 +301,11 @@ def make_handler(app: App, port: int, extra_hosts=()):
             if not app.lan:
                 return self._redirect("/races")
             ip = self.client_address[0]
-            if app.locked(ip):
+            result = app.try_login(ip, one.get("passphrase", ""))
+            if result == "locked":
                 return self._send(429, pages.login_page(ctx, "まちがいが続いたので、10分待ってからもう一度ね"))
-            if hmac.compare_digest(one.get("passphrase", "").encode(), app.passphrase.encode()):
-                app.failures.pop(ip, None)
+            if result == "ok":
                 return self._redirect("/races", [f"auth={app.auth_value}; Path=/; Max-Age=2592000; SameSite=Strict; HttpOnly"])
-            app.failures.setdefault(ip, []).append(time.time())
             time.sleep(0.5)
             return self._send(401, pages.login_page(ctx, "合言葉がちがうよ"))
 
@@ -313,9 +333,11 @@ def make_handler(app: App, port: int, extra_hosts=()):
                 q = {"rk": rk, "m": one.get("m"), "tp": one.get("tp"), "kind": kind, "entry": one.get("entry")}
                 body = pages.buy_form(ctx, src, app.store, q, str(exc), {"kind": kind, "rows": rows, "memo": one.get("memo", "")})
                 return self._send(HTTPStatus.BAD_REQUEST, body)
-            nxt = one.get("next", "")
-            if nxt.startswith("/race?") and "//" not in nxt and "\\" not in nxt:   # 戻り先はこのアプリのレース画面だけ
-                return self._redirect(nxt)
+            if one.get("back") == "race":   # 戻り先は、送られた文字ではなく決まった画面からサーバーが組み立てる
+                tab = one.get("tab") if one.get("tab") in METHOD_TABS else "ml"
+                tp = one.get("tp") if one.get("tp") in TIME_POINTS else None
+                a = one.get("a") if one.get("a") in ALLOC_LABEL else None
+                return self._redirect(pages.url("/race", rk=rk, m=tab, tp=tp, a=a, saved="skip"))
             return self._redirect(pages.url("/history/detail", rk=rk))
 
     return Handler
@@ -345,7 +367,8 @@ def notify_loop(app: App, stop: threading.Event, interval: int = 60, lead_min: i
                 if not p:
                     continue
                 stakes = allocation_of(p, MAIN_WALLET["live"]).get("stakes") or {}
-                bad = [i for i in pre_publish_check(p, stakes, r) if i["ok"] is False and i["label"].startswith("取消")]
+                bad = [i for i in pre_publish_check(p, stakes, r, src.names.get(rk), src.scratched_now.get(rk))
+                       if i["ok"] is False and i["label"].startswith("取消")]
                 title = f"{r['venue']}{r['race_number']}R {r.get('post_time') or ''}"
                 if bad and (rk, "bad") not in sent:
                     sender(title, "買い目に取消馬が残っているよ。確認アプリで見てね")

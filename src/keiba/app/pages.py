@@ -9,14 +9,15 @@ from __future__ import annotations
 import html
 import json
 from collections import Counter, defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from urllib.parse import urlencode
 
 from .data import (ALLOC_LABEL, ALLOC_STATUS, MAIN_WALLET, METHOD_LABEL, METHOD_TABS, MODES, TIME_POINTS, TP_LABEL,
-                   WALLET_LABEL, allocation_of, distance_band, horse_probs, is_skip, marks_of)
+                   WALLET_LABEL, allocation_of, distance_band, horse_probs, is_skip, marks_of, probs_complete,
+                   race_sort_key)
 from .checks import (bias_check, card_flags, change_conditions, check_summary, horse_comment, now_jst, post_datetime,
                      pre_publish_check)
-from .store import settle_purchase
+from .store import SETTLE_LABEL, settle_purchase
 
 WEEK = "月火水木金土日"
 TABS = (("races", "レース", "flag"), ("history", "履歴", "clock"), ("results", "結果", "chart"), ("improve", "改善", "trend"))
@@ -169,6 +170,20 @@ def marks_html(src, rk: str, p: dict, names: bool = False) -> str:
     return "".join(out) or '<span class="muted">印なし</span>'
 
 
+def real_label(src) -> str:
+    """本人の記録の呼び名。検証データで付けた記録は練習なので「実購入」と呼ばない。"""
+    return "実購入" if src.mode == "live" else "練習の記録（検証データ）"
+
+
+def money_text(st: dict) -> str:
+    s_ = st["status"]
+    if s_ == "settled":
+        return f"払戻 {yen(st['returned'])}" + (f"（うち返還 {yen(st['refund'])}）" if st.get("refund") else "")
+    if s_ == "refunded_void":
+        return f"返還 {yen(st['returned'])}（レース不成立）"
+    return SETTLE_LABEL.get(s_, "")
+
+
 def empty(title: str, body: str, link: str = "") -> str:
     return f'<div class="card flat empty"><b>{h(title)}</b><span class="muted">{h(body)}</span>{link}</div>'
 
@@ -253,6 +268,9 @@ def _stale_banner(ctx, src) -> str:
     return ""
 
 
+SOON_MIN = 60
+
+
 def races_page(ctx, src, store, q) -> str:
     days = src.days()
     day = q.get("day") or default_day(src)
@@ -282,8 +300,10 @@ def races_page(ctx, src, store, q) -> str:
     body = ["<h1>レース</h1><p class='lead'>予想を選ぶ、見送る、振り返る</p>", _stale_banner(ctx, src), nav,
             seg([(t, TP_LABEL[t]) for t in TIME_POINTS], tp, lambda t: url("/races", day=day, tp=t, venue=venue))]
     if len(venues) > 1:
-        body.append(chips([("", "すべて"), *[(v, v) for v in venues]], venue, lambda v: url("/races", day=day, tp=tp, venue=v)))
+        body.append(chips([("", "すべて"), *[(v, v) for v in venues]], venue, lambda v: url("/races", day=day, tp=tp, venue=v, f=q.get("f"))))
+    filter_at = len(body)
     cards, counts = [], Counter()
+    flt = q.get("f") if q.get("f") in ("soon", "warn") and src.mode == "live" else ""
     alloc = MAIN_WALLET[src.mode] if src.mode == "live" else None
     now = now_jst()
     for r in shown:
@@ -300,12 +320,20 @@ def races_page(ctx, src, store, q) -> str:
         if p and alloc and is_skip(p, alloc):
             status.append('<span class="chip">見送り</span>')
             counts["skip"] += 1
-        if res and res.get("actual"):
-            status.append(f'<span class="chip">結果 {h(res["actual"])}</span>')
+        if res and res.get("label"):
+            status.append(f'<span class="chip">結果 {h(res["label"])}</span>')
+        warn = False
         if src.mode == "live":
-            for cls, text in card_flags(p, stakes, r, bool(res and res.get("actual")), now, src.names.get(rk)):
+            for cls, text in card_flags(p, stakes, r, bool(res and res.get("has_result")), now, src.names.get(rk),
+                                        src.scratched_now.get(rk)):
                 status.append(f'<span class="chip {cls}">{h(text)}</span>')
-                counts["warn"] += cls == "warn"
+                warn = warn or cls == "warn"
+            counts["warn"] += warn
+        post = post_datetime(r)
+        soon = bool(post and not (res and res.get("has_result")) and 0 <= (post - now).total_seconds() <= SOON_MIN * 60)
+        counts["soon"] += soon
+        if (flt == "soon" and not soon) or (flt == "warn" and not warn):
+            continue
         if p:
             counts["pred"] += 1
             counts["A"] += p.get("confidence") == "A"
@@ -326,6 +354,10 @@ def races_page(ctx, src, store, q) -> str:
                      f'{"（" + TP_LABEL[earlier] + "はある）" if earlier else ""}</div><div>{"".join(status)}</div>')
             hot = ""
         cards.append(f'<a class="card{hot}" style="display:block" href="{h(url("/race", rk=rk, tp=tp))}">{inner}</a>')
+    if src.mode == "live" and shown:
+        body.insert(filter_at, chips([("", "すべて"), ("soon", f"発走{SOON_MIN}分以内 {counts['soon']}"),
+                                      ("warn", f"要確認 {counts['warn']}")], flt,
+                                     lambda k: url("/races", day=day, tp=tp, venue=venue, f=k)))
     if shown:
         bits = [f"{len(shown)}R", f"予想 {counts['pred']}", f"自信度A {counts['A']}"]
         if alloc:
@@ -335,7 +367,8 @@ def races_page(ctx, src, store, q) -> str:
         body.append(f'<p class="muted small" style="margin:-4px 0 10px">{h("・".join(bits))}'
                     + (f'<br>読み込み {datetime.fromtimestamp(src.loaded_at):%H:%M}・1分ごとに読み直すよ' if auto_refresh(ctx, src)
                        and ctx.get("refresh", "on") == "on" else "") + '</p>')
-    body.append("".join(cards) or empty("この日のレースは無いよ", ""))
+    body.append("".join(cards) or (empty("あてはまるレースは無いよ", "「すべて」に戻すと全部見られるよ。") if flt
+                                   else empty("この日のレースは無いよ", "")))
     return layout(ctx, "レース", "".join(body), "races", refresh=auto_refresh(ctx, src))
 
 
@@ -356,7 +389,12 @@ def _facts(src, rk, m, p, tp) -> str:
     gate = p.get("odds_gate") or {}
     if gate.get("odds_time"):
         lines.append(("f", "事実", f"三連複オッズ {gate['odds_time']} 発表・取得 {str(gate.get('fetched_at', ''))[11:16]}"))
-    lines.append(("g", "推論", f"印は{METHOD_LABEL.get(m, m)}の3着内確率の順。自信度 {p.get('confidence') or '—'}"))
+    if probs_complete(p):
+        lines.append(("g", "推論", f"印は{METHOD_LABEL.get(m, m)}の3着内確率の順。自信度 {p.get('confidence') or '—'}"))
+    elif horse_probs(p):
+        lines.append(("w", "注意", "確率は上位の組だけから足した目安（全部の組はそろっていない）。印の順も目安"))
+    else:
+        lines.append(("w", "注意", "確率が無く、順位だけの予想。印は順位の上から"))
     view = p.get("rule_view") or {}
     if view.get("disagreement"):
         lines.append(("g", "推論", f"ルールとの食い違い：{view['disagreement']}（配分には使わない）"))
@@ -400,7 +438,7 @@ def race_page(ctx, src, store, q) -> str:
                 f'<a class="muted small" style="display:block;margin-top:8px" href="{h(url("/race/horses", rk=rk, m=tab, tp=tp))}">全頭の評価を見る ›</a></div>')
     a = allocation_of(p, alloc)
     stakes = a.get("stakes") or {}
-    ok_n, ng_n, na_n = check_summary(pre_publish_check(p, stakes, r, src.names.get(rk)))
+    ok_n, ng_n, na_n = check_summary(pre_publish_check(p, stakes, r, src.names.get(rk), src.scratched_now.get(rk)))
     check_link = (f'<a class="small" style="display:block;margin-top:8px" href="{h(url("/race/check", rk=rk, m=tab, tp=tp, a=alloc))}">'
                   + (f'<span class="chip warn">チェック × {ng_n}件</span>' if ng_n else
                      f'<span class="chip ok">チェック ✓ {ok_n}件</span>' if ok_n else '<span class="chip">チェック対象なし</span>')
@@ -425,15 +463,18 @@ def race_page(ctx, src, store, q) -> str:
     res = src.results.get(rk)
     items = [("方式くらべ", "一致と不一致", url("/race/compare", rk=rk, tp=tp)),
              ("時点の変化", "24時間前 → 1時間前 → 15分前", url("/race/timeline", rk=rk, m=tab))]
-    if res and res.get("actual"):
-        hit = res["actual"] in stakes if stakes else any(t["combo"] == res["actual"] for t in p.get("trios", [])[:10])
-        items.append((f"結果 {res['actual']}", ("当たり" if hit else "はずれ") + (f"・払戻 {yen(res['payout'])}" if res.get("payout") else ""),
+    if res and res.get("label"):
+        wins = set(res.get("payouts") or {}) or {res["actual"]}
+        hit = bool(wins & set(stakes)) if stakes else any(t["combo"] in wins for t in p.get("trios", [])[:10])
+        pay = "・".join(yen(v) for v in (res.get("payouts") or {}).values())
+        items.append((f"結果 {res['label']}", ("当たり" if hit else "はずれ") + (f"・払戻 {pay}" if pay else "・払戻はまだ分からない"),
                       url("/history/detail", rk=rk)))
     body.append(link_list(items))
     skip = (f'<form method="post" action="/buy" class="inline" style="flex:1"><input type="hidden" name="token" value="{h(ctx["token"])}">'
             f'<input type="hidden" name="rk" value="{h(rk)}"><input type="hidden" name="kind" value="skip">'
             f'<input type="hidden" name="m" value="{h(m)}"><input type="hidden" name="tp" value="{h(tp)}">'
-            f'<input type="hidden" name="next" value="{h(url("/race", rk=rk, m=tab, tp=tp, a=alloc, saved="skip"))}">'
+            f'<input type="hidden" name="back" value="race"><input type="hidden" name="tab" value="{h(tab)}">'
+            f'<input type="hidden" name="a" value="{h(alloc)}">'
             f'<button class="btn" type="submit">見送る（1タップ）</button></form>')
     body.append(f'<div class="btns">{skip}<a class="btn pri" href="{h(url("/buy/new", rk=rk, m=m, tp=tp, a=alloc))}">購入を記録</a></div>')
     return layout(ctx, race_title(r), "".join(body), "races", back, race_title(r), refresh=auto_refresh(ctx, src) and not q.get("saved"))
@@ -499,12 +540,33 @@ def compare_page(ctx, src, store, q) -> str:
     body.append(f'<div class="card"><h2>一致と不一致</h2>{summary}<p class="muted small" style="margin:6px 0 0">'
                 f'比べたのは{"・".join(METHOD_LABEL[m] for m in main) or "—"}。比較版は下に並べるだけ</p></div>')
     rows = "".join(f'<div style="display:block"><div class="row"><span>{h(METHOD_LABEL.get(m, m))}</span>{conf_badge(preds[m].get("confidence"))}</div>'
-                   f'<div>{marks_html(src, rk, preds[m])}</div></div>' for m in order)
-    body.append(f'<div class="card list">{rows}</div>')
+                   f'<div>{marks_html(src, rk, preds[m])}</div>{_compare_detail(preds[m])}</div>' for m in order)
+    body.append(f'<div class="card list">{rows}</div>'
+                '<p class="muted small">組＝確率の高い三連複（上位3つ）。理由は各方式が残した説明の先頭。どれも推論だよ</p>')
     return layout(ctx, "方式くらべ", "".join(body), "races", back, "方式くらべ")
 
 
-def _change_lines(prev: dict | None, cur: dict) -> list[str]:
+def _compare_detail(p: dict) -> str:
+    combos = [t for t in p.get("trios") or [] if t.get("combo")][:3]
+    ctext = "、".join(t["combo"] + (f"（{t['p'] * 100:.1f}%）" if t.get("p") is not None else "") for t in combos) or "—"
+    reasons = [*(p.get("reasons") or []), *(p.get("notes") or [])]
+    view = p.get("rule_view") or {}
+    if view.get("disagreement"):
+        reasons.insert(0, f"ルールとの食い違い：{view['disagreement']}")
+    gap = ""
+    hp = horse_probs(p)
+    order = sorted(hp, key=lambda n: (-hp[n], n))
+    if len(order) >= 4 and probs_complete(p):
+        gap = f"★と4番手の差 {(hp[order[2]] - hp[order[3]]) * 100:.1f}ポイント"
+    bits = [f'<div class="muted small">組：{h(ctext)}</div>']
+    if gap:
+        bits.append(f'<div class="muted small">{h(gap)}</div>')
+    if reasons:
+        bits.append(f'<div class="muted small">理由：{h(str(reasons[0])[:80])}</div>')
+    return "".join(bits)
+
+
+def _change_lines(prev: dict | None, cur: dict, alloc: str | None = None) -> list[str]:
     if prev is None:
         return ["最初の予想"]
     out = []
@@ -519,7 +581,18 @@ def _change_lines(prev: dict | None, cur: dict) -> list[str]:
         out.append("取消・除外が分かった：" + "、".join(f"{n}番" for n in sorted(new_scr)))
     if (cur.get("inputs") or {}).get("win_odds_ok") and not (prev.get("inputs") or {}).get("win_odds_ok"):
         out.append("単勝オッズが入った")
-    return out or ["変化なし"]
+    if alloc:
+        ps, cs = allocation_of(prev, alloc).get("stakes") or {}, allocation_of(cur, alloc).get("stakes") or {}
+        if ps != cs:
+            if set(ps) != set(cs):
+                out.append(f"買い目が変わった：{len(ps)}点 {yen(sum(ps.values()))} → {len(cs)}点 {yen(sum(cs.values()))}")
+            else:
+                out.append(f"金額だけ変わった：{yen(sum(ps.values()))} → {yen(sum(cs.values()))}")
+    pt = [t.get("combo") for t in prev.get("trios") or []][:3]
+    ct = [t.get("combo") for t in cur.get("trios") or []][:3]
+    if pt and ct and pt != ct and not any(x.startswith(("◎", "○", "★")) for x in out):
+        out.append("確率の高い組の顔ぶれ・順が変わった")
+    return out or ["変化なし（印・自信度・買い目・金額・取消・オッズ）"]
 
 
 def timeline_page(ctx, src, store, q) -> str:
@@ -541,7 +614,7 @@ def timeline_page(ctx, src, store, q) -> str:
         a = allocation_of(p, alloc) if src.mode == "live" else {}
         stakes = a.get("stakes") or {}
         money = f"{len(stakes)}点・配分 {yen(sum(stakes.values()))}" if stakes else ALLOC_STATUS.get(a.get("status"), "配分なし")
-        changes = "".join(f'<div class="small">{h(x)}</div>' for x in _change_lines(prev, p))
+        changes = "".join(f'<div class="small">{h(x)}</div>' for x in _change_lines(prev, p, alloc if src.mode == "live" else None))
         cards.append(f'<div class="card{" hot" if tp == "15m" else ""}"><div class="row"><span class="chip ok">{TP_LABEL[tp]}</span>'
                      f'{conf_badge(p.get("confidence"))}</div><div>{marks_html(src, rk, p)}</div>'
                      f'<div class="muted small" style="margin:4px 0">{h(money)}</div><div class="tl muted">{changes}</div></div>')
@@ -562,7 +635,7 @@ def check_page(ctx, src, store, q) -> str:
     if not p:
         return layout(ctx, "買い目のチェック", empty("予想が無いよ", "レースの詳細から開き直してね。"), "races", back, "買い目のチェック")
     stakes = allocation_of(p, alloc).get("stakes") or {}
-    items = pre_publish_check(p, stakes, r, src.names.get(rk))
+    items = pre_publish_check(p, stakes, r, src.names.get(rk), src.scratched_now.get(rk))
     ok_n, ng_n, na_n = check_summary(items)
     rows = "".join(f'<div class="ck"><i class="{"y" if i["ok"] else "n" if i["ok"] is False else ""}">'
                    f'{"✓" if i["ok"] else "×" if i["ok"] is False else "—"}</i><div><div class="small">{h(i["label"])}</div>'
@@ -652,23 +725,28 @@ def _history_keys(src, store, f: str) -> list[str]:
         keys = buy
     elif f == "skip":
         keys = skip_user | skip_pred
+    elif f == "2w":
+        keys = set(src.preds) | buy | skip_user | store.noted_races()
+        start = (date.fromisoformat(today) - timedelta(days=13)).isoformat()
+        keys = {k for k in keys if start <= k.split("|")[0] <= today}
     else:
         keys = set(src.preds) | buy | skip_user | store.noted_races()
         if src.mode == "live":
             keys = {k for k in keys if k.split("|")[0] <= today}
-    return sorted(keys, key=lambda k: (k.split("|")[0], (src.races.get(k) or {}).get("post_time") or "", k), reverse=True)
+    return sorted(keys, key=lambda k: race_sort_key(src, k), reverse=True)
 
 
 def history_page(ctx, src, store, q) -> str:
-    f = q.get("f") if q.get("f") in ("all", "buy", "skip") else "all"
+    f = q.get("f") if q.get("f") in ("all", "2w", "buy", "skip") else "all"
     page = max(1, int(q.get("page", "1") or 1)) if str(q.get("page", "1")).isdigit() else 1
     keys = _history_keys(src, store, f)
     per = 15
     shown = keys[(page - 1) * per: page * per]
     body = ["<h1>履歴</h1><p class='lead'>予想の変化と判断を残す</p>",
-            seg([("all", "すべて"), ("buy", "購入記録"), ("skip", "見送り")], f, lambda k: url("/history", f=k))]
+            seg([("all", "すべて"), ("2w", "2週間"), ("buy", "購入記録"), ("skip", "見送り")], f, lambda k: url("/history", f=k))]
     if not keys:
-        msg = {"buy": "購入を記録すると、ここに並ぶよ。", "skip": "見送ったレースがここに並ぶよ。"}.get(f, "予想が保存されると、ここに並ぶよ。")
+        msg = {"buy": "購入を記録すると、ここに並ぶよ。", "skip": "見送ったレースがここに並ぶよ。",
+               "2w": "今日までの14日間に、予想や記録のあるレースは無いよ。"}.get(f, "予想が保存されると、ここに並ぶよ。")
         body.append(empty("まだ0件だよ", msg))
         return layout(ctx, "履歴", "".join(body), "history")
     entries = defaultdict(list)
@@ -721,8 +799,13 @@ def history_detail_page(ctx, src, store, q) -> str:
         rows.append(f'<div class="row" style="padding:4px 0"><span class="chip">{TP_LABEL[tp]}</span>'
                     f'<span>{marks_html(src, rk, p) if p else "<span class=muted>予想なし</span>"}</span></div>')
     res = src.results.get(rk)
-    result = (f'<p class="small" style="margin:8px 0 0"><span class="tag f">結果</span>三連複 {h(res["actual"])}'
-              f'{"・払戻 " + yen(res["payout"]) if res.get("payout") else ""}</p>') if res and res.get("actual") else ""
+    result = ""
+    if res and res.get("has_result"):
+        pays = res.get("payouts") or {}
+        result = (f'<p class="small" style="margin:8px 0 0"><span class="tag f">結果</span>三連複 {h(res.get("label") or "—")}'
+                  + ("・払戻 " + "・".join(f"{h(c)} {yen(v)}" if len(pays) > 1 else yen(v) for c, v in pays.items()) if pays
+                     else "・払戻はまだ分からない") + (f"・取消 {'、'.join(map(str, sorted(res['scratched'])))}番" if res.get("scratched") else "")
+                  + (f"・完走 {res['finishers']}頭（不成立）" if res.get("finishers", 3) < 3 else "") + '</p>')
     body.append(f'<div class="card"><h2>予想の変化（学習）</h2>{"".join(rows)}{result}'
                 f'<a class="muted small" style="display:block;margin-top:6px" href="{h(url("/race/timeline", rk=rk))}">変化の理由を見る ›</a></div>')
     note = store.note(rk)
@@ -731,17 +814,17 @@ def history_detail_page(ctx, src, store, q) -> str:
     es = store.entries(race_key=rk, data_mode=src.mode)
     lines = []
     for e in es:
-        st = settle_purchase(e, (res or {}).get("actual"), (res or {}).get("payout"))
+        st = settle_purchase(e, res)
         if e["kind"] == "skip":
             what, money = "見送り", ""
         else:
             what = f'{len(e["stakes"])}点 {yen(e["total"])}'
-            money = {"pending": "結果待ち", "settled": f"払戻 {yen(st['returned'])}", "no_payout": "払戻が分からない"}.get(st["status"], "")
+            money = money_text(st)
         lines.append(f'<a href="{h(url("/buy/new", entry=e["entry_id"]))}"><span>{h(what)}<br><span class="muted small">'
                      f'{h(METHOD_LABEL.get(e["method"], e["method"] or ""))} {TP_LABEL.get(e["time_point"], "")} {h(money)}</span></span>'
                      f'<span class="chev">記録を編集 ›</span></a>')
     add = f'<a href="{h(url("/buy/new", rk=rk))}"><span>記録を足す</span><span class="chev">›</span></a>'
-    body.append(f'<div class="card"><h2>購入記録</h2><div class="list">{"".join(lines)}{add}</div></div>')
+    body.append(f'<div class="card"><h2>{"購入記録" if src.mode == "live" else h(real_label(src))}</h2><div class="list">{"".join(lines)}{add}</div></div>')
     return layout(ctx, "履歴の詳細", "".join(body), "history", "/history", "履歴の詳細")
 
 
@@ -761,7 +844,7 @@ N_CHOICES = (("50", "直近50R"), ("100", "100R"), ("500", "500R"), ("all", "全
 
 
 def _recent_keys(src, keys, n: str) -> set[str]:
-    ks = sorted(set(keys), key=lambda k: (k.split("|")[0], k), reverse=True)
+    ks = sorted(set(keys), key=lambda k: race_sort_key(src, k), reverse=True)
     return set(ks if n == "all" else ks[:int(n)])
 
 
@@ -779,11 +862,14 @@ def one_per_race(src, wallet: str) -> list[dict]:
 
 
 def wallet_table(src, wallet: str, keys: set[str] | None = None) -> list[dict]:
-    rows = defaultdict(lambda: {"races": 0, "bet": 0, "hit": 0, "stake": 0, "returned": 0})
+    rows = defaultdict(lambda: {"races": 0, "bet": 0, "hit": 0, "stake": 0, "returned": 0, "pending": 0})
     for s in one_per_race(src, wallet):
         if keys is not None and s["race_key"] not in keys:
             continue
         x = rows[s["method"]]
+        if s.get("status") == "unsettled_no_payout":   # 払戻が分からない：0円にせず、回収率から外す
+            x["pending"] += 1
+            continue
         x["races"] += 1
         x["bet"] += int((s.get("stake") or 0) > 0)
         x["hit"] += int(bool(s.get("hits")))
@@ -797,18 +883,24 @@ def wallet_table(src, wallet: str, keys: set[str] | None = None) -> list[dict]:
 
 
 def _real(src, store, keys: set[str] | None = None) -> dict:
-    tot = {"races": 0, "stake": 0, "returned": 0, "pending": 0}
+    """本人の記録の集計。レース数は同じレースの記録をまとめて1R。結果待ち・払戻待ちは金額と回収率に入れない。"""
+    tot = {"stake": 0, "returned": 0, "pending": 0, "unsettled": 0, "entries": 0}
+    races: set = set()
     for e in store.entries(data_mode=src.mode):
         if e["kind"] != "buy" or (keys is not None and e["race_key"] not in keys):
             continue
-        res = src.results.get(e["race_key"]) or {}
-        st = settle_purchase(e, res.get("actual"), res.get("payout"))
+        st = settle_purchase(e, src.results.get(e["race_key"]))
         if st["status"] == "pending":
             tot["pending"] += 1
             continue
-        tot["races"] += 1
+        if not st["counted"]:
+            tot["unsettled"] += 1
+            continue
+        races.add(e["race_key"])
+        tot["entries"] += 1
         tot["stake"] += st["stake"]
         tot["returned"] += st["returned"]
+    tot["races"] = len(races)
     tot["roi"] = tot["returned"] / tot["stake"] if tot["stake"] else None
     return tot
 
@@ -822,19 +914,24 @@ def results_page(ctx, src, store, q) -> str:
     rows = {x["method"]: x for x in wallet_table(src, wallet, keys)}
     ml = rows.get("ml_lgbm")
     real = _real(src, store, _recent_keys(src, buy_keys, n))
-    body = ["<h1>結果</h1><p class='lead'>仮想の財布と実購入は分けて見るよ</p>",
+    body = [f"<h1>結果</h1><p class='lead'>仮想の財布と{h(real_label(src))}は分けて見るよ</p>",
             seg(N_CHOICES, n, lambda k: url("/results", n=k)),
             f'<div class="kpi"><div><span class="muted small">仮想・学習の回収率</span><b>{pct(ml["roi"]) if ml else "—"}</b>'
             f'<span class="muted small">{ml["races"] if ml else 0}R・{h(WALLET_LABEL[wallet])}</span></div>'
-            f'<div><span class="muted small">実購入の回収率</span><b>{pct(real["roi"])}</b>'
-            f'<span class="muted small">{real["races"]}R{"・結果待ち" + str(real["pending"]) + "件" if real["pending"] else ""}</span></div></div>']
+            f'<div><span class="muted small">{h(real_label(src))}の回収率</span><b>{pct(real["roi"])}</b>'
+            f'<span class="muted small">{real["races"]}R'
+            f'{"・結果待ち" + str(real["pending"]) + "件" if real["pending"] else ""}'
+            f'{"・払戻待ち" + str(real["unsettled"]) + "件" if real["unsettled"] else ""}</span></div></div>']
+    if ml and ml.get("pending"):
+        body.append(f'<p class="muted small">仮想：払戻が分からない {ml["pending"]}R は回収率に入れていないよ</p>')
     if src.mode == "live":
         body.append('<p class="muted small">初週は回収率の判定をしない取り決め。数週たまるまでは参考として見てね</p>')
     else:
         body.append('<p class="muted small">検証データの「仮想」は、オッズを見ずに上位10組を100円ずつ買ったと仮定した参考の数字</p>')
     body.append(link_list([("方式ごと", "学習・まむ・統合・基準をくらべる", url("/results/methods", n=n)),
                            ("条件別", "距離・馬場・クラスごと", url("/results/conditions", n=n)),
-                           ("見送りの振り返り", "見送ったレースはどうだった？", url("/results/skips", n=n))]))
+                           ("見送りの振り返り", "見送ったレースはどうだった？", url("/results/skips", n=n)),
+                           (f"{real_label(src)}の内訳", "1件ずつ：払戻・返還・結果待ち・払戻待ち", "/purchases")]))
     return layout(ctx, "結果", "".join(body), "results")
 
 
@@ -850,10 +947,13 @@ def results_methods_page(ctx, src, store, q) -> str:
     if len(wallets) > 1:
         body.append(chips([(w, WALLET_LABEL.get(w, w)) for w in wallets], wallet, lambda w: url("/results/methods", n=n, w=w)))
     keys = _recent_keys(src, {s["race_key"] for s in src.settlements if s["wallet"] == wallet}, n)
+    table = wallet_table(src, wallet, keys)
     rows = "".join(f'<tr><td>{h(METHOD_LABEL.get(x["method"], x["method"]))}</td><td>{x["races"]}</td><td>{x["bet"]}</td>'
-                   f'<td>{x["hit"]}</td><td>{pct(x["roi"])}</td></tr>' for x in wallet_table(src, wallet, keys))
+                   f'<td>{x["hit"]}</td><td>{pct(x["roi"])}</td></tr>' for x in table)
+    waiting = sum(x["pending"] for x in table)
     body.append(f'<div class="card"><table><tr><th>方式</th><th>R</th><th>買った</th><th>的中</th><th>回収率</th></tr>{rows}</table></div>'
-                f'<p class="muted small">R＝精算したレース、買った・的中＝レース数。{h(WALLET_LABEL.get(wallet, wallet))}。まむは予想が届いたレースだけ。基準と比べて上回るかを見るよ</p>')
+                f'<p class="muted small">R＝精算したレース、買った・的中＝レース数。{h(WALLET_LABEL.get(wallet, wallet))}。まむは予想が届いたレースだけ。基準と比べて上回るかを見るよ'
+                + (f'。払戻が分からない {waiting}件は入れていない' if waiting else "") + '</p>')
     return layout(ctx, "方式ごと", "".join(body), "results", url("/results", n=n), "方式ごと")
 
 
@@ -873,7 +973,7 @@ def results_conditions_page(ctx, src, store, q) -> str:
     keys = _recent_keys(src, {s["race_key"] for s in src.settlements if s["wallet"] == wallet and s["method"] == m}, n)
     agg = defaultdict(lambda: [0, 0, 0, 0])
     for s in one_per_race(src, wallet):
-        if s["method"] != m or s["race_key"] not in keys:
+        if s["method"] != m or s["race_key"] not in keys or s.get("status") == "unsettled_no_payout":
             continue
         r = src.races.get(s["race_key"], {})
         key = {"dist": distance_band(r.get("distance_m")), "surface": r.get("surface") or "不明",
@@ -884,7 +984,7 @@ def results_conditions_page(ctx, src, store, q) -> str:
         a[2] += s.get("stake") or 0
         a[3] += s.get("returned") or 0
     rows = "".join(f'<tr><td>{h(k)}</td><td>{v[0]}</td><td>{pct(v[1] / v[0]) if v[0] else "—"}</td><td>{pct(v[3] / v[2]) if v[2] else "—"}</td></tr>'
-                   for k, v in (sorted(agg.items(), reverse=True) if dim == "month" else sorted(agg.items(), key=lambda x: -x[1][0]))[:12])
+                   for k, v in (sorted(agg.items(), reverse=True) if dim == "month" else sorted(agg.items(), key=lambda x: -x[1][0])))
     body.append(f'<div class="card"><table><tr><th>{ {"dist": "距離", "surface": "芝・ダート", "class": "クラス", "month": "月"}[dim]}</th>'
                 f'<th>R</th><th>的中率</th><th>回収率</th></tr>{rows or "<tr><td colspan=4 class=muted>—</td></tr>"}</table></div>'
                 f'<p class="muted small">件数が少ない条件は、たまたまの差が大きいよ（20R未満は参考）</p>')
@@ -905,9 +1005,11 @@ def results_skips_page(ctx, src, store, q) -> str:
     user = [e for e in store.entries(data_mode=src.mode) if e["kind"] == "skip"]
     keys = _recent_keys(src, [rk for rk, _ in skipped] + [e["race_key"] for e in user], n)
     skipped = [(rk, p) for rk, p in skipped if rk in keys]
-    came = [rk for rk, p in skipped if (src.results.get(rk) or {}).get("actual") and p.get("trios")
-            and p["trios"][0]["combo"] == src.results[rk]["actual"]]
-    done = [rk for rk, _ in skipped if (src.results.get(rk) or {}).get("actual")]
+    def wins(rk):
+        res = src.results.get(rk) or {}
+        return set(res.get("payouts") or {}) | ({res["actual"]} if res.get("actual") else set())
+    came = [rk for rk, p in skipped if p.get("trios") and p["trios"][0]["combo"] in wins(rk)]
+    done = [rk for rk, _ in skipped if (src.results.get(rk) or {}).get("has_result")]
     body.append(f'<div class="kpi"><div><span class="muted small">学習が見送った</span><b>{len(skipped)}R</b>'
                 f'<span class="muted small">結果が出たのは {len(done)}R</span></div>'
                 f'<div><span class="muted small">本命の組が来た</span><b>{len(came)}R</b>'
@@ -1001,7 +1103,8 @@ def improve_versions_page(ctx, src, store, q, compare) -> str:
                     f'<th>的中R</th><th>参考回収率</th></tr>{"".join(rows)}</table>'
                     f'<p class="muted small" style="margin:6px 0 0">両方の版にある {res["races"]:,}R だけで比べた。'
                     f'{h(WALLET_LABEL.get(res["wallet"], res["wallet"]))}の仮定。たまたまの差もあるので、差が小さいときは決めつけないでね</p>'
-                    + ('<p class="small" style="margin:6px 0 0"><span class="tag f">事実</span>この2つの版では、どの方式も成績が同じ（予想が変わっていない）</p>'
+                    + ('<p class="small" style="margin:6px 0 0"><span class="tag f">事実</span>この2つの版では、どの方式も的中と回収の数字が同じ'
+                       '<br><span class="tag g">推論</span>予想が同じだった可能性はあるけど、この画面は精算の数字だけを見ているので、予想そのものが同じかは分からない</p>'
                        if all(x["a"] == x["b"] for x in res["rows"]) else "") + '</div>')
     key = decision_key(va, vb)
     prev = store.note(key)
@@ -1063,18 +1166,22 @@ def status_page(ctx, src, store, q, extra: dict) -> str:
 
 def purchases_page(ctx, src, store, q) -> str:
     es = store.entries(data_mode=src.mode, include_void=False)
-    body = ["<h1>購入記録の一覧</h1><p class='lead'>実際に買った分の記録（新しい順）</p>"]
+    lead = "実際に買った分の記録（新しい順）" if src.mode == "live" else "検証データで付けた練習の記録（実際のお金ではない）"
+    body = [f"<h1>購入記録の一覧</h1><p class='lead'>{lead}</p>"]
     if not es:
         body.append(empty("まだ0件だよ", "レースの詳細から「購入を記録」で足せるよ。"))
     else:
         rows = []
         for e in es[:100]:
-            res = src.results.get(e["race_key"]) or {}
-            st = settle_purchase(e, res.get("actual"), res.get("payout"))
+            st = settle_purchase(e, src.results.get(e["race_key"]))
+            cell = {"settled": lambda: yen(st["returned"]) + (f'<br><span class="muted small">うち返還 {yen(st["refund"])}</span>' if st["refund"] else ""),
+                    "refunded_void": lambda: yen(st["returned"]) + '<br><span class="muted small">返還（不成立）</span>',
+                    "pending": lambda: '<span class="muted">結果待ち</span>',
+                    "unsettled_no_payout": lambda: '<span class="muted">払戻待ち</span>'}.get(st["status"], lambda: "—")()
             rows.append(f'<tr><td><a href="{h(url("/history/detail", rk=e["race_key"]))}">{h(e["race_key"].replace("|", " "))}R</a></td>'
-                        f'<td>{"見送り" if e["kind"] == "skip" else yen(e["total"])}</td>'
-                        f'<td>{yen(st["returned"]) if st["status"] == "settled" else ("待ち" if st["status"] == "pending" else "—")}</td></tr>')
-        body.append(f'<div class="card"><table><tr><th>レース</th><th>購入</th><th>払戻</th></tr>{"".join(rows)}</table></div>')
+                        f'<td>{"見送り" if e["kind"] == "skip" else yen(e["total"])}</td><td>{cell}</td></tr>')
+        body.append(f'<div class="card"><table><tr><th>レース</th><th>購入</th><th>払戻</th></tr>{"".join(rows)}</table></div>'
+                    '<p class="muted small">結果待ち・払戻待ちは、結果の画面の金額と回収率に入れていないよ</p>')
     body.append(f'<p><a class="chip ok" href="/purchases.csv">CSVで書き出す</a> <span class="muted small">Macに保存されるよ</span></p>')
     return layout(ctx, "購入記録の一覧", "".join(body), None, "/menu", "購入記録の一覧")
 
@@ -1114,14 +1221,23 @@ def purchases_csv(src, store) -> str:
     import io
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["entry_id", "rev", "race_key", "kind", "method", "time_point", "stakes", "total", "memo", "first_saved", "updated", "actual", "returned"])
+    w.writerow(["entry_id", "rev", "race_key", "kind", "data_mode", "method", "time_point", "stakes", "total", "memo",
+                "first_saved", "updated", "actual", "settle_status", "returned"])
     for e in store.entries(data_mode=src.mode, include_void=True):
         res = src.results.get(e["race_key"]) or {}
-        st = settle_purchase(e, res.get("actual"), res.get("payout"))
-        w.writerow([e["entry_id"], e["rev"], e["race_key"], e["kind"], e["method"] or "", e["time_point"] or "",
-                    json.dumps(e["stakes"], ensure_ascii=False), e["total"], e["memo"], e["created_at"], e["updated_at"],
-                    res.get("actual") or "", st["returned"] if st["status"] == "settled" else ""])
+        st = settle_purchase(e, res)
+        w.writerow([csv_cell(x) for x in (
+            e["entry_id"], e["rev"], e["race_key"], e["kind"], e["data_mode"], e["method"] or "", e["time_point"] or "",
+            json.dumps(e["stakes"], ensure_ascii=False), e["total"], e["memo"], e["created_at"], e["updated_at"],
+            res.get("label") or "", st["status"], st["returned"] if st.get("counted") else "")])
     return buf.getvalue()
+
+
+def csv_cell(v):
+    """表計算ソフトが式として動かさないように、= + - @ などで始まる文字は先頭に ' を付けて文字として扱わせる。"""
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r", "|", "%"):
+        return "'" + v
+    return v
 
 
 def login_page(ctx, error: str = "") -> str:

@@ -55,14 +55,67 @@ def test_store_is_append_only_and_latest_rev_wins(tmp_path):
     assert s.note(RK) == "メモ2"
 
 
+def _res(fin, finishers=None, scratched=(), payouts=None):
+    from keiba.app.data import make_result
+    return make_result(fin, len(fin) if finishers is None else finishers, set(scratched), payouts or {})
+
+
 def test_settle_purchase():
     e = {"kind": "buy", "stakes": {"1-2-3": 1000, "2-3-4": 200}, "total": 1200}
-    assert settle_purchase(e, None, None)["status"] == "pending"
-    st = settle_purchase(e, "1-2-3", 4560)
-    assert st == {"status": "settled", "stake": 1200, "returned": 45600, "hit": "1-2-3"}
-    assert settle_purchase(e, "5-6-7", 9000)["returned"] == 0
-    assert settle_purchase(e, "1-2-3", None)["status"] == "no_payout"
-    assert settle_purchase({"kind": "skip", "stakes": {}, "total": 0}, "1-2-3", 100)["stake"] == 0
+    assert settle_purchase(e, None)["status"] == "pending"
+    fin = [(1, 1), (2, 2), (3, 3), (4, 4)]
+    st = settle_purchase(e, _res(fin, payouts={"1-2-3": 4560}))
+    assert (st["status"], st["stake"], st["returned"], st["hit"], st["counted"]) == ("settled", 1200, 45600, "1-2-3", True)
+    assert settle_purchase(e, _res([(5, 1), (6, 2), (7, 3)], payouts={"5-6-7": 9000}))["returned"] == 0
+    nopay = settle_purchase(e, _res(fin))                  # 払戻が分からない：0円にしない
+    assert nopay["status"] == "unsettled_no_payout" and nopay["counted"] is False
+    assert settle_purchase({"kind": "skip", "stakes": {}, "total": 0}, _res(fin))["stake"] == 0
+
+
+def test_settle_dead_heat_refund_and_void():
+    """みにの反例（💚20261120-2）：3着同着・取消返還・不成立。"""
+    # 3着同着：3-5-7 と 3-5-9 の両方が的中組。どちらを買っていても払う
+    heat = _res([(3, 1), (5, 2), (7, 3), (9, 3)], payouts={"3-5-7": 1380, "3-5-9": 2760})
+    assert heat["actual"] is None and heat["label"] == "3-5-7・3-5-9"
+    st = settle_purchase({"kind": "buy", "stakes": {"3-5-9": 100, "1-2-3": 100}, "total": 200}, heat)
+    assert st["returned"] == 2760 and st["status"] == "settled"
+    # 取消返還：8番が取消。8番の入った組 200円は返す。当たり 980円＋返還 200円＝1,180円
+    scr = _res([(1, 1), (2, 2), (4, 3)], finishers=10, scratched={8}, payouts={"1-2-4": 980})
+    st = settle_purchase({"kind": "buy", "stakes": {"1-2-4": 100, "1-2-8": 200}, "total": 300}, scr)
+    assert st["returned"] == 1180 and st["refund"] == 200
+    # 不成立：完走2頭。全額返す
+    void = _res([(1, 1), (2, 2)], finishers=2)
+    st = settle_purchase({"kind": "buy", "stakes": {"1-2-3": 300}, "total": 300}, void)
+    assert st["status"] == "refunded_void" and st["returned"] == 300 and st["counted"]
+
+
+def test_revision_keeps_original_mode_and_ledger_protected(tmp_path, live_paths):
+    s = Store(tmp_path / "p.sqlite")
+    eid = s.add(RK, "buy", {"1-2-3": 100}, data_mode="live")
+    s.add(RK, "buy", {"1-2-3": 200}, data_mode="check", entry_id=eid)    # 検証データを見ながら直しても
+    assert [e["data_mode"] for e in s.entries()] == ["live"] and len(s.entries(data_mode="check")) == 0
+    with pytest.raises(ValueError):
+        Store(live_paths.ledger_path, protect=(live_paths.ledger_path,))
+    with pytest.raises(ValueError):    # 名前を変えても、台帳の中身なら使わない
+        import shutil
+        shutil.copy(live_paths.ledger_path, tmp_path / "x.sqlite")
+        Store(tmp_path / "x.sqlite")
+
+
+def test_concurrent_revisions_do_not_break(tmp_path):
+    s = Store(tmp_path / "p.sqlite")
+    eid = s.add(RK, "buy", {"1-2-3": 100})
+    errs = []
+
+    def work(i):
+        try:
+            s.add(RK, "buy", {"1-2-3": 100 * (i + 2)}, entry_id=eid)
+        except Exception as exc:  # noqa: BLE001
+            errs.append(exc)
+    ts = [threading.Thread(target=work, args=(i,)) for i in range(20)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert not errs and len(s.history(eid)) == 21
 
 
 # ---------------- 合成の「これからのレース」 ----------------
@@ -323,13 +376,13 @@ def test_versions_compare_and_decision(server, live_paths):
 
 def test_one_tap_skip_returns_to_race(server):
     app, port = server
-    nxt = pages.url("/race", rk=RK, saved="skip")
-    data = {"token": app.token, "rk": RK, "kind": "skip", "m": "ml_lgbm", "tp": "15m", "next": nxt}
+    data = {"token": app.token, "rk": RK, "kind": "skip", "m": "ml_lgbm", "tp": "15m", "back": "race", "tab": "ml"}
     code, _, headers = _req(port, "/buy", data)
-    assert code == 303 and headers["Location"] == nxt and app.store.entries()[0]["kind"] == "skip"
-    code, _, headers = _req(port, "/buy", {**data, "next": "//evil.example/race?x"})
-    assert headers["Location"].startswith("/history/detail")     # よそへは飛ばさない
-    code, body, _ = _req(port, nxt)
+    loc = headers["Location"]
+    assert code == 303 and loc.startswith("/race?") and "saved=skip" in loc and app.store.entries()[0]["kind"] == "skip"
+    code, _, headers = _req(port, "/buy", {**data, "tab": "//evil.example", "tp": "x", "next": "//evil.example/race?x"})
+    assert headers["Location"].startswith("/race?rk=") and "evil" not in headers["Location"]   # よそへは飛ばさない
+    code, body, _ = _req(port, loc)
     assert "見送りを記録したよ" in body
 
 
@@ -375,3 +428,121 @@ def test_notify_loop_sends_once(live_paths, tmp_path, monkeypatch):
             stop.set()
     notify_loop(app, stop, interval=0, sender=sender)
     assert sent and sent[0][0].startswith("京都11R") and "自信度A" in sent[0][1]
+
+
+# ---------------- みにの独立検証（💚20261120-2）の反例 ----------------
+
+def test_check_does_not_pass_without_material():
+    race = {"race_date": "2026-11-22", "post_time": "15:40"}
+    p = _pred([3, 7, 11, 1, 2])
+    bare = {**p, "horses": [{"n": None}], "inputs": {"card_fetched_at": "2026-11-22T14:30:00+09:00"}}
+    items = {i["label"]: i for i in checks.pre_publish_check(bare, {"3-7-11": 100}, race)}
+    assert items["取消・除外の馬が買い目に無い"]["ok"] is None          # 取消情報が無い → 判定できない
+    assert items["組の形（3頭・出走している馬番）"]["ok"] is None       # 出走表が無い → 照合できない
+    late = {**p, "inputs": {**p["inputs"], "card_fetched_at": "2026-11-22T16:10:00+09:00"}}
+    fresh = {i["label"]: i for i in checks.pre_publish_check(late, {"3-7-11": 100}, race)}["出馬表の新しさ"]
+    assert fresh["ok"] is False and "発走の" in fresh["detail"]          # 発走後の取得は×
+    naive = {**p, "inputs": {**p["inputs"], "card_fetched_at": "2026-11-22T14:30:00"}}
+    assert {i["label"]: i for i in checks.pre_publish_check(naive, {"3-7-11": 100}, race)}["出馬表の新しさ"]["ok"] is True
+    four = {i["label"]: i for i in checks.pre_publish_check(p, {"1-1-3-7": 100}, race)}
+    assert four["組の形（3頭・出走している馬番）"]["ok"] is False        # 4つ書いた組は通さない
+
+
+def test_check_uses_scratches_after_prediction():
+    race = {"race_date": "2026-11-22", "post_time": "15:40"}
+    p = _pred([3, 7, 11, 1, 2])                        # 予想のときは取消なし
+    item = {i["label"]: i for i in checks.pre_publish_check(p, {"3-7-11": 100}, race, scratched_now={11})}
+    assert item["取消・除外の馬が買い目に無い"]["ok"] is False and "予想の後に取消" in item["取消・除外の馬が買い目に無い"]["detail"]
+    assert ("warn", "取消あり") in checks.card_flags(p, {"3-7-11": 100}, race, False, scratched_now={11})
+    z = [t for _, t in checks.change_conditions({**p, "confidence": "Z"}, "15m")]
+    assert any("材料が足りず" in t for t in z) and not any("割れやすいレース" in t for t in z)
+
+
+def test_recent_order_counts_and_months(live_paths, tmp_path):
+    src = Cache(live_paths).get("live")
+    for n in (9, 12):
+        src.races[f"2026-11-22|東京|{n}"] = {"race_key": f"2026-11-22|東京|{n}", "race_date": "2026-11-22",
+                                            "venue": "東京", "race_number": n, "post_time": None}
+    keys = {"2026-11-22|東京|9", "2026-11-22|東京|12"}
+    assert pages._recent_keys(src, keys, "50") == keys
+    assert pages._recent_keys(src, keys, "1") == {"2026-11-22|東京|12"}      # 12R の方が新しい
+    store = Store(tmp_path / "p.sqlite")
+    src.results[RK] = _res([(3, 1), (7, 2), (11, 3)], payouts={"3-7-11": 500})
+    store.add(RK, "buy", {"3-7-11": 100})
+    store.add(RK, "buy", {"1-2-3": 100})
+    real = pages._real(src, store)
+    assert real["races"] == 1 and real["entries"] == 2 and real["stake"] == 200 and real["returned"] == 500
+    src.results.pop(RK)
+    src.results[RK] = _res([(3, 1), (7, 2), (11, 3)])   # 払戻が分からない → 回収率に入れない
+    real = pages._real(src, store)
+    assert real["unsettled"] == 2 and real["stake"] == 0 and real["roi"] is None
+    # 月別は12か月で切らない
+    src.settlements = [{"race_key": f"20{24 + i // 12}-{i % 12 + 1:02d}-01|東京|1", "time_point": "1h", "method": "ml_lgbm",
+                        "wallet": "ev_weighted", "status": "settled", "stake": 100, "returned": 0, "hits": []} for i in range(15)]
+    out = pages.results_conditions_page({"token": "t", "mode": "live"}, src, store, {"n": "all", "d": "month"})
+    assert out.count("<tr>") == 16
+
+
+def test_unsettled_wallet_is_not_zero_yen(live_paths):
+    src = Cache(live_paths).get("live")
+    src.settlements = [{"race_key": RK, "time_point": "15m", "method": "ml_lgbm", "wallet": "ev_weighted", "status": "settled",
+                        "stake": 1000, "returned": 2200, "hits": ["3-7-11"]},
+                       {"race_key": "2026-11-22|京都|10", "time_point": "15m", "method": "ml_lgbm", "wallet": "ev_weighted",
+                        "status": "unsettled_no_payout", "stake": 1000, "returned": 0, "hits": []}]
+    row = pages.wallet_table(src, "ev_weighted")[0]
+    assert row["roi"] == 2.2 and row["pending"] == 1
+
+
+def test_amount_only_change_is_reported():
+    a = _pred([3, 7, 11, 1, 2], stakes={"3-7-11": 600})
+    b = _pred([3, 7, 11, 1, 2], stakes={"3-7-11": 1200})
+    lines = pages._change_lines(a, b, "ev_weighted")
+    assert any("金額だけ変わった" in x for x in lines)
+
+
+def test_csv_cells_are_not_formulas(live_paths, tmp_path):
+    src = Cache(live_paths).get("live")
+    store = Store(tmp_path / "p.sqlite")
+    store.add(RK, "buy", {"3-7-11": 100}, memo="=HYPERLINK(\"http://x\")")
+    out = pages.purchases_csv(src, store)
+    assert "'=HYPERLINK" in out and ",=HYPERLINK" not in out
+
+
+def test_check_mode_records_are_not_called_real(live_paths, tmp_path):
+    src = Cache(live_paths).get("check")
+    out = pages.results_page({"token": "t", "mode": "check"}, src, Store(tmp_path / "p.sqlite"), {})
+    assert "練習の記録" in out and "実購入の回収率" not in out
+
+
+def test_app_id_and_login_lock_is_atomic(server, live_paths, tmp_path):
+    app, port = server
+    assert _req(port, "/app-id")[1] == "keiba-confirm-app"
+    lan = App(live_paths, tmp_path / "q.sqlite", passphrase="kusamochi-2026")
+    res = []
+    ts = [threading.Thread(target=lambda: res.append(lan.try_login("10.0.0.9", "wrong"))) for _ in range(30)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert res.count("ng") == 5 and res.count("locked") == 25
+    assert lan.try_login("10.0.0.9", "kusamochi-2026") == "locked"
+
+
+def test_races_filter_soon_and_warn(live_paths, tmp_path, monkeypatch):
+    from datetime import datetime
+    monkeypatch.setattr(pages, "now_jst", lambda: datetime(2026, 11, 22, 15, 0, tzinfo=checks.JST))
+    src = Cache(live_paths).get("live")
+    store = Store(tmp_path / "p.sqlite")
+    ctx = {"token": "t", "mode": "live"}
+    out = pages.races_page(ctx, src, store, {"day": "2026-11-22", "f": "soon"})
+    assert "発走60分以内 1" in out and "京都11R" in out.replace(" ", "")
+    monkeypatch.setattr(pages, "now_jst", lambda: datetime(2026, 11, 22, 9, 0, tzinfo=checks.JST))
+    out = pages.races_page(ctx, src, store, {"day": "2026-11-22", "f": "soon"})
+    assert "あてはまるレースは無いよ" in out
+
+
+def test_history_two_weeks_and_compare_reasons(live_paths, tmp_path, monkeypatch):
+    src = Cache(live_paths).get("live")
+    store = Store(tmp_path / "p.sqlite")
+    out = pages.history_page({"token": "t", "mode": "live"}, src, store, {"f": "2w"})
+    assert "2週間" in out
+    out = pages.compare_page({"token": "t", "mode": "live"}, src, store, {"rk": RK, "tp": "15m"})
+    assert "組：" in out

@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+from ..settle import settle_trio
 
 UNIT = 100
 MAX_PER_COMBO = 1_000_000
@@ -64,9 +67,21 @@ def clean_stakes(raw) -> dict:
 
 
 class Store:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, protect: tuple = ()):
+        """protect：書いてはいけないファイル（予想の台帳など）。同じファイルを指していたら開かない。"""
         self.path = Path(path)
+        for p in protect:
+            if p and Path(p).exists() and self.path.exists() and self.path.resolve().samefile(Path(p).resolve()):
+                raise ValueError(f"購入記録の保存先が予想の台帳と同じファイル：{self.path}")
+            if p and self.path.resolve() == Path(p).resolve():
+                raise ValueError(f"購入記録の保存先が予想の台帳と同じ場所：{self.path}")
+        if self.path.exists():
+            with sqlite3.connect(f"file:{self.path}?mode=ro", uri=True) as c:
+                tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if tables & {"predictions", "settlements", "runs"}:
+                raise ValueError(f"このファイルは予想の台帳なので、購入記録には使えない：{self.path}")
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.executescript(SCHEMA)
         for t in TRIGGERS:
@@ -88,21 +103,25 @@ class Store:
         if kind == "buy" and not stakes:
             raise InputError("買った組と金額を1つ以上入れてね")
         memo = (memo or "").strip()[:1000]
-        rev = 1
-        if entry_id:
-            row = self.conn.execute("SELECT MAX(rev), race_key FROM purchases WHERE entry_id=?", (entry_id,)).fetchone()
-            if not row or row[0] is None:
-                raise InputError("直す記録が見つからない")
-            if row[1] != race_key:
-                raise InputError("別のレースの記録は直せない")
-            rev = row[0] + 1
-        else:
-            entry_id = uuid.uuid4().hex[:12]
-        self.conn.execute("INSERT INTO purchases (entry_id,rev,created_at,race_key,method,time_point,kind,stakes,memo,data_mode)"
-                          " VALUES (?,?,?,?,?,?,?,?,?,?)",
-                          (entry_id, rev, self._now(), race_key, method, time_point, kind,
-                           json.dumps(stakes, ensure_ascii=False, sort_keys=True), memo, data_mode))
-        self.conn.commit()
+        with self._lock:   # 同時に2つ直しても、rev の取り合いで壊れないように1つずつ
+            rev = 1
+            if entry_id:
+                row = self.conn.execute(
+                    "SELECT rev, race_key, data_mode FROM purchases WHERE entry_id=? ORDER BY rev DESC LIMIT 1",
+                    (entry_id,)).fetchone()
+                if not row:
+                    raise InputError("直す記録が見つからない")
+                if row[1] != race_key:
+                    raise InputError("別のレースの記録は直せない")
+                rev = row[0] + 1
+                data_mode = row[2]   # 直しても、最初に記録したときの見方（実購入か検証か）のまま
+            else:
+                entry_id = uuid.uuid4().hex[:12]
+            self.conn.execute("INSERT INTO purchases (entry_id,rev,created_at,race_key,method,time_point,kind,stakes,memo,data_mode)"
+                              " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                              (entry_id, rev, self._now(), race_key, method, time_point, kind,
+                               json.dumps(stakes, ensure_ascii=False, sort_keys=True), memo, data_mode))
+            self.conn.commit()
         return entry_id
 
     def entries(self, race_key: str | None = None, data_mode: str | None = None, include_void: bool = False) -> list[dict]:
@@ -150,14 +169,24 @@ class Store:
             " AND race_key NOT LIKE 'improve|%'")}
 
 
-def settle_purchase(entry: dict, actual: str | None, payout_yen: int | None) -> dict:
-    """本人の購入記録を、確定した三連複で精算する（払戻は100円あたり）。"""
+SETTLE_LABEL = {"pending": "結果待ち", "unsettled_no_payout": "払戻待ち（払戻がまだ分からない）",
+                "refunded_void": "返還（レース不成立）", "settled": "精算ずみ"}
+
+
+def settle_purchase(entry: dict, res: dict | None) -> dict:
+    """本人の購入記録を、予想の精算と同じ処理（settle.settle_trio）で精算する。
+
+    同着（的中組が複数）・取消／除外の返還・不成立（完走3頭未満）を扱う。払戻が分からないときは
+    「払戻待ち」にして、金額と回収率の計算から外す（0円にはしない）。
+    """
     stake = entry["total"]
     if entry["kind"] != "buy":
-        return {"status": entry["kind"], "stake": 0, "returned": 0, "hit": None}
-    if not actual:
-        return {"status": "pending", "stake": stake, "returned": 0, "hit": None}
-    if actual in entry["stakes"] and payout_yen is None:
-        return {"status": "no_payout", "stake": stake, "returned": 0, "hit": actual}
-    ret = entry["stakes"].get(actual, 0) * (payout_yen or 0) // 100
-    return {"status": "settled", "stake": stake, "returned": ret, "hit": actual if actual in entry["stakes"] else None}
+        return {"status": entry["kind"], "stake": 0, "returned": 0, "hit": None, "refund": 0, "counted": False}
+    res = res or {}
+    if not res.get("has_result"):
+        return {"status": "pending", "stake": stake, "returned": 0, "hit": None, "refund": 0, "counted": False}
+    payouts = res.get("payouts") or None
+    st = settle_trio(entry["stakes"], int(res.get("finishers") or 0), set(res.get("scratched") or ()), payouts)
+    refund = sum(entry["stakes"][c] for c in st.refunds) if st.status != "refunded_void" else stake
+    return {"status": st.status, "stake": stake, "returned": st.returned, "hit": "・".join(st.hits) or None,
+            "refund": refund, "counted": st.status in ("settled", "refunded_void")}
