@@ -4,6 +4,9 @@
   中身：レース条件、出走馬（取消を除く）、各馬の近4走・父・母の父・騎手・調教師、その時点の単勝・三連複オッズ（合格したときだけ）
   入れないもの：学習モデル・ルールの予想（独立させるため）、結果、締切後の情報
 受け取る（import）：まむの予想（JSON。形は docs/requests/mam-format.md）を検証して、台帳に method="text_ai" で入れる
+  - 返し先は data/mam/inbox/（outbox は入力の束の置き場なので、そこには置かない）。収集の見回りのたびに新しいファイルだけ読む
+  - 読んだ結果（受け付けた数・断った理由）は data/mam/inbox_results/<ファイル名> に書く。inbox のファイルは消さない・動かさない
+  - 決めた形にない項目（例：trio_odds・win_prob）があれば、その予想は受け付けない（確率が黙って落ちるのを防ぐ）
   - 作成時刻（generated_at）が、その時点の締切より後なら受け付けない
   - 馬番は、その時点の出走馬（取消を除く）だけ
   - 三連複の確率があれば合計1に直して使う。無ければ順位から組を作るが、確率の裏づけが無いので配分は0円
@@ -11,6 +14,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from itertools import combinations
@@ -68,9 +72,22 @@ class Rejected(Exception):
     pass
 
 
+ALLOWED_KEYS = {"schema", "race_key", "time_point", "generated_at", "author", "ranking", "trios", "confidence", "comment"}
+
+
 def _validate(pred: dict, state: dict, inputs: dict) -> tuple[dict, list]:
+    if not isinstance(pred, dict):
+        raise Rejected("予想が JSON のオブジェクトでない")
+    if pred.get("schema") == SCHEMA_IN:
+        raise Rejected("これは入力の束（outbox 用）。予想は keiba-mam-prediction-v1 の形で返す")
     if pred.get("schema") != SCHEMA_OUT:
         raise Rejected(f"schema が {SCHEMA_OUT} でない")
+    extra = sorted(set(pred) - ALLOWED_KEYS)
+    if extra:
+        raise Rejected(f"決めた形にない項目がある：{', '.join(extra)}（使える項目は mam-format.md の2章）")
+    for t in pred.get("trios", []):
+        if not isinstance(t, dict) or set(t) - {"combo", "p"} or "combo" not in t:
+            raise Rejected("trios の各要素は {\"combo\": \"1-2-3\", \"p\": 0.1} の形にする")
     rk, tp = pred.get("race_key"), pred.get("time_point")
     if rk not in state["races"] or (rk, tp) not in inputs:
         raise Rejected(f"知らないレースか時点：{rk} {tp}")
@@ -99,10 +116,9 @@ def _validate(pred: dict, state: dict, inputs: dict) -> tuple[dict, list]:
     return {"race": r, "nums": nums, "ranking": ranking, "trios": trios, "gen": gen}, sorted(nums)
 
 
-def import_predictions(paths, file: Path) -> dict:
+def import_predictions(paths, file: Path, _ctx=None) -> dict:
     root = paths.data_dir / "live"
-    state = _state(root)
-    _, _, inputs = live_tables(root, state, _snapshots(root))
+    state, inputs = _ctx or _load(root)
     data = json.loads(Path(file).read_text(encoding="utf-8"))
     preds = data if isinstance(data, list) else [data]
     led = Ledger(paths.ledger_path)
@@ -144,3 +160,43 @@ def import_predictions(paths, file: Path) -> dict:
     led.commit()
     led.close()
     return {"accepted": ok, "rejected": rejected}
+
+
+def _load(root: Path):
+    state = _state(root)
+    _, _, inputs = live_tables(root, state, _snapshots(root))
+    return state, inputs
+
+
+def import_inbox(paths) -> dict:
+    """data/mam/inbox/*.json のうち、まだ読んでいない中身（SHA-256）だけ取り込む。
+    書きかけで読めないファイルは「読めない」と記録し、中身が変われば次の見回りで読み直す。"""
+    inbox = paths.data_dir / "mam" / "inbox"
+    results = paths.data_dir / "mam" / "inbox_results"
+    if not inbox.exists():
+        return {"files": 0}
+    index_path = results / "processed.json"
+    index = json.loads(index_path.read_text()) if index_path.exists() else {}
+    todo = []
+    for f in sorted(inbox.glob("*.json")):
+        digest = hashlib.sha256(f.read_bytes()).hexdigest()
+        if index.get(f.name, {}).get("sha256") != digest:
+            todo.append((f, digest))
+    if not todo:
+        return {"files": 0}
+    results.mkdir(parents=True, exist_ok=True)
+    ctx = _load(paths.data_dir / "live")
+    summary = {"files": len(todo), "accepted": 0, "rejected": 0, "unreadable": 0}
+    for f, digest in todo:
+        try:
+            out = import_predictions(paths, f, ctx)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            out = {"accepted": 0, "rejected": [], "unreadable": f"JSON として読めない：{exc}"}
+            summary["unreadable"] += 1
+        summary["accepted"] += out["accepted"]
+        summary["rejected"] += len(out["rejected"])
+        rec = {"file": f.name, "sha256": digest, "read_at": datetime.now().astimezone().isoformat(timespec="seconds"), **out}
+        (results / f.name).write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+        index[f.name] = {"sha256": digest, "read_at": rec["read_at"]}
+    index_path.write_text(json.dumps(index, ensure_ascii=False, indent=1), encoding="utf-8")
+    return summary

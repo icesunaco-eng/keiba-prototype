@@ -263,3 +263,38 @@ def test_mam_partial_trios_are_reference_only(tmp_path):
         assert any("全組の確率がそろっていない" in r for r in p["reasons"])
     finally:
         jra.parse_card = orig
+
+
+def test_mam_inbox(tmp_path):
+    """返し先 inbox：新しい中身だけ読む・書きかけは読み直す・決めた形にない項目や入力の束は断る。"""
+    from keiba.live.mam import export_packets, import_inbox
+    paths, col = _setup(tmp_path)
+    export_packets(paths)
+    inbox = tmp_path / "mam" / "inbox"
+    inbox.mkdir(parents=True)
+    assert import_inbox(paths) == {"files": 0}
+    base = {"schema": "keiba-mam-prediction-v1", "race_key": RK, "time_point": "1h", "author": "mam",
+            "generated_at": "2025-08-30T14:35:00+09:00"}
+    (inbox / "a.json").write_text('{"schema": "keiba-mam-pred')  # 書きかけ
+    wrong = dict(base, ranking=[3, 1, 2], trio_odds=[{"combo": "1-2-3", "prob": 0.1}], win_prob={"1": 0.3})
+    (inbox / "b.json").write_text(json.dumps(wrong))
+    packet = json.loads(next((tmp_path / "mam" / "outbox").glob("*.json")).read_text())
+    (inbox / "c.json").write_text(json.dumps(packet))
+    out = import_inbox(paths)
+    assert out == {"files": 3, "accepted": 0, "rejected": 2, "unreadable": 1}
+    res = tmp_path / "mam" / "inbox_results"
+    assert "trio_odds" in json.loads((res / "b.json").read_text())["rejected"][0]["reason"]
+    assert "入力の束" in json.loads((res / "c.json").read_text())["rejected"][0]["reason"]
+    assert import_inbox(paths) == {"files": 0}  # 同じ中身は読み直さない
+    (inbox / "a.json").write_text(json.dumps(dict(base, ranking=[3, 1, 2], trios=[{"combo": "1-2-3", "p": 0.2}])))
+    out = import_inbox(paths)
+    assert out["files"] == 1 and out["accepted"] == 1
+    assert sorted(p.name for p in inbox.iterdir()) == ["a.json", "b.json", "c.json"]  # 消さない・動かさない
+
+
+def test_mam_example_file_is_accepted_shape():
+    from pathlib import Path
+    from keiba.live.mam import ALLOWED_KEYS, SCHEMA_OUT
+    ex = json.loads((Path(__file__).parent.parent / "docs" / "requests" / "mam-prediction-example.json").read_text())
+    assert ex["schema"] == SCHEMA_OUT and set(ex) <= ALLOWED_KEYS
+    assert all(set(t) <= {"combo", "p"} for t in ex["trios"])
