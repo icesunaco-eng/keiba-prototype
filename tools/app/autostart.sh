@@ -11,9 +11,17 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$REPO/data/app/app.log"
 LAN=""
 [ "$2" = "--lan" ] && LAN=" --lan"
+# 登録の状態：loaded（入っている）／absent（入っていない）／unknown（調べられなかった）
+job_state() {
+  if OUT=$(launchctl print "gui/$(id -u)/$LABEL" 2>&1); then echo loaded; return; fi
+  case "$OUT" in
+    *"Could not find service"*|*"could not find service"*|*"No such process"*) echo absent ;;
+    *) echo unknown ;;
+  esac
+}
 case "$1" in
 install)
-  mkdir -p "$REPO/data/app"
+  mkdir -p "$REPO/data/app" "$(dirname "$PLIST")"
   cat > "$PLIST" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -33,33 +41,44 @@ PL
   echo "入れたよ：${PLIST}（ログ ${LOG}）"
   ;;
 uninstall)
-  if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
-    if ! launchctl bootout "gui/$(id -u)/$LABEL"; then
-      echo "止められなかったよ（launchctl bootout が失敗）。plist はそのまま残した：${PLIST}" >&2
-      exit 1
-    fi
+  ST=$(job_state)
+  if [ "$ST" = unknown ]; then
+    echo "自動起動の状態を調べられなかったので、外すのをやめたよ。plist はそのまま：${PLIST}" >&2
+    exit 1
+  fi
+  if [ "$ST" = loaded ] && ! launchctl bootout "gui/$(id -u)/$LABEL"; then
+    echo "止められなかったよ（launchctl bootout が失敗）。plist はそのまま残した：${PLIST}" >&2
+    exit 1
+  fi
+  if [ "$(job_state)" != absent ]; then
+    echo "まだ止まっていない、または状態が分からないよ。plist はそのまま：${PLIST}" >&2
+    exit 1
   fi
   if [ -f "$PLIST" ]; then
     if command -v trash >/dev/null; then trash "$PLIST"; else mv "$PLIST" "$HOME/.Trash/"; fi
   fi
-  if [ -f "$PLIST" ] || launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
-    echo "外しきれなかったよ。status で確かめてね" >&2
+  if [ -f "$PLIST" ]; then
+    echo "plist をゴミ箱に移せなかったよ：${PLIST}" >&2
     exit 1
   fi
   echo "外したよ（plist はゴミ箱）"
   ;;
 status)
-  if INFO=$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null); then
+  ST=$(job_state)
+  if [ "$ST" = loaded ]; then
     echo "入っているよ：${PLIST}"
-    echo "$INFO" | grep -E "^[[:space:]]*(state|pid) =" | head -2
-    if curl -s --max-time 2 "http://127.0.0.1:8765/app-id" | grep -q "keiba-confirm-app"; then
+    launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -E "^[[:space:]]*(state|pid) =" | head -2
+    if [ "$(curl -s --max-time 2 "http://127.0.0.1:8765/app-id" 2>/dev/null)" = "keiba-confirm-app" ]; then
       echo "応答あり：http://127.0.0.1:8765/"
     else
-      echo "まだ応答が無いよ（ログ ${LOG}）"
+      echo "まだ応答が無い、または別のものが応答しているよ（ログ ${LOG}）"
     fi
-  else
+  elif [ "$ST" = absent ]; then
     echo "入っていないよ（自動起動は未登録）"
     exit 3
+  else
+    echo "状態を調べられなかったよ（launchctl print の失敗）" >&2
+    exit 4
   fi
   ;;
 *) echo "使い方: sh ${0} install|uninstall|status"; exit 2 ;;

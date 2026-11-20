@@ -323,6 +323,10 @@ def test_new_pages_render(live_paths, tmp_path, monkeypatch):
     store = Store(tmp_path / "p.sqlite")
     ctx = {"mode": "live", "theme": "auto", "size": "normal", "token": "t", "refresh": "on"}
     race = pages.race_page(ctx, src, store, {"rk": RK, "tp": "15m"})
+    assert "確認できない 1件" in race   # 最新の出馬表で取消を照合できていない
+    src.scratched_now[RK] = {5}
+    src.card_checked_at[RK] = "2026-11-22T15:00:00+09:00"
+    race = pages.race_page(ctx, src, store, {"rk": RK, "tp": "15m"})
     assert "チェック ✓" in race and "見送る（1タップ）" in race and 'http-equiv="refresh"' in race
     chk = pages.check_page(ctx, src, store, {"rk": RK, "tp": "15m"})
     assert "公開前チェック" in chk and "買い目の偏り" in chk and "予想が変わる条件" in chk
@@ -546,3 +550,170 @@ def test_history_two_weeks_and_compare_reasons(live_paths, tmp_path, monkeypatch
     assert "2週間" in out
     out = pages.compare_page({"token": "t", "mode": "live"}, src, store, {"rk": RK, "tp": "15m"})
     assert "組：" in out
+
+
+# ---------------- みにの再検証（💚20261120-4）の反例 ----------------
+
+def test_dead_heat_with_missing_payout_waits():
+    heat = _res([(3, 1), (5, 2), (7, 3), (9, 3)], payouts={"3-5-7": 1380})       # 3-5-9 の払戻が欠けている
+    assert heat["winners"] == {"3-5-7", "3-5-9"} and heat["payouts_missing"] == ["3-5-9"]
+    st = settle_purchase({"kind": "buy", "stakes": {"3-5-9": 100}, "total": 100}, heat)
+    assert st["status"] == "unsettled_no_payout" and not st["counted"]
+    ok = settle_purchase({"kind": "buy", "stakes": {"3-5-7": 100}, "total": 100}, heat)
+    assert ok["status"] == "settled" and ok["returned"] == 1380
+    three = _res([(1, 1), (2, 3), (4, 3), (6, 3)], payouts={"1-2-4": 900})
+    assert three["winners"] == {"1-2-4", "1-2-6", "1-4-6"}
+    assert settle_purchase({"kind": "buy", "stakes": {"1-4-6": 100}, "total": 100}, three)["status"] == "unsettled_no_payout"
+
+
+def test_unreadable_result_is_not_void(live_paths):
+    src = Cache(live_paths).get("live")
+    assert RK not in src.results          # 結果の原本が無い・読めないときは結果待ち
+    st = settle_purchase({"kind": "buy", "stakes": {"1-2-3": 300}, "total": 300}, src.results.get(RK))
+    assert st["status"] == "pending" and st["returned"] == 0
+
+
+def test_scratch_check_needs_latest_card():
+    race = {"race_date": "2026-11-22", "post_time": "15:40"}
+    p = _pred([3, 7, 11, 1, 2], scratched=[5])      # 予想のときの取消情報だけ
+    item = {i["label"]: i for i in checks.pre_publish_check(p, {"3-7-11": 100}, race)}["取消・除外の馬が買い目に無い"]
+    assert item["ok"] is None and "照合できていない" in item["detail"]
+    item = {i["label"]: i for i in checks.pre_publish_check(p, {"3-7-11": 100}, race, scratched_now=set(),
+                                                             checked_at="2026-11-22T15:10:00+09:00")}["取消・除外の馬が買い目に無い"]
+    assert item["ok"] is True and "11/22 15:10" in item["detail"]
+    flags = checks.card_flags(p, {"3-7-11": 100}, race, False)
+    assert ("warn", "確認できない項目あり") in flags
+
+
+def test_early_prediction_is_labeled():
+    race = {"race_date": "2026-11-21", "post_time": "10:30"}
+    p = {**_pred([3, 7, 11, 1, 2]), "inputs": {"card_fetched_at": "2026-11-20T10:15:00+09:00", "scratched_known": []}}
+    assert checks.early_prediction(p, race, "1h")
+    item = {i["label"]: i for i in checks.pre_publish_check(p, {"3-7-11": 100}, race, tp="1h")}["時点の材料"]
+    assert item["ok"] is False
+    assert ("warn", "早めの参考予想") in checks.card_flags(p, {}, race, False, tp="1h")
+    fresh = {**p, "inputs": {"card_fetched_at": "2026-11-21T09:20:00+09:00"}}
+    assert checks.early_prediction(fresh, race, "1h") is None
+
+
+def test_versions_compare_skips_unsettled_side(live_paths):
+    from keiba.app.data import version_compare
+    led = Ledger(live_paths.ledger_path)
+    for rk, a, b in ((RK, ("settled", 100, 200), ("settled", 100, 200)),
+                     ("2026-11-22|京都|10", ("unsettled_no_payout", 100, 0), ("settled", 100, 350))):
+        for v, (st, stake, ret) in (("v1", a), ("v2", b)):
+            led.add_settlement(rk, "1h", "ml_lgbm", v, "ref_top10_equal", {"status": st, "stake": stake, "returned": ret, "hits": []})
+    led.commit()
+    led.close()
+    row = version_compare(live_paths.ledger_path, "v1", "v2")["rows"][0]
+    assert row["races"] == 1 and row["a"]["roi"] == 2.0 and row["b"]["roi"] == 2.0
+
+
+def test_settlement_follows_shown_version(live_paths):
+    src = Cache(live_paths).get("live")
+    src.versions = [{"version": "live-old"}, {"version": "live-new"}]
+    src.preds[RK][("ml_lgbm", "15m")] = {**src.preds[RK][("ml_lgbm", "15m")], "version": "live-new"}
+    src.settlements = [
+        {"race_key": RK, "time_point": "15m", "method": "ml_lgbm", "version": "live-new", "wallet": "ev_weighted",
+         "status": "settled", "stake": 100, "returned": 220, "hits": ["3-7-11"]},
+        {"race_key": RK, "time_point": "15m", "method": "ml_lgbm", "version": "live-old", "wallet": "ev_weighted",
+         "status": "unsettled_no_payout", "stake": 100, "returned": 0, "hits": []}]
+    row = pages.wallet_table(src, "ev_weighted")[0]
+    assert (row["races"], row["roi"], row["pending"]) == (1, 2.2, 0)
+
+
+def test_old_mode_moves_are_read_as_first_mode(tmp_path):
+    path = tmp_path / "p.sqlite"
+    s = Store(path)
+    eid = s.add(RK, "buy", {"1-2-3": 100}, data_mode="live")
+    s.conn.execute("INSERT INTO purchases (entry_id,rev,created_at,race_key,method,time_point,kind,stakes,memo,data_mode)"
+                   " VALUES (?,2,'x',?,NULL,NULL,'buy','{\"1-2-3\": 200}','','check')", (eid, RK))   # 旧版で移った履歴
+    s.conn.commit()
+    e = s.entries()[0]
+    assert e["data_mode"] == "live" and e["mode_mixed"] and len(s.entries(data_mode="live")) == 1
+    s.add(RK, "buy", {"1-2-3": 300}, data_mode="check", entry_id=eid)
+    assert s.conn.execute("SELECT data_mode FROM purchases WHERE entry_id=? AND rev=3", (eid,)).fetchone()[0] == "live"
+
+
+def test_two_store_instances_revise_together(tmp_path):
+    path = tmp_path / "p.sqlite"
+    a, b = Store(path), Store(path)
+    eid = a.add(RK, "buy", {"1-2-3": 100})
+    errs = []
+
+    def work(st, yen):
+        try:
+            st.add(RK, "buy", {"1-2-3": yen}, entry_id=eid)
+        except Exception as exc:  # noqa: BLE001
+            errs.append(exc)
+    ts = [threading.Thread(target=work, args=(st, 100 * (i + 2))) for i, st in enumerate([a, b] * 5)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert not errs and len(a.history(eid)) == 11
+
+
+def test_store_path_with_symbols_makes_no_extra_file(tmp_path):
+    d = tmp_path / "x"
+    d.mkdir()
+    p = d / "p?a#b.sqlite"
+    Store(p).close()
+    Store(p).close()
+    assert sorted(x.name for x in d.iterdir()) == ["p?a#b.sqlite"]
+
+
+def test_compare_groups_and_ranked_horses(live_paths, tmp_path):
+    src = Cache(live_paths).get("live")
+    store = Store(tmp_path / "p.sqlite")
+    src.preds[RK] = {k: v for k, v in src.preds[RK].items() if k[0] == "ml_lgbm"}
+    out = pages.compare_page({"token": "t", "mode": "live"}, src, store, {"rk": RK, "tp": "15m"})
+    assert "1つだけ" in out and "割れた" not in out
+    src.preds[RK][("text_ai", "15m")] = {"horses": [{"n": 5, "rank": 2}, {"n": 3, "rank": 1}, {"n": 8, "rank": None}],
+                                         "trios": [], "confidence": None}
+    out = pages.horses_page({"token": "t", "mode": "live"}, src, store, {"rk": RK, "m": "mam", "tp": "15m"})
+    assert "1位" in out and "2位" in out and "順位だけ" in out and "較正した推定" not in out
+
+
+def test_two_weeks_lists_races_without_predictions(live_paths, tmp_path, monkeypatch):
+    import datetime as dt
+
+    class D(dt.date):
+        @classmethod
+        def today(cls):
+            return dt.date(2026, 11, 23)
+    monkeypatch.setattr(pages, "date", D)
+    src = Cache(live_paths).get("live")
+    src.races["2026-11-21|東京|1"] = {"race_key": "2026-11-21|東京|1", "race_date": "2026-11-21", "venue": "東京",
+                                     "race_number": 1, "post_time": "10:00"}
+    out = pages.history_page({"token": "t", "mode": "live"}, src, Store(tmp_path / "p.sqlite"), {"f": "2w"})
+    assert "東京1R" in out.replace(" ", "")
+
+
+def test_notify_once_when_scratch_and_a_overlap(live_paths, tmp_path, monkeypatch):
+    from datetime import datetime
+    from keiba.app import server as srv
+    app = App(live_paths, tmp_path / "p.sqlite")
+    monkeypatch.setattr(checks, "now_jst", lambda: datetime(2026, 11, 22, 15, 30, tzinfo=checks.JST))
+    src = app.cache.get("live")
+    src.scratched_now[RK] = {11}
+    sent = []
+    stop = threading.Event()
+    t = threading.Thread(target=srv.notify_loop, args=(app, stop, 0.05, 20, lambda a, b: sent.append(b)), daemon=True)
+    t.start()
+    import time
+    time.sleep(0.4)
+    stop.set()
+    t.join(2)
+    assert len(sent) == 1 and "取消" in sent[0] and "自信度A" in sent[0]
+
+
+def test_card_readability_rule():
+    from keiba.app.data import SCRATCH_VALUES
+    ok = [{"horse_number": 1, "scratch": None}, {"horse_number": 2, "scratch": "取消"}]
+    bad_key = [{"horse_number": 1}]
+    bad_val = [{"horse_number": 1, "scratch": "?"}]
+    bad_num = [{"horse_number": None, "scratch": None}]
+
+    def readable(card):
+        return bool(card) and all(isinstance(c.get("horse_number"), int) and c["horse_number"] > 0
+                                  and "scratch" in c and c["scratch"] in SCRATCH_VALUES for c in card)
+    assert readable(ok) and not readable(bad_key) and not readable(bad_val) and not readable(bad_num) and not readable([])

@@ -76,13 +76,16 @@ class Store:
             if p and self.path.resolve() == Path(p).resolve():
                 raise ValueError(f"購入記録の保存先が予想の台帳と同じ場所：{self.path}")
         if self.path.exists():
-            with sqlite3.connect(f"file:{self.path}?mode=ro", uri=True) as c:
+            c = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)
+            try:
                 tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            finally:
+                c.close()
             if tables & {"predictions", "settlements", "runs"}:
                 raise ValueError(f"このファイルは予想の台帳なので、購入記録には使えない：{self.path}")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        self.conn = sqlite3.connect(self.path, check_same_thread=False, timeout=10)
         self.conn.executescript(SCHEMA)
         for t in TRIGGERS:
             self.conn.execute(t)
@@ -103,44 +106,54 @@ class Store:
         if kind == "buy" and not stakes:
             raise InputError("買った組と金額を1つ以上入れてね")
         memo = (memo or "").strip()[:1000]
-        with self._lock:   # 同時に2つ直しても、rev の取り合いで壊れないように1つずつ
-            rev = 1
-            if entry_id:
-                row = self.conn.execute(
-                    "SELECT rev, race_key, data_mode FROM purchases WHERE entry_id=? ORDER BY rev DESC LIMIT 1",
-                    (entry_id,)).fetchone()
-                if not row:
-                    raise InputError("直す記録が見つからない")
-                if row[1] != race_key:
-                    raise InputError("別のレースの記録は直せない")
-                rev = row[0] + 1
-                data_mode = row[2]   # 直しても、最初に記録したときの見方（実購入か検証か）のまま
-            else:
-                entry_id = uuid.uuid4().hex[:12]
-            self.conn.execute("INSERT INTO purchases (entry_id,rev,created_at,race_key,method,time_point,kind,stakes,memo,data_mode)"
-                              " VALUES (?,?,?,?,?,?,?,?,?,?)",
-                              (entry_id, rev, self._now(), race_key, method, time_point, kind,
-                               json.dumps(stakes, ensure_ascii=False, sort_keys=True), memo, data_mode))
-            self.conn.commit()
-        return entry_id
+        new = not entry_id
+        entry_id = entry_id or uuid.uuid4().hex[:12]
+        with self._lock:   # 同じアプリの中では1つずつ
+            for attempt in range(20):   # 別のアプリ（別の接続）と rev がぶつかったら、読み直してやり直す
+                rev, mode = 1, data_mode
+                if not new:
+                    last = self.conn.execute("SELECT MAX(rev), MIN(race_key) FROM purchases WHERE entry_id=?", (entry_id,)).fetchone()
+                    if not last or last[0] is None:
+                        raise InputError("直す記録が見つからない")
+                    if last[1] != race_key:
+                        raise InputError("別のレースの記録は直せない")
+                    rev = last[0] + 1
+                    # 直しても、最初（rev 1）に記録したときの見方のまま。旧版で途中の rev が変わっていても最初に戻す
+                    mode = self.conn.execute("SELECT data_mode FROM purchases WHERE entry_id=? ORDER BY rev LIMIT 1",
+                                             (entry_id,)).fetchone()[0]
+                try:
+                    self.conn.execute("INSERT INTO purchases (entry_id,rev,created_at,race_key,method,time_point,kind,stakes,memo,data_mode)"
+                                      " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                      (entry_id, rev, self._now(), race_key, method, time_point, kind,
+                                       json.dumps(stakes, ensure_ascii=False, sort_keys=True), memo, mode))
+                    self.conn.commit()
+                    return entry_id
+                except sqlite3.IntegrityError:
+                    self.conn.rollback()
+                    if new:
+                        entry_id = uuid.uuid4().hex[:12]
+            raise InputError("同時に直されていて保存できなかったよ。もう一度保存してね")
 
     def entries(self, race_key: str | None = None, data_mode: str | None = None, include_void: bool = False) -> list[dict]:
         """各記録の一番新しい rev だけ（新しい順）。"""
-        q = ("SELECT p.entry_id,p.rev,p.created_at,p.race_key,p.method,p.time_point,p.kind,p.stakes,p.memo,p.data_mode,"
-             "(SELECT MIN(created_at) FROM purchases f WHERE f.entry_id=p.entry_id) FROM purchases p "
+        first_mode = "(SELECT f.data_mode FROM purchases f WHERE f.entry_id=p.entry_id ORDER BY f.rev LIMIT 1)"
+        q = (f"SELECT p.entry_id,p.rev,p.created_at,p.race_key,p.method,p.time_point,p.kind,p.stakes,p.memo,{first_mode},"
+             "(SELECT MIN(created_at) FROM purchases f WHERE f.entry_id=p.entry_id),"
+             "(SELECT COUNT(DISTINCT data_mode) FROM purchases f WHERE f.entry_id=p.entry_id) FROM purchases p "
              "WHERE p.rev=(SELECT MAX(rev) FROM purchases q WHERE q.entry_id=p.entry_id)")
         args: list = []
         if race_key:
             q += " AND p.race_key=?"
             args.append(race_key)
-        if data_mode:
-            q += " AND p.data_mode=?"
+        if data_mode:   # 見方は最初（rev 1）の記録で決める
+            q += f" AND {first_mode}=?"
             args.append(data_mode)
         q += " ORDER BY p.id DESC"
         out = []
         for r in self.conn.execute(q, args):
             e = {"entry_id": r[0], "rev": r[1], "updated_at": r[2], "race_key": r[3], "method": r[4], "time_point": r[5],
-                 "kind": r[6], "stakes": json.loads(r[7]), "memo": r[8], "data_mode": r[9], "created_at": r[10]}
+                 "kind": r[6], "stakes": json.loads(r[7]), "memo": r[8], "data_mode": r[9], "created_at": r[10],
+                 "mode_mixed": r[11] > 1}
             e["total"] = sum(e["stakes"].values())
             if include_void or e["kind"] != "void":
                 out.append(e)
@@ -186,6 +199,11 @@ def settle_purchase(entry: dict, res: dict | None) -> dict:
     if not res.get("has_result"):
         return {"status": "pending", "stake": stake, "returned": 0, "hit": None, "refund": 0, "counted": False}
     payouts = res.get("payouts") or None
+    missing = set(res.get("payouts_missing") or ()) & set(entry["stakes"])
+    if missing:
+        # 同着で的中組の払戻が一部欠けている：その組を買っているなら、0円にせず払戻待ち
+        return {"status": "unsettled_no_payout", "stake": stake, "returned": 0, "hit": "・".join(sorted(missing)),
+                "refund": 0, "counted": False}
     st = settle_trio(entry["stakes"], int(res.get("finishers") or 0), set(res.get("scratched") or ()), payouts)
     refund = sum(entry["stakes"][c] for c in st.refunds) if st.status != "refunded_void" else stake
     return {"status": st.status, "stake": stake, "returned": st.returned, "hit": "・".join(st.hits) or None,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from itertools import combinations
 import sqlite3
 import threading
 import time
@@ -45,6 +46,7 @@ ALLOC_STATUS = {
 MAIN_WALLET = {"live": "ev_weighted", "check": "ref_top10_equal"}
 WALLET_LABEL = {**ALLOC_LABEL, "ref_top10_equal": "参考：上位10組を100円ずつ", "ref_top5_equal": "参考：上位5組を100円ずつ"}
 MARKS = ("◎", "○", "★")
+SCRATCH_VALUES = (None, "取消", "除外")   # 出馬表の取消の欄（jra.parse_card）がとりうる値
 
 
 def distance_band(d) -> str:
@@ -89,16 +91,41 @@ def is_skip(p: dict, alloc: str) -> bool:
     return allocation_of(p, alloc).get("status") in ("zero_no_value", "zero_no_probability")
 
 
+def ro_connect(path) -> sqlite3.Connection:
+    """読取専用で開く。ファイル名に ? や # があっても別のファイルを作らないように、正しい file: URI にする。"""
+    return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+
+
+def winning_combos(finished: list) -> set[str]:
+    """着順から、的中になる三連複の組（同着なら複数）。finished：（馬番, 着順）。"""
+    top = [(int(n), int(pos)) for n, pos in finished if pos and pos <= 3]
+    if len(top) < 3:
+        return set()
+    out = set()
+    for c in combinations(top, 3):
+        inside = max(pos for _, pos in c)
+        outside = [pos for n, pos in top if (n, pos) not in c]
+        if all(pos >= inside for pos in outside):
+            out.add("-".join(map(str, sorted(n for n, _ in c))))
+    return out
+
+
 def make_result(finished: list, finishers: int, scratched: set, payouts: dict) -> dict:
-    """結果1レース分。finished：（馬番, 着順）。同着で3着内が4頭以上なら actual は無く、payouts に的中組が複数入る。"""
+    """結果1レース分。finished：（馬番, 着順）。同着で3着内が4頭以上なら actual は無く、payouts に的中組が複数入る。
+
+    winners は着順から出した的中組。払戻にその組が欠けていれば payouts_missing に入れる（その組は払戻待ち）。
+    """
     top = sorted(int(n) for n, pos in finished if pos and pos <= 3)
     actual = "-".join(map(str, top)) if len(top) == 3 else None
     payouts = {str(c): int(v) for c, v in (payouts or {}).items()}
+    winners = winning_combos(finished)
+    missing = sorted(winners - set(payouts)) if payouts else []
     if actual is None and len(payouts) == 1:
         actual = next(iter(payouts))
     label = actual or ("・".join(sorted(payouts)) if payouts else None)
     return {"actual": actual, "label": label, "payout": payouts.get(actual) if actual else None,
-            "payouts": payouts, "finishers": int(finishers), "scratched": set(scratched), "has_result": True}
+            "payouts": payouts, "finishers": int(finishers), "scratched": set(scratched), "has_result": True,
+            "winners": winners, "payouts_missing": missing}
 
 
 def race_sort_key(src, rk: str) -> tuple:
@@ -132,7 +159,8 @@ class Source:
         self.preds: dict[str, dict] = defaultdict(dict)     # race_key → {(method, tp): payload}
         self.names: dict[str, dict] = defaultdict(dict)     # race_key → {馬番: 馬名}
         self.results: dict[str, dict] = {}                  # race_key → {actual, payout, payouts, finishers, scratched}
-        self.scratched_now: dict[str, set] = {}             # race_key → 今わかっている取消・除外（予想を保存した後の分も）
+        self.scratched_now: dict[str, set] = {}             # race_key → 今わかっている取消・除外（予想を保存した後の分も）。読めなければ入れない
+        self.card_checked_at: dict[str, str] = {}           # race_key → 取消を照合した出馬表の取得時刻
         self.settlements: list[dict] = []
         self.versions: list[dict] = []
         self.version = None
@@ -145,7 +173,7 @@ class Source:
         lp = self.paths.ledger_path
         if not lp.exists():
             return None
-        return sqlite3.connect(f"file:{lp}?mode=ro", uri=True)
+        return ro_connect(lp)
 
     def _version_list(self, conn):
         rows = conn.execute("SELECT version, MIN(created_at), MAX(created_at), COUNT(*), COUNT(DISTINCT race_key) "
@@ -173,8 +201,8 @@ class Source:
                 key = (rk, m, tp)
                 if key not in latest or created > latest[key][0]:
                     latest[key] = (created, v, payload)
-            for (rk, m, tp), (_, v, payload) in latest.items():
-                self.preds[rk][(m, tp)] = {**json.loads(payload), "version": v}
+            for (rk, m, tp), (created, v, payload) in latest.items():
+                self.preds[rk][(m, tp)] = {**json.loads(payload), "version": v, "_created_at": created}
             for rk, tp, m, v, w, payload in conn.execute(
                     "SELECT race_key,time_point,method,version,wallet,payload FROM settlements WHERE version LIKE 'live-%' "
                     "OR method='text_ai'"):
@@ -200,14 +228,23 @@ class Source:
                     for c in card:
                         if c.get("horse_number"):
                             self.names[rk][int(c["horse_number"])] = c.get("horse_name") or ""
-                    self.scratched_now[rk] = {int(c["horse_number"]) for c in card if c.get("horse_number") and c.get("scratch")}
+                    # jra.parse_card の取消の欄は None（取消なし）か "取消"／"除外"。馬番が読めない行、欄そのものが無い行、
+                    # 決まっていない値の行があれば「取消なし」とは言えないので入れない（チェックは判定できないになる）
+                    readable = bool(card) and all(isinstance(c.get("horse_number"), int) and c["horse_number"] > 0
+                                                  and "scratch" in c and c["scratch"] in SCRATCH_VALUES for c in card)
+                    if readable:
+                        self.scratched_now[rk] = {int(c["horse_number"]) for c in card if c["scratch"]}
+                        self.card_checked_at[rk] = str(s.iloc[-1]["fetched_at"])
             _, _, inputs = live_tables(root, state, snaps)
             for (rk, tp), res in inputs.items():
                 if tp != "result":
                     continue
                 rows = res["rows"]
+                if not rows:   # 結果のページはあるが読めた行が無い：不成立とは決めず「結果待ち」のまま
+                    continue
                 scr = {int(r["horse_number"]) for r in rows if r["status"] in ("withdrawn", "excluded")}
-                self.scratched_now[rk] = self.scratched_now.get(rk, set()) | scr
+                if rk in self.scratched_now:
+                    self.scratched_now[rk] = self.scratched_now[rk] | scr
                 self.results[rk] = make_result(
                     [(r["horse_number"], r["finish_position"]) for r in rows if r["status"] == "finished"],
                     sum(r["status"] == "finished" for r in rows), scr,
@@ -334,12 +371,14 @@ def version_compare(ledger_path, va: str, vb: str, tp: str = "1h", wallet: str =
     out = {"races": 0, "rows": [], "a": va, "b": vb, "tp": tp, "wallet": wallet}
     if not Path(ledger_path).exists() or not va or not vb:
         return out
-    conn = sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True)
+    conn = ro_connect(ledger_path)
     agg: dict = defaultdict(dict)   # (version, method) → {race_key: (stake, returned, hit)}
     for v, m, rk, payload in conn.execute(
             "SELECT version,method,race_key,payload FROM settlements WHERE version IN (?,?) AND wallet=? AND time_point=?",
             (va, vb, wallet, tp)):
         s = json.loads(payload)
+        if s.get("status") not in ("settled", "refunded_void"):
+            continue   # 払戻待ちなどは比べない（共通のレースにも入れない）
         agg[(v, m)][rk] = (s.get("stake") or 0, s.get("returned") or 0, bool(s.get("hits")))
     conn.close()
     methods = sorted({m for (_, m) in agg}, key=lambda m: list(METHOD_LABEL).index(m) if m in METHOD_LABEL else 99)

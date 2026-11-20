@@ -367,15 +367,19 @@ def notify_loop(app: App, stop: threading.Event, interval: int = 60, lead_min: i
                 if not p:
                     continue
                 stakes = allocation_of(p, MAIN_WALLET["live"]).get("stakes") or {}
+                if rk in sent:   # 1レース1回（取消と自信度Aが重なっても1つの通知にまとめる）
+                    continue
                 bad = [i for i in pre_publish_check(p, stakes, r, src.names.get(rk), src.scratched_now.get(rk))
                        if i["ok"] is False and i["label"].startswith("取消")]
                 title = f"{r['venue']}{r['race_number']}R {r.get('post_time') or ''}"
-                if bad and (rk, "bad") not in sent:
-                    sender(title, "買い目に取消馬が残っているよ。確認アプリで見てね")
-                    sent.add((rk, "bad"))
-                if p.get("confidence") == "A" and stakes and (rk, "A") not in sent:
-                    sender(title, f"自信度A・三連複 {len(stakes)}点 ¥{sum(stakes.values()):,}")
-                    sent.add((rk, "A"))
+                lines = []
+                if bad:
+                    lines.append("買い目に取消馬が残っているよ。確認アプリで見てね")
+                if p.get("confidence") == "A" and stakes:
+                    lines.append(f"自信度A・三連複 {len(stakes)}点 ¥{sum(stakes.values()):,}")
+                if lines:
+                    sender(title, "／".join(lines))
+                    sent.add(rk)
         except Exception:
             traceback.print_exc()
         stop.wait(interval)

@@ -20,6 +20,11 @@ TP_MINUTES = {"24h": 24 * 60, "1h": 60, "15m": 15}
 GROUP_LABEL = {"ability": "能力", "course": "コース", "distance": "距離", "draw": "枠", "going": "馬場",
                "pace": "展開", "recent": "近走", "weight_rider": "斤量・騎手"}
 CLOSE_GAP = 0.03   # 3着内の確率の差がこれより小さければ「入れ替わりやすい」
+# 時点ごとの「材料の締切」：発走のこの分数前。材料（出馬表）がこれよりずっと前なら、その時点の予想とは呼ばない
+TP_LEAD_MIN = {"24h": 24 * 60, "1h": 60, "15m": 15}
+TP_EARLY_MARGIN_MIN = {"24h": 12 * 60, "1h": 120, "15m": 60}
+# 買う前に必ず確かめたい項目（判定できなければ「要確認」にする）
+REQUIRED = ("取消・除外の馬が買い目に無い", "組の形（3頭・出走している馬番）", "出馬表の新しさ", "時点の材料")
 
 
 def post_datetime(race: dict) -> datetime | None:
@@ -45,8 +50,33 @@ def field_numbers(p: dict, names: dict | None = None) -> set[int]:
     return nums or {int(n) for n in (names or {})}
 
 
+def _parse_time(text) -> datetime | None:
+    try:
+        t = datetime.fromisoformat(str(text))
+    except (TypeError, ValueError):
+        return None
+    return (t.replace(tzinfo=JST) if t.tzinfo is None else t).astimezone(JST)
+
+
+def early_prediction(p: dict, race: dict | None, tp: str | None) -> str | None:
+    """その時点の材料がそろう前に作った予想なら、理由の文。そうでなければ None。
+
+    例：1時間前の枠でも、前日の出馬表から作った予想は「1時間前の予想」ではなく早めの参考。
+    """
+    post = post_datetime(race or {})
+    fetched = _parse_time((p.get("inputs") or {}).get("card_fetched_at"))
+    if not post or not fetched or tp not in TP_LEAD_MIN:
+        return None
+    nominal = post - timedelta(minutes=TP_LEAD_MIN[tp])
+    gap = (nominal - fetched).total_seconds() / 60
+    if gap > TP_EARLY_MARGIN_MIN[tp]:
+        return f"出馬表は {fetched:%m/%d %H:%M} 取得（{TP_LEAD_MIN[tp] // 60 if TP_LEAD_MIN[tp] >= 60 else TP_LEAD_MIN[tp]}" \
+               f"{'時間' if TP_LEAD_MIN[tp] >= 60 else '分'}前の {nominal:%m/%d %H:%M} より{gap / 60:.1f}時間早い）"
+    return None
+
+
 def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: dict | None = None,
-                      scratched_now: set | None = None) -> list[dict]:
+                      scratched_now: set | None = None, checked_at: str | None = None, tp: str | None = None) -> list[dict]:
     """1行＝1項目。ok は True（合格）／False（不合格）／None（判定できない・対象なし）。
 
     材料が無いときは合格にしない（None＝判定できない）。scratched_now は予想を保存した後に分かった取消も含む最新の取消。
@@ -57,7 +87,7 @@ def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: di
         out.append({"ok": ok, "label": label, "detail": detail})
 
     inp = p.get("inputs") or {}
-    known = "scratched_known" in inp or scratched_now is not None
+    known = scratched_now is not None   # 最新の出馬表で照合できたときだけ「取消なし」と言える
     at_pred = set(int(n) for n in inp.get("scratched_known") or [])
     later = set(int(n) for n in scratched_now or ()) - at_pred
     scratched = at_pred | later
@@ -70,10 +100,13 @@ def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: di
             add(False, "取消・除外の馬が買い目に無い", "残っている：" + "、".join(
                 f"{n}番" + ("（予想の後に取消）" if n in later else "") for n in bad_scr))
         elif not known:
-            add(None, "取消・除外の馬が買い目に無い", "取消・除外の情報が無いので判定できない")
+            add(None, "取消・除外の馬が買い目に無い",
+                "最新の出馬表で取消を照合できていない" + ("（予想のときの情報だけ）" if "scratched_known" in inp else "") + "ので判定できない")
         else:
+            when = _parse_time(checked_at)
+            stamp = f"（{when:%m/%d %H:%M} 取得の出馬表で照合）" if when else "（最新の出馬表で照合）"
             add(True, "取消・除外の馬が買い目に無い",
-                f"取消 {len(scratched)}頭はどの組にも入っていない" if scratched else "取消・除外は出ていない（最新の出馬表）")
+                (f"取消 {len(scratched)}頭はどの組にも入っていない" if scratched else "取消・除外は出ていない") + stamp)
         shape_bad = [c for c in stakes if len(combo_horses(c)) != 3 or len(set(combo_horses(c))) != 3
                      or combo_horses(c) != sorted(combo_horses(c))]
         if shape_bad:
@@ -99,6 +132,11 @@ def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: di
         add(bool(gate.get("pass")), "三連複オッズの確認",
             "合格" + (f"（発表 {gate['odds_time']}）" if gate.get("odds_time") else "") if gate.get("pass")
             else "・".join(gate.get("reasons") or ["不合格"]))
+    if tp:
+        why = early_prediction(p, race, tp)
+        add(False if why else (True if post_datetime(race or {}) and inp.get("card_fetched_at") else None), "時点の材料",
+            ("早めに作った参考の予想：" + why) if why else
+            ("この時点の材料で作った予想" if post_datetime(race or {}) and inp.get("card_fetched_at") else "取得時刻が無いので判定できない"))
     fetched = inp.get("card_fetched_at")
     post = post_datetime(race or {})
     if fetched and post:
@@ -122,6 +160,11 @@ def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: di
 def check_summary(items: list[dict]) -> tuple[int, int, int]:
     """（合格・不合格・判定なし）の数。"""
     return (sum(i["ok"] is True for i in items), sum(i["ok"] is False for i in items), sum(i["ok"] is None for i in items))
+
+
+def unknown_required(items: list[dict]) -> int:
+    """買う前に確かめたいのに判定できなかった項目の数（買い目があるときだけ意味がある）。"""
+    return sum(i["ok"] is None and i["label"] in REQUIRED for i in items)
 
 
 def bias_check(p: dict, stakes: dict) -> list[tuple[str, str]]:
@@ -190,7 +233,8 @@ def horse_comment(h: dict) -> str:
 
 
 def card_flags(p: dict | None, stakes: dict, race: dict, has_result: bool, now: datetime | None = None,
-               names: dict | None = None, scratched_now: set | None = None) -> list[tuple[str, str]]:
+               names: dict | None = None, scratched_now: set | None = None, checked_at: str | None = None,
+               tp: str | None = None) -> list[tuple[str, str]]:
     """（cls, 文）。cls は warn（気をつける）か ''（ふつう）。"""
     now = now or now_jst()
     out = []
@@ -202,10 +246,15 @@ def card_flags(p: dict | None, stakes: dict, race: dict, has_result: bool, now: 
     inp = p.get("inputs") or {}
     if inp.get("scratched_known") or scratched_now:
         out.append(("warn", "取消あり"))
+    if tp and early_prediction(p, race, tp):
+        out.append(("warn", "早めの参考予想"))
     if stakes:
-        items = [i for i in pre_publish_check(p, stakes, race, names, scratched_now) if i["label"] != "三連複オッズの確認"]
+        items = [i for i in pre_publish_check(p, stakes, race, names, scratched_now, checked_at)
+                 if i["label"] != "三連複オッズの確認"]
         if check_summary(items)[1]:
             out.append(("warn", "チェック×"))
+        elif unknown_required(items):
+            out.append(("warn", "確認できない項目あり"))
     gate = p.get("odds_gate")
     if gate is not None and not gate.get("pass"):
         reasons = gate.get("reasons") or []

@@ -15,8 +15,8 @@ from urllib.parse import urlencode
 from .data import (ALLOC_LABEL, ALLOC_STATUS, MAIN_WALLET, METHOD_LABEL, METHOD_TABS, MODES, TIME_POINTS, TP_LABEL,
                    WALLET_LABEL, allocation_of, distance_band, horse_probs, is_skip, marks_of, probs_complete,
                    race_sort_key)
-from .checks import (bias_check, card_flags, change_conditions, check_summary, horse_comment, now_jst, post_datetime,
-                     pre_publish_check)
+from .checks import (bias_check, card_flags, change_conditions, check_summary, early_prediction, horse_comment, now_jst,
+                     post_datetime, pre_publish_check, unknown_required)
 from .store import SETTLE_LABEL, settle_purchase
 
 WEEK = "月火水木金土日"
@@ -325,7 +325,7 @@ def races_page(ctx, src, store, q) -> str:
         warn = False
         if src.mode == "live":
             for cls, text in card_flags(p, stakes, r, bool(res and res.get("has_result")), now, src.names.get(rk),
-                                        src.scratched_now.get(rk)):
+                                        src.scratched_now.get(rk), src.card_checked_at.get(rk), tp):
                 status.append(f'<span class="chip {cls}">{h(text)}</span>')
                 warn = warn or cls == "warn"
             counts["warn"] += warn
@@ -433,15 +433,22 @@ def race_page(ctx, src, store, q) -> str:
                           msg + (f"ある時点：{hint}" if hint else "この方式の予想はまだ無いよ。")))
         body.append(link_list([("方式くらべ", "どの方式が何を選んだか", url("/race/compare", rk=rk, tp=tp))]))
         return layout(ctx, race_title(r), "".join(body), "races", back, race_title(r), refresh=auto_refresh(ctx, src))
+    early = early_prediction(p, r, tp)
+    if early:
+        body.append(f'<div class="err small">{TP_LABEL[tp]}の材料がそろう前に作った、早めの参考予想だよ。{h(early)}</div>')
     body.append(f'<div class="card"><div class="row"><h2>印</h2>{conf_badge(p.get("confidence"))}</div>'
                 f'<div>{marks_html(src, rk, p, names=True)}</div>'
                 f'<a class="muted small" style="display:block;margin-top:8px" href="{h(url("/race/horses", rk=rk, m=tab, tp=tp))}">全頭の評価を見る ›</a></div>')
     a = allocation_of(p, alloc)
     stakes = a.get("stakes") or {}
-    ok_n, ng_n, na_n = check_summary(pre_publish_check(p, stakes, r, src.names.get(rk), src.scratched_now.get(rk)))
+    items_ = pre_publish_check(p, stakes, r, src.names.get(rk), src.scratched_now.get(rk), src.card_checked_at.get(rk), tp)
+    ok_n, ng_n, na_n = check_summary(items_)
+    unk_n = unknown_required(items_) if stakes else 0
     check_link = (f'<a class="small" style="display:block;margin-top:8px" href="{h(url("/race/check", rk=rk, m=tab, tp=tp, a=alloc))}">'
                   + (f'<span class="chip warn">チェック × {ng_n}件</span>' if ng_n else
-                     f'<span class="chip ok">チェック ✓ {ok_n}件</span>' if ok_n else '<span class="chip">チェック対象なし</span>')
+                     f'<span class="chip warn">確認できない {unk_n}件</span><span class="muted"> ✓{ok_n}件</span>' if unk_n else
+                     f'<span class="chip ok">チェック ✓ {ok_n}件</span>' + (f'<span class="muted"> —{na_n}件</span>' if na_n else "")
+                     if ok_n else '<span class="chip">チェック対象なし</span>')
                   + '<span class="muted"> 偏り・変わる条件も ›</span></a>')
     pills = ""
     if src.mode == "live" and m not in ("rule",):
@@ -495,19 +502,29 @@ def horses_page(ctx, src, store, q) -> str:
     rule_p = p if m == "rule" else src.pick(rk, "rule", tp)[1]   # 一言はルールの8項目から作る
     comments = {int(x["n"]): horse_comment(x) for x in (rule_p or {}).get("horses", []) if x.get("groups")}
     rows = []
-    for n in sorted(hp, key=lambda k: (-hp[k], k)):
+    ranked_only = not hp
+    if ranked_only:   # 確率が無く順位だけ（まむ）：順位の順に全頭を並べる
+        order = sorted(groups, key=lambda n: (groups[n].get("rank") is None, groups[n].get("rank") or 0, n))
+    else:
+        order = sorted(hp, key=lambda k: (-hp[k], k))
+    for n in order:
         g = groups.get(n, {})
         extra = ""
         if "coverage" in g:
             extra = f'<td>{g["score"] if g.get("score") is not None else "—"}</td>'
         cm = f'<br><span class="small"><span class="tag g">推論</span>{h(comments[n])}</span>' if comments.get(n) else ""
+        val = (f'{g["rank"]}位' if g.get("rank") else "—") if ranked_only else f"{hp[n] * 100:.1f}%"
         rows.append(f'<tr><td>{h(marks.get(n, ""))} {n} <span class="muted small">{h(src.name(rk, n))}</span>{cm}</td>'
-                    f'<td>{hp[n] * 100:.1f}%</td>{extra}</tr>')
+                    f'<td>{val}</td>{extra}</tr>')
     head = "<th>総合（10段階）</th>" if any("coverage" in g for g in groups.values()) else ""
+    calibrated = probs_complete(p) and m in ("ml_lgbm", "ml_market", "rule", "rule_v11", "rule_v01", "base_logit")
+    note = ("順位だけの予想なので、確率は無いよ。" if ranked_only else
+            "確率は過去のデータで較正した推定で、当たりの保証ではないよ。" if calibrated else
+            "確率は較正していない目安（上位の組だけから足したものや、オッズから出したもの）。当たりの保証ではないよ。")
     body = (f'<p class="muted" style="margin:0">{h(race_title(r))}・{TP_LABEL[tp]}</p><h1>全頭の評価</h1>'
-            f'<p class="lead">{h(METHOD_LABEL.get(m, m))}。3着内に入る確率の高い順</p>'
-            f'<div class="card"><table><tr><th>馬番・馬名</th><th>3着内</th>{head}</tr>{"".join(rows)}</table></div>'
-            f'<p class="muted small">確率は過去のデータで較正した推定で、当たりの保証ではないよ。'
+            f'<p class="lead">{h(METHOD_LABEL.get(m, m))}。{"順位の順" if ranked_only else "3着内に入る確率の高い順"}</p>'
+            f'<div class="card"><table><tr><th>馬番・馬名</th><th>{"順位" if ranked_only else "3着内"}</th>{head}</tr>{"".join(rows)}</table></div>'
+            f'<p class="muted small">{note}'
             f'{"ルールの総合は、評価できた項目だけの平均。" if head else ""}'
             f'{"一言はルールの8項目（10段階）から：◎は7.5以上、△は3以下。" if comments else ""}</p>')
     return layout(ctx, "全頭の評価", body, "races", back, "全頭の評価")
@@ -530,13 +547,20 @@ def compare_page(ctx, src, store, q) -> str:
     tops = {m: [n for _, n in marks_of(preds[m])] for m in order}
     tab_methods = {ms[0] for _, ms in METHOD_TABS.values()} | {"int_market_ml"}
     main = [m for m in order if m in tab_methods]  # 一致・不一致は画面のタブの方式だけで見る（比較版は下に並べるだけ）
-    common = set.intersection(*(set(tops[m]) for m in main)) if main else set()
     count = Counter(n for m in main for n in tops[m])
-    split = sorted((n for n, c in count.items() if c == 1), key=lambda n: n)
-    summary = (f'<div style="padding:3px 0"><span class="tag f">一致</span>'
-               f'{"、".join(f"{n}番" for n in sorted(common)) + " はどの方式も上位3頭" if common else "全方式で共通の馬はいない"}</div>'
-               f'<div style="padding:3px 0"><span class="tag g">割れた</span>'
-               f'{"、".join(f"{n}番" for n in split) + " は1つの方式だけが選んだ" if split else "なし"}</div>')
+    if len(main) < 2:
+        summary = ('<div style="padding:3px 0" class="muted small">比べられる方式が'
+                   + ("1つだけ" if main else "無い") + 'なので、一致・割れは出さないよ</div>')
+    else:
+        common = sorted(n for n, c in count.items() if c == len(main))
+        some = sorted(n for n, c in count.items() if 1 < c < len(main))
+        split = sorted(n for n, c in count.items() if c == 1)
+        summary = (f'<div style="padding:3px 0"><span class="tag f">一致</span>'
+                   f'{"、".join(f"{n}番" for n in common) + f" は{len(main)}方式すべてが上位3頭" if common else "全方式で共通の馬はいない"}</div>'
+                   + (f'<div style="padding:3px 0"><span class="tag g">一部</span>' + "、".join(
+                       f"{n}番（{count[n]}/{len(main)}）" for n in some) + ' は一部の方式だけが選んだ</div>' if some else "")
+                   + f'<div style="padding:3px 0"><span class="tag g">割れた</span>'
+                   f'{"、".join(f"{n}番" for n in split) + " は1つの方式だけが選んだ" if split else "なし"}</div>')
     body.append(f'<div class="card"><h2>一致と不一致</h2>{summary}<p class="muted small" style="margin:6px 0 0">'
                 f'比べたのは{"・".join(METHOD_LABEL[m] for m in main) or "—"}。比較版は下に並べるだけ</p></div>')
     rows = "".join(f'<div style="display:block"><div class="row"><span>{h(METHOD_LABEL.get(m, m))}</span>{conf_badge(preds[m].get("confidence"))}</div>'
@@ -635,15 +659,17 @@ def check_page(ctx, src, store, q) -> str:
     if not p:
         return layout(ctx, "買い目のチェック", empty("予想が無いよ", "レースの詳細から開き直してね。"), "races", back, "買い目のチェック")
     stakes = allocation_of(p, alloc).get("stakes") or {}
-    items = pre_publish_check(p, stakes, r, src.names.get(rk), src.scratched_now.get(rk))
+    items = pre_publish_check(p, stakes, r, src.names.get(rk), src.scratched_now.get(rk), src.card_checked_at.get(rk), tp)
     ok_n, ng_n, na_n = check_summary(items)
+    unk_n = unknown_required(items) if stakes else 0
     rows = "".join(f'<div class="ck"><i class="{"y" if i["ok"] else "n" if i["ok"] is False else ""}">'
                    f'{"✓" if i["ok"] else "×" if i["ok"] is False else "—"}</i><div><div class="small">{h(i["label"])}</div>'
                    f'<div class="muted small">{h(i["detail"])}</div></div></div>' for i in items)
     body = [f'<p class="muted" style="margin:0">{h(race_title(r))}・{TP_LABEL[tp]}・{h(METHOD_LABEL.get(m, m))}</p>'
             f'<h1>買い目のチェック</h1><p class="lead">買う前に、おかしな所が無いか</p>',
             f'<div class="card"><div class="row"><h2>公開前チェック</h2>'
-            f'<span class="chip {"warn" if ng_n else "ok" if ok_n else ""}">{"× " + str(ng_n) + "件" if ng_n else "✓ " + str(ok_n) + "件" if ok_n else "対象なし"}</span></div>{rows}'
+            f'<span class="chip {"warn" if ng_n or unk_n else "ok" if ok_n else ""}">'
+            f'{"× " + str(ng_n) + "件" if ng_n else "確認できない " + str(unk_n) + "件" if unk_n else "✓ " + str(ok_n) + "件" if ok_n else "対象なし"}</span></div>{rows}'
             f'<p class="muted small" style="margin:6px 0 0">「—」は判定できない・対象が無い項目（{na_n}件）。配分：{h(ALLOC_LABEL.get(alloc, alloc))}</p></div>']
     bias = bias_check(p, stakes)
     tag = {"推論": "g", "注意": "w", "事実": "f"}
@@ -683,7 +709,10 @@ def buy_form(ctx, src, store, q, error: str = "", form: dict | None = None) -> s
             rows = [(c, str(v)) for c, v in sorted(st.items(), key=lambda x: -x[1])]
     rows = rows + [("", "")] * max(2, 5 - len(rows)) if kind == "buy" else []
     memo = (form or {}).get("memo", entry["memo"] if entry else "")
-    title = "見送りを記録" if kind == "skip" else ("購入記録を直す" if entry else "購入を記録")
+    mode = entry["data_mode"] if entry else src.mode
+    who = "実購入" if mode == "live" else "練習（検証データ）"
+    title = (f"見送りを記録（{who}）" if kind == "skip" else
+             (f"{who}の記録を直す" if entry else ("購入を記録" if mode == "live" else "練習の記録を付ける")))
     back = url("/history/detail", rk=rk) if entry else url("/race", rk=rk, tp=tp)
     fields = "".join(f'<div class="pair"><input name="combo" inputmode="numeric" placeholder="3-7-11" value="{h(c)}" aria-label="組">'
                      f'<input name="yen" inputmode="numeric" placeholder="100円単位" value="{h(v)}" aria-label="金額（円）"></div>'
@@ -725,8 +754,8 @@ def _history_keys(src, store, f: str) -> list[str]:
         keys = buy
     elif f == "skip":
         keys = skip_user | skip_pred
-    elif f == "2w":
-        keys = set(src.preds) | buy | skip_user | store.noted_races()
+    elif f == "2w":   # 予想が無いレースも、開催のあったレースは全部出す
+        keys = set(src.races) | set(src.preds) | buy | skip_user | store.noted_races()
         start = (date.fromisoformat(today) - timedelta(days=13)).isoformat()
         keys = {k for k in keys if start <= k.split("|")[0] <= today}
     else:
@@ -820,6 +849,8 @@ def history_detail_page(ctx, src, store, q) -> str:
         else:
             what = f'{len(e["stakes"])}点 {yen(e["total"])}'
             money = money_text(st)
+        if e.get("mode_mixed"):
+            money += "・注意：古い版で見方が変わった履歴あり（最初の記録の見方で集計）"
         lines.append(f'<a href="{h(url("/buy/new", entry=e["entry_id"]))}"><span>{h(what)}<br><span class="muted small">'
                      f'{h(METHOD_LABEL.get(e["method"], e["method"] or ""))} {TP_LABEL.get(e["time_point"], "")} {h(money)}</span></span>'
                      f'<span class="chev">記録を編集 ›</span></a>')
@@ -851,12 +882,17 @@ def _recent_keys(src, keys, n: str) -> set[str]:
 def one_per_race(src, wallet: str) -> list[dict]:
     """1レース1方式につき1つの精算（時点が複数あれば遅い方。検証データは 24時間前と1時間前の両方がある）。"""
     order = {t: i for i, t in enumerate(TIME_POINTS)}
+    vorder = {v["version"]: i for i, v in enumerate(src.versions)}
+
+    def rank(s):   # 遅い時点 → 画面に出している予想と同じ版 → 新しい版
+        shown = (src.preds.get(s["race_key"], {}).get((s["method"], s["time_point"])) or {}).get("version")
+        return (order.get(s["time_point"], -1), s.get("version") == shown, vorder.get(s.get("version"), -1))
     best: dict = {}
     for s in src.settlements:
         if s["wallet"] != wallet:
             continue
         k = (s["method"], s["race_key"])
-        if k not in best or order.get(s["time_point"], -1) > order.get(best[k]["time_point"], -1):
+        if k not in best or rank(s) > rank(best[k]):
             best[k] = s
     return list(best.values())
 
