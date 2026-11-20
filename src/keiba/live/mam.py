@@ -22,7 +22,7 @@ from itertools import combinations
 from pathlib import Path
 
 from ..allocate import allocate
-from ..ledger import Ledger, canonical, code_hash, sha
+from ..ledger import Ledger, LedgerConflict, canonical, code_hash, sha
 from .collector import deadline
 from .wallet import ALLOC_METHODS, _snapshots, live_tables
 
@@ -156,7 +156,10 @@ def import_predictions(paths, file: Path, _ctx=None) -> dict:
             "odds_gate": gate, "notes": [pred.get("comment", "")][:1], "generated_at": pred["generated_at"],
             "period": "live", "submitted_by": pred.get("author", "mam"),
         }
-        added = led.add_prediction(rk, tp, "text_ai", MAM_VERSION, payload, sha(canonical(pred))[:16], "mam", code_hash())
+        try:
+            added = led.add_prediction(rk, tp, "text_ai", MAM_VERSION, payload, sha(canonical(pred))[:16], "mam", code_hash())
+        except LedgerConflict:
+            added = False
         ok += int(added)
         if not added:
             rejected.append({"race_key": rk, "time_point": tp, "reason": "同じレース・時点の予想を受け付け済み（台帳は書き換えないので、先の予想が残る）"})
