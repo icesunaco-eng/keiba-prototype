@@ -289,6 +289,10 @@ def test_mam_inbox(tmp_path):
     (inbox / "a.json").write_text(json.dumps(dict(base, ranking=[3, 1, 2], trios=[{"combo": "1-2-3", "p": 0.2}])))
     out = import_inbox(paths)
     assert out["files"] == 1 and out["accepted"] == 1
+    (inbox / "a.json").write_text(json.dumps(dict(base, ranking=[1, 2, 3], trios=[{"combo": "1-2-4", "p": 0.3}])))
+    out = import_inbox(paths)  # 中身が変われば読み直すが、受け付け済みの予想は書き換えない
+    assert out["accepted"] == 0 and out["rejected"] == 1
+    assert "受け付け済み" in json.loads((res / "a.json").read_text())["rejected"][0]["reason"]
     assert sorted(p.name for p in inbox.iterdir()) == ["a.json", "b.json", "c.json"]  # 消さない・動かさない
 
 

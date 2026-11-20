@@ -5,6 +5,7 @@
   入れないもの：学習モデル・ルールの予想（独立させるため）、結果、締切後の情報
 受け取る（import）：まむの予想（JSON。形は docs/requests/mam-format.md）を検証して、台帳に method="text_ai" で入れる
   - 返し先は data/mam/inbox/（outbox は入力の束の置き場なので、そこには置かない）。収集の見回りのたびに新しいファイルだけ読む
+  - 同じレース・時点で受け付け済みなら、後から来た予想は断る（台帳は書き換えない）
   - 読んだ結果（受け付けた数・断った理由）は data/mam/inbox_results/<ファイル名> に書く。inbox のファイルは消さない・動かさない
   - 決めた形にない項目（例：trio_odds・win_prob）があれば、その予想は受け付けない（確率が黙って落ちるのを防ぐ）
   - 作成時刻（generated_at）が、その時点の締切より後なら受け付けない
@@ -157,6 +158,8 @@ def import_predictions(paths, file: Path, _ctx=None) -> dict:
         }
         added = led.add_prediction(rk, tp, "text_ai", MAM_VERSION, payload, sha(canonical(pred))[:16], "mam", code_hash())
         ok += int(added)
+        if not added:
+            rejected.append({"race_key": rk, "time_point": tp, "reason": "同じレース・時点の予想を受け付け済み（台帳は書き換えないので、先の予想が残る）"})
     led.commit()
     led.close()
     return {"accepted": ok, "rejected": rejected}
