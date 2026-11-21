@@ -104,6 +104,25 @@ def test_live_predict_allocate_settle(tmp_path):
         jra.parse_card = orig
 
 
+def test_partial_result_waits_for_full_result(tmp_path):
+    """結果を一部しか読めない（8頭中2頭）なら精算を書かない。完全な結果が来たら、そこで精算する。"""
+    orig = jra.parse_card
+    jra.parse_card = lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)]
+    try:
+        paths, col = _setup(tmp_path)
+        run_live(paths)
+        col._save(RK, "result", "result", "/JRADB/x", "c", result_html([3, 1]))
+        assert run_live(paths)["settled"] == 0              # 不成立の返還にはしない
+        col._save(RK, "result", "result", "/JRADB/x", "c2", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
+        assert run_live(paths)["settled"] == 3 * 5
+        from keiba.ledger import Ledger
+        led = Ledger(paths.ledger_path, read_only=True)
+        assert not [s for s in led.settlements() if s["status"] == "refunded_void"]
+        led.close()
+    finally:
+        jra.parse_card = orig
+
+
 def test_missed_capture_is_reported(tmp_path):
     col = Collector(tmp_path, client=None, now=lambda: datetime(2025, 8, 30, 16, 0, tzinfo=JST))
     col.state["races"][RK] = {"race_date": "2025-08-30", "venue": "東京", "race_number": 11, "post_time": "15:40",

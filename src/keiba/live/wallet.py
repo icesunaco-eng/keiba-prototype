@@ -29,7 +29,7 @@ from ..ledger import Ledger, canonical, code_hash, sha
 from ..models import rule_v1
 from ..models.trio import fit_calibration
 from ..integrate import pool
-from ..settle import settle_trio
+from ..settle import result_problem, settle_trio
 from . import jra
 from .collector import DEADLINE_MIN, deadline
 
@@ -263,6 +263,10 @@ def run_live(paths, log=print) -> dict:
         finishers = sum(r["status"] == "finished" for r in rows)
         scratched = {r["horse_number"] for r in rows if r["status"] in ("withdrawn", "excluded")}
         payouts = {p["combo"]: p["payout_yen"] for p in res["trio_payouts"]} or None
+        finished = [(r["horse_number"], r["finish_position"]) for r in rows if r["status"] == "finished"]
+        if not rows or result_problem(finished, finishers, scratched, payouts, len(rows),
+                                      (state["races"].get(rk) or {}).get("field_size")):
+            continue   # 結果を一部しか読めていない：不成立の返還などを書かず、次の回で完全な結果を待つ
         for (m, ver) in sorted({(k[2], k[3]) for k in preds if k[0] == rk}):
             p = preds.get((rk, "15m", m, ver)) or preds.get((rk, "1h", m, ver))
             if not p:

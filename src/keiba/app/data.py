@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from ..settle import result_problem
+
 TIME_POINTS = ("24h", "1h", "15m")
 TP_LABEL = {"24h": "24時間前", "1h": "1時間前", "15m": "15分前"}
 MODES = {"live": "これからのレース", "check": "検証データ（過去）"}
@@ -126,21 +128,7 @@ def make_result(finished: list, finishers: int, scratched: set, payouts: dict, r
     if actual is None and len(payouts) == 1:
         actual = next(iter(payouts))
     label = actual or ("・".join(sorted(payouts)) if payouts else None)
-    placed = [n for n, pos in finished if pos and pos <= 3]
-    try:
-        size = int(field_size) if field_size is not None else None
-    except (TypeError, ValueError):
-        size = None
-    incomplete = None
-    fin_nums = [int(n) for n, _ in finished]
-    if len(set(fin_nums)) != len(fin_nums) or set(fin_nums) & {int(n) for n in scratched}:
-        incomplete = "結果の馬番が重複している（着順を照合できない）"
-    elif size and rows is not None and rows < size:
-        incomplete = f"結果は{size}頭のうち{rows}頭分しか読めていない"
-    elif int(finishers) >= 3 and len(placed) < 3:
-        incomplete = f"3着までの着順が{len(placed)}頭分しか読めていない"
-    elif int(finishers) < 3 and payouts:
-        incomplete = "完走が3頭未満なのに払戻がある（結果の読取が足りない）"
+    incomplete = result_problem(finished, finishers, scratched, payouts, rows, field_size)
     return {"actual": actual, "label": label, "payout": payouts.get(actual) if actual else None,
             "payouts": payouts, "finishers": int(finishers), "scratched": set(scratched), "has_result": True,
             "winners": winners, "payouts_missing": missing, "complete": incomplete is None, "incomplete": incomplete}
