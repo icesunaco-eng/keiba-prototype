@@ -263,3 +263,19 @@ def test_mam_partial_trios_are_reference_only(tmp_path):
         assert any("全組の確率がそろっていない" in r for r in p["reasons"])
     finally:
         jra.parse_card = orig
+
+
+def test_trio_odds_real_page_shape():
+    """実物（2026-11-21 確認）は class の無い <th scope="row">馬番</th><td>オッズ</td>。この形で全組が読めること。"""
+    from math import comb
+    n = 6
+    tables = []
+    for a, b in combinations(range(1, n + 1), 2):
+        rows = "".join(f'<tr>\n<th scope="row">{c}</th><td>{100.0 + a * 10 + b + c / 10}</td></tr>' for c in range(b + 1, n + 1))
+        if rows:
+            tables.append(f'<li><table class="basic narrow-xy fuku3">\n<caption>{a}-{b}</caption><tbody>{rows}</tbody></table></li>')
+    page = "<p>10時49分現在</p><ul>" + "".join(tables) + "</ul>"
+    t = jra.parse_trio_odds(page, n)
+    assert t["ok"] and len(t["odds"]) == comb(n, 3) and t["odds"]["1-2-3"] == 112.3
+    assert jra.parse_odds_time(page) == "10:49"
+    assert not jra.parse_trio_odds(page, n + 1)["ok"]

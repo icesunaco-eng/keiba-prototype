@@ -245,8 +245,9 @@ def parse_trio_odds(page: str, field: int) -> dict:
         if len(head) != 2:
             continue
         for tr in table.xpath(".//tr"):
-            num = tr.xpath('./*[contains(@class,"num")]')
-            val = tr.xpath('./td[contains(@class,"odds")]')
+            # 実物（2026-11-21 確認）は <th scope="row">3</th><td>1662.9</td>。class が付いた形も読めるようにしておく
+            num = tr.xpath('./*[contains(@class,"num")]') or tr.xpath("./th")
+            val = tr.xpath('./td[contains(@class,"odds")]') or tr.xpath("./td")
             if not (num and val and _t(num[0]).isdigit()):
                 continue
             v = _num(_t(val[0]))
