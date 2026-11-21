@@ -9,6 +9,7 @@ JRAのページは「cname」という値をPOST（またはGETの ?CNAME=）で
 """
 from __future__ import annotations
 
+import itertools
 import math
 import re
 import time
@@ -216,9 +217,10 @@ def _num(text: str):
     return float(t) if re.fullmatch(r"\d+(\.\d+)?", t) else None
 
 
-def parse_win_odds(page: str, field: int | None = None) -> dict:
+def parse_win_odds(page: str, field=None) -> dict:
     """単勝オッズ（馬番 → 倍）。表の「馬番」と、単勝の列（class に tan を含むセル、無ければ行の最初の小数）を読む。
-    読めた頭数が field と違えば ok=False（使わない）。最初の実物で確かめるまでは、この自己照合だけが頼り。"""
+    field に出走馬（取消を除く）の馬番の並びを渡すと、読めた馬番がそれとぴったり同じときだけ ok=True。
+    頭数（int）を渡した場合は数だけで照らす（古い呼び方）。"""
     doc = lxml_html.fromstring(page)
     odds = {}
     for tr in doc.xpath("//table//tr"):
@@ -230,24 +232,48 @@ def parse_win_odds(page: str, field: int | None = None) -> dict:
         vals = [v for v in vals if v]
         if vals:
             odds.setdefault(int(_t(num[0])), vals[0])
-    ok = bool(odds) and (field is None or len(odds) == field)
+    if field is None:
+        ok = bool(odds)
+    elif isinstance(field, int):
+        ok = bool(odds) and len(odds) == field
+    else:
+        ok = bool(odds) and set(odds) == {int(x) for x in field}
     return {"odds": odds, "ok": ok}
 
 
-def parse_trio_odds(page: str, field: int) -> dict:
-    """三連複オッズ（"a-b-c" → 倍）。表ごとに見出し（例「1-2」）の2頭と、行の馬番・オッズで組を作る。
-    取消の馬がいれば組は減るので、C(出走頭数,3) と一致したときだけ ok=True。"""
+def _expected_set(horses) -> tuple[set[str] | None, int | None]:
+    """horses：出走馬（取消を除く）の馬番の並び。古い呼び方の頭数（int）も受けるが、そのときは組の数でしか照らせない。"""
+    if horses is None:
+        return None, None
+    if isinstance(horses, int):
+        return None, (math.comb(horses, 3) if horses >= 3 else None)
+    nums = sorted({int(h) for h in horses})
+    combos = {"-".join(map(str, c)) for c in itertools.combinations(nums, 3)}
+    return combos, (len(combos) or None)
+
+
+def parse_trio_odds(page: str, horses) -> dict:
+    """三連複オッズ（"a-b-c" → 倍）。三連複の表（class に fuku3）の見出し「a-b」の2頭と、行の馬番（th）・オッズ（td）で組を作る。
+    読めた組が「出走馬（取消を除く）の全組」とぴったり同じとき（多くも少なくもなく、重複なし）だけ ok=True。
+    実物（2026-11-21 確認）は <table class="... fuku3"><caption>1-2</caption> … <th scope="row">3</th><td>1662.9</td>。
+    fuku3 の表が1つも無いページだけ、古い形（class="num"・class="odds" のセル）を読む。"""
     doc = lxml_html.fromstring(page)
+    tables = doc.xpath('//table[contains(concat(" ", normalize-space(@class), " "), " fuku3 ")]')
+    legacy = not tables
+    if legacy:
+        tables = [t for t in doc.xpath("//table") if t.xpath('.//td[contains(@class,"odds")]')]
     odds, dups, bad = {}, 0, 0
-    for table in doc.xpath("//table"):
-        cap = table.xpath("./caption") or table.xpath("preceding-sibling::*[1]")
-        head = [int(x) for x in re.findall(r"\d+", _t(cap[0]))] if cap else []
-        if len(head) != 2:
+    for table in tables:
+        cap = table.xpath("./caption") or ([] if not legacy else table.xpath("preceding-sibling::*[1]"))
+        m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", _t(cap[0])) if cap else None
+        if not m:
             continue
+        head = [int(m.group(1)), int(m.group(2))]
         for tr in table.xpath(".//tr"):
-            # 実物（2026-11-21 確認）は <th scope="row">3</th><td>1662.9</td>。class が付いた形も読めるようにしておく
-            num = tr.xpath('./*[contains(@class,"num")]') or tr.xpath("./th")
-            val = tr.xpath('./td[contains(@class,"odds")]') or tr.xpath("./td")
+            if legacy:
+                num, val = tr.xpath('./*[contains(@class,"num")]'), tr.xpath('./td[contains(@class,"odds")]')
+            else:
+                num, val = tr.xpath("./th[1]"), tr.xpath("./td[1]")
             if not (num and val and _t(num[0]).isdigit()):
                 continue
             v = _num(_t(val[0]))
@@ -261,9 +287,15 @@ def parse_trio_odds(page: str, field: int) -> dict:
             if key in odds:
                 dups += 1
             odds[key] = v
-    expected = math.comb(field, 3) if field and field >= 3 else None
-    ok = expected is not None and len(odds) == expected and dups == 0
-    return {"odds": odds, "ok": ok, "expected": expected, "found": len(odds), "duplicates": dups, "unreadable": bad}
+    want, expected = _expected_set(horses)
+    if want is not None:
+        extra, missing = sorted(set(odds) - want), sorted(want - set(odds))
+        ok = bool(want) and not extra and not missing and dups == 0
+    else:
+        extra, missing = [], []
+        ok = expected is not None and len(odds) == expected and dups == 0
+    return {"odds": odds, "ok": ok, "expected": expected, "found": len(odds), "duplicates": dups, "unreadable": bad,
+            "extra": len(extra), "missing": len(missing), "extra_examples": extra[:5], "missing_examples": missing[:5]}
 
 
 _ODDS_TIME = re.compile(r"(\d{1,2})時(\d{2})分\s*(?:現在|時点)")

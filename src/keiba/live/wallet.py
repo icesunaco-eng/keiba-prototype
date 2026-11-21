@@ -62,7 +62,7 @@ def _read(root: Path, rec) -> str:
 def odds_gate(trio: dict, trio_rec, race: dict, tp: str) -> dict:
     """三連複オッズの合格判定（週末の確認の物差し）。"""
     g = {"trio_found": trio.get("found"), "trio_expected": trio.get("expected"), "duplicates": trio.get("duplicates"),
-         "unreadable": trio.get("unreadable"), "fetched_at": None, "odds_time": None, "snapshot_sha256": None}
+         "unreadable": trio.get("unreadable"), "extra": trio.get("extra"), "missing": trio.get("missing"), "fetched_at": None, "odds_time": None, "snapshot_sha256": None}
     reasons = []
     if trio_rec is None:
         reasons.append("三連複オッズのページが無い")
@@ -70,7 +70,8 @@ def odds_gate(trio: dict, trio_rec, race: dict, tp: str) -> dict:
         g["fetched_at"], g["snapshot_sha256"] = trio_rec["fetched_at"], trio_rec["sha256"]
         g["odds_time"] = trio.get("odds_time")
         if not trio.get("ok"):
-            reasons.append(f"組の数が合わない・重複（{trio.get('found')}/{trio.get('expected')}・重複{trio.get('duplicates')}）")
+            reasons.append(f"組が出走馬の全組と合わない（{trio.get('found')}/{trio.get('expected')}・重複{trio.get('duplicates')}"
+                           f"・余分{trio.get('extra', 0)}・不足{trio.get('missing', 0)}）")
         fetched = datetime.fromisoformat(trio_rec["fetched_at"])
         dl = deadline(race["race_date"], race["post_time"], tp)
         g["deadline"] = dl.isoformat(timespec="minutes")
@@ -115,12 +116,13 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame) -> tuple[pd.DataFr
             trio = s[(s["kind"] == "odds_trio") & (s["time_point"] == tp)]  # 締切後のものも判定に出して不合格にする
             if tp == "15m" and not (len(win) or len(trio)):
                 continue  # 15分前は配分の見直しだけ。新しいオッズが無ければ作らない
-            w = jra.parse_win_odds(_read(root, win.iloc[-1]), len(card)) if len(win) else {"ok": False, "odds": {}}
+            active = [int(c["horse_number"]) for c in card]  # 出走馬（取消を除く）。オッズの組はこれとぴったり照らす
+            w = jra.parse_win_odds(_read(root, win.iloc[-1]), active) if len(win) else {"ok": False, "odds": {}}
             t = {"ok": False, "odds": {}}
             trio_rec = trio.iloc[-1] if len(trio) else None
             if trio_rec is not None:
                 page = _read(root, trio_rec)
-                t = jra.parse_trio_odds(page, len(card))
+                t = jra.parse_trio_odds(page, active)
                 t["odds_time"] = jra.parse_odds_time(page)
             inputs[(rk, tp)] = {"card": card, "scratched": scratched, "win": w, "trio": t,
                                 "gate": odds_gate(t, trio_rec, r, tp) if tp != "24h" or trio_rec is not None else

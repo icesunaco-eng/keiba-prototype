@@ -135,7 +135,7 @@ def test_gate_rejects_duplicates(tmp_path):
 
 def test_gate_rejects_missing_combos(tmp_path):
     r = _gate(tmp_path, trio=trio_html(drop=True))
-    assert not r["pass"] and "組の数" in r["reasons"]
+    assert not r["pass"] and "全組と合わない" in r["reasons"]
 
 
 def test_gate_rejects_stale_and_unknown_time(tmp_path):
@@ -279,3 +279,47 @@ def test_trio_odds_real_page_shape():
     assert t["ok"] and len(t["odds"]) == comb(n, 3) and t["odds"]["1-2-3"] == 112.3
     assert jra.parse_odds_time(page) == "10:49"
     assert not jra.parse_trio_odds(page, n + 1)["ok"]
+
+
+def _fuku3(pairs_rows, extra=""):
+    """実物の形の三連複ページ。pairs_rows：{(a, b): [(c, "倍率"), ...]}"""
+    tabs = "".join(f'<li><table class="basic narrow-xy fuku3"><caption>{a}-{b}</caption><tbody>'
+                   + "".join(f'<tr><th scope="row">{c}</th><td>{v}</td></tr>' for c, v in rows) + "</tbody></table></li>"
+                   for (a, b), rows in pairs_rows.items())
+    return f"<p>10時49分現在</p><ul>{tabs}</ul>{extra}"
+
+
+def _all_rows(nums, skip=()):
+    out = {}
+    for a, b in combinations(nums, 2):
+        rows = [(c, f"{10 + a + b + c}.0") for c in nums if c > b and (a, b, c) not in skip]
+        if rows:
+            out[(a, b)] = rows
+    return out
+
+
+def test_trio_odds_must_match_active_horses_exactly():
+    """みに指摘（PR #17 重大）：組の数が同じでも、取消の馬を含む組や出走馬の組が欠けていれば不合格。"""
+    page = _fuku3(_all_rows([1, 2, 3, 4]))           # 1〜4番の全4組
+    t = jra.parse_trio_odds(page, [1, 2, 3, 5])        # 出走馬は 1・2・3・5（4番は取消）
+    assert not t["ok"] and t["found"] == t["expected"] == 4 and t["extra"] == 3 and t["missing"] == 3
+    assert jra.parse_trio_odds(page, [1, 2, 3, 4])["ok"]
+    assert not jra.parse_win_odds('<table><tr><td class="num">1</td><td class="odds_tan">2.0</td></tr>'
+                                  '<tr><td class="num">4</td><td class="odds_tan">3.0</td></tr></table>', [1, 2])["ok"]
+
+
+def test_trio_odds_reads_only_fuku3_tables():
+    """みに指摘（PR #17 要修正）：三連複の表の行が欠けたとき、別の表の同じ馬番・数値で埋めて合格にしない。"""
+    rows = _all_rows([1, 2, 3, 4], skip={(2, 3, 4)})
+    note = '<table class="note"><caption>2-3</caption><tr><th scope="row">4</th><td>12.3</td></tr></table>'
+    t = jra.parse_trio_odds(_fuku3(rows, extra=note), [1, 2, 3, 4])
+    assert not t["ok"] and t["missing"] == 1 and "2-3-4" not in t["odds"]
+
+
+def test_trio_odds_scratched_row_on_real_page():
+    """取消の馬の行が「取消」と表示されても、残りの馬の全組がそろえば合格。"""
+    rows = _all_rows([1, 2, 3, 4, 5])
+    for k, r in rows.items():
+        rows[k] = [(c, "取消" if 4 in (k[0], k[1], c) else v) for c, v in r]
+    t = jra.parse_trio_odds(_fuku3(rows), [1, 2, 3, 5])
+    assert t["ok"] and len(t["odds"]) == 4 and t["unreadable"] == 6
