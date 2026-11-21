@@ -1148,6 +1148,8 @@ def improve_versions_page(ctx, src, store, q, compare) -> str:
                 f'<label style="margin-top:8px">後の版</label>{select("b", vb)}'
                 f'<div class="btns" style="margin:10px 0 0"><button class="btn" type="submit">くらべる</button></div></form>')
     res = compare(va, vb)
+    if res.get("stale"):
+        body.append(f'<div class="mode">{h(res["stale"])}（次の表示で計算し直すよ）</div>')
     if not res["rows"]:
         body.append(empty("両方にあるレースが無いよ", "ほかの版を選んでね。"))
     else:

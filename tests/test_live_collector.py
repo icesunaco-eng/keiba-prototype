@@ -95,8 +95,14 @@ def test_result_waits_until_link_appears(tmp_path):
     col, clock = _collector(tmp_path, datetime(2026, 11, 22, 16, 30, tzinfo=JST), result=False)
     col.tick()
     assert "2026-11-22|京都|11|result" not in col.state["taken"]
+    from tests.test_live_wallet import result_html
+    full = result_html([3, 1, 2] + list(range(4, 19)))          # 18頭すべての着順と三連複の払戻がそろった結果
     col.client.pages = lambda c: race_list(result=True) if c.startswith("pw01drl") else "<html>result</html>"
     clock["now"] = datetime(2026, 11, 22, 16, 40, tzinfo=JST)
+    col.tick()
+    assert "2026-11-22|京都|11|result" not in col.state["taken"]   # 中身のない結果ページは取得済みにしない
+    col.client.pages = lambda c: race_list(result=True) if c.startswith("pw01drl") else full
+    clock["now"] = datetime(2026, 11, 22, 16, 45, tzinfo=JST)
     col.tick()
     assert "2026-11-22|京都|11|result" in col.state["taken"]
 
@@ -193,3 +199,37 @@ def test_refresh_keeps_known_head_count(tmp_path, monkeypatch):
     col.refresh(force=True)
     race = col.state["races"][rk]
     assert race["field_size"] == 4 and race["card_cname"] == "new"      # 確かめた頭数は残し、新しい値は取り込む
+
+
+def test_partial_result_is_fetched_again(tmp_path, monkeypatch):
+    """途中までの結果（着順の空欄・払戻の欠け）は「取得済み」にせず、窓の間は次の回に取り直す。"""
+    from keiba.live import collector as c
+    from tests.test_live_wallet import result_html
+    rk = "2026-11-22|東京|1"
+    col = Collector(tmp_path, client=None, now=lambda: datetime(2026, 11, 22, 11, 0, tzinfo=JST))
+    col.state["races"][rk] = {"race_date": "2026-11-22", "venue": "東京", "race_number": 1, "post_time": "10:00",
+                              "field_size": 4, "list_cname": "L", "result_links": [("/JRADB/r", "R")]}
+    partial = result_html([1, 2, 3, 4]).replace('<td class="place">4</td>', '<td class="place"></td>')
+    pages = {"R": partial}
+
+    class Client:
+        count = 0
+
+        def get(self, path, cname):
+            return pages.get(cname, "")
+    col.client = Client()
+    monkeypatch.setattr(c.jra, "parse_race_list", lambda page: {"races": []})
+    saved = col.capture(rk, "result")
+    assert saved and saved[-1]["incomplete"] and f"{rk}|result" not in col.state["taken"]
+    pages["R"] = result_html([1, 2, 3, 4])
+    col.capture(rk, "result")
+    assert f"{rk}|result" in col.state["taken"]
+
+
+def test_result_issue_rules():
+    from keiba.live.collector import result_issue
+    from tests.test_live_wallet import result_html
+    assert result_issue(result_html([3, 1, 2, 4]), 4) is None
+    assert result_issue(result_html([3, 1, 2, 4]).split('<li class="trio"')[0], 4)          # 払戻がまだ無い
+    assert result_issue(result_html([3, 1, 2, 4]), None)                                     # 頭数が分からない
+    assert result_issue(result_html([3, 1]), 4)                                              # 行が欠けている

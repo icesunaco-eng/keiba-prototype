@@ -273,7 +273,8 @@ class Source:
                 m = meta.get(rk) or {}   # 収集が予定表から外すときに残した記録（頭数・発走時刻）。読めた行の数から頭数を推測しない
                 self.races[rk] = {"race_key": rk, "race_date": d, "venue": venue,
                                   "race_number": int(num) if num.isdigit() else 0, "race_name": m.get("race_name") or "",
-                                  "post_time": m.get("post_time"), "surface": None, "distance_m": None,
+                                  "post_time": m.get("post_time"), "surface": m.get("surface"),
+                                  "distance_m": m.get("distance_m"),
                                   "field_size": m.get("field_size"), "going": None, "race_class": None, "archived": True}
             for rk in self.races:
                 s = snaps[(snaps["race_key"] == rk) & (snaps["kind"] == "card")]
@@ -339,8 +340,9 @@ class Source:
             return out
         bad = 0
         try:
-            lines = f.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError) as exc:
+            # 追記が日本語の文字の途中で切れていても、その行だけ読めないようにする（ほかの行は使う）
+            lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
             self.notes.append(f"過去のレースの記録を読めない：{exc!r}"[:200])
             return out
         for line in lines:
@@ -358,9 +360,12 @@ class Source:
             size = row.get("field_size")
             post = row.get("post_time")
             name = row.get("race_name")
+            surface, dist = row.get("surface"), row.get("distance_m")
             out[rk] = {"field_size": size if valid_size(size) else None,
                        "post_time": post if isinstance(post, str) and re.fullmatch(r"\d{2}:\d{2}", post) else None,
-                       "race_name": name if isinstance(name, str) else ""}
+                       "race_name": name if isinstance(name, str) else "",
+                       "surface": surface if isinstance(surface, str) and surface else None,
+                       "distance_m": dist if valid_size(dist) else None}
             if not valid_size(size):
                 bad += 1
         if bad:

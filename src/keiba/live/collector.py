@@ -95,6 +95,29 @@ def read_jsonl(path: Path) -> tuple[list[dict], int]:
     return rows, bad
 
 
+def result_issue(page: str, field_size) -> str | None:
+    """結果のページがまだそろっていない理由（精算と同じ判定。払戻の欠けも含む）。そろっていれば None。"""
+    from ..settle import result_problem, winning_combos
+    try:
+        parsed = jra.parse_result(page)
+    except Exception as exc:
+        return f"結果のページを読めない：{exc!r}"
+    rows = parsed["rows"]
+    if not rows:
+        return "結果の行が無い"
+    finished = [(x["horse_number"], x["finish_position"]) for x in rows if x["status"] == "finished"]
+    scratched = {x["horse_number"] for x in rows if x["status"] in ("withdrawn", "excluded")}
+    payouts = {x["combo"]: x["payout_yen"] for x in parsed.get("trio_payouts", [])}
+    problem = result_problem(finished, len(finished), scratched, payouts, len(rows), field_size,
+                             [x["horse_number"] for x in rows])
+    if problem:
+        return problem
+    winners = winning_combos(finished)
+    if winners and not winners <= set(payouts):
+        return "三連複の払戻がまだそろっていない"
+    return None
+
+
 def archived_keys(path: Path) -> set[str]:
     return {x["race_key"] for x in read_jsonl(path)[0] if isinstance(x.get("race_key"), str)}
 
@@ -190,7 +213,13 @@ class Collector:
         r.update({k: v for k, v in fresh.items() if v})
         if tp == "result":
             for path, cname in (r.get("result_links") or [])[:1]:
-                saved.append(self._save(rk, "result", tp, path, cname, self.client.get(path, cname)))
+                page = self.client.get(path, cname)
+                saved.append(self._save(rk, "result", tp, path, cname, page))
+                issue = result_issue(page, r.get("field_size"))
+                if issue:
+                    # 途中までの結果（着順の空欄・払戻の欠けなど）：保存はするが「取得済み」にせず、窓の間は次の回に取り直す
+                    saved[-1]["incomplete"] = issue
+                    return saved
         else:
             if r.get("card_cname"):  # 出馬表は毎時点取る（取消を、その時点の締切までの情報で反映するため）
                 saved.append(self._save(rk, "card", tp, "/JRADB/accessD.html", r["card_cname"],

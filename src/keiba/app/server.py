@@ -14,6 +14,7 @@ import json
 import os
 import secrets
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -76,7 +77,15 @@ class App:
         lp = self.paths.ledger_path
         key = (va, vb, lp.stat().st_mtime_ns if lp.exists() else 0)
         if key not in self._cmp_cache:
-            self._cmp_cache = {key: version_compare(lp, va, vb)}
+            try:
+                out = version_compare(lp, va, vb)
+            except sqlite3.OperationalError as exc:
+                # 収集が台帳を書いている間：同じ2つの版の前の結果があればそれを出し、無ければ「読み込み中」
+                old = next((v for k, v in self._cmp_cache.items() if k[:2] == (va, vb)), None)
+                if old is None:
+                    raise LedgerBusy(str(exc)) from exc
+                return {**old, "stale": "台帳の書込み中だったので、前に計算した比較を表示中"}
+            self._cmp_cache = {key: out}
         return self._cmp_cache[key]
 
     def locked(self, ip: str) -> bool:
@@ -224,6 +233,8 @@ def make_handler(app: App, port: int, extra_hosts=()):
                 src = app.cache.get(ctx["mode"])
                 if src.stale:
                     ctx["stale"] = src.stale
+                if u.path == "/purchases.csv" and src.stale:   # 古いデータのCSVは出さない（精算の状態が古いままになる）
+                    raise LedgerBusy(src.stale)
                 if u.path == "/purchases.csv":
                     return self._send(200, "﻿" + pages.purchases_csv(src, app.store), "text/csv; charset=utf-8",
                                       {"Content-Disposition": 'attachment; filename="keiba-purchases.csv"'})

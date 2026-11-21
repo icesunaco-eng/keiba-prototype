@@ -1271,3 +1271,55 @@ def test_ledger_busy_page(server, monkeypatch):
     data = {"token": app.token, "rk": RK, "kind": "buy", "combo": ["1-2-3"], "yen": ["100"]}
     code, body, _ = _req(port, "/buy", data, origin=f"http://127.0.0.1:{port}")
     assert code == 503 and "保存していない" in body and app.store.entries() == []
+
+
+# ---------------- 受け入れ再検証（💚20261121-20）の反例 ----------------
+
+def test_archive_torn_in_middle_of_japanese(live_paths):
+    from datetime import date as real_date
+    live = live_paths.data_dir / "live"
+    d = (real_date.today() - timedelta(days=8)).isoformat()
+    good = f"{d}|東京|1"
+    _archive_card(live, good, d, 4)
+    _archive_result(live, good, d, [3, 1, 2, 4])
+    line = json.dumps({"race_key": f"{d}|東京|2", "race_name": "２歳未勝利", "field_size": 4}, ensure_ascii=False).encode()
+    cut = line.index("歳".encode()) + 1                                          # 日本語の文字の途中で切れた
+    with open(live / "races_archive.jsonl", "ab") as f:
+        f.write(line[:cut])
+    from keiba.live.collector import append_lines
+    append_lines(live / "races_archive.jsonl", [json.dumps({"race_key": good, "field_size": 4, "post_time": "09:45",
+                                                             "surface": "芝", "distance_m": 1600}, ensure_ascii=False)])
+    src = Source(live_paths, "live")
+    assert src.results[good]["complete"] is True                                 # ほかの行は読める
+    assert src.races[good]["surface"] == "芝" and src.races[good]["distance_m"] == 1600   # 条件別の集計に使う
+
+
+def test_compare_during_ledger_lock(server, monkeypatch):
+    import sqlite3 as sq
+    app, port = server
+    from keiba.app import data as d
+    calls = {"n": 0}
+
+    def fake(lp, va, vb, *a, **k):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise sq.OperationalError("database is locked")
+        return {"races": 1, "rows": [], "a": va, "b": vb, "tp": "1h", "wallet": "ref_top10_equal"}
+    monkeypatch.setattr(d, "version_compare", fake)
+    first = app.compare("v1", "v2")
+    app.paths.ledger_path.touch()
+    import os
+    os.utime(app.paths.ledger_path, (1, 1))
+    again = app.compare("v1", "v2")
+    assert again["stale"] and again["races"] == first["races"]                  # 前の比較を出す
+    with pytest.raises(d.LedgerBusy):
+        app.compare("v3", "v4")                                                  # 前が無ければ「読み込み中」
+
+
+def test_csv_is_not_served_from_stale_data(server, monkeypatch):
+    app, port = server
+    src = app.cache.get("live")
+    monkeypatch.setattr(app.cache, "get", lambda mode: src)
+    src.stale = "台帳の書込み中"
+    code, body, _ = _req(port, "/purchases.csv")
+    assert code == 503 and "台帳を書いている" in body
