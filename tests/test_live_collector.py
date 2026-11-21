@@ -144,3 +144,52 @@ def test_pruned_races_are_archived(tmp_path):
     assert [x["race_key"] for x in lines] == ["2026-11-21|福島|1"]
     assert lines[0]["field_size"] == 15 and lines[0]["post_time"] == "09:45" and lines[0]["race_name"] == "2歳未勝利"
     assert "2026-11-21|福島|1" not in col.state["races"] and "2026-11-30|福島|1" in col.state["races"]
+
+
+def test_interrupted_archive_append_is_repaired_and_verified(tmp_path):
+    from keiba.live.collector import ARCHIVE_FILE, archived_keys
+    col = Collector(tmp_path, client=None, now=lambda: datetime(2026, 12, 1, 10, 0, tzinfo=JST))
+    for n in (1, 2):
+        col.state["races"][f"2026-11-21|福島|{n}"] = {"race_date": "2026-11-21", "venue": "福島", "race_number": n,
+                                                     "post_time": "09:45", "field_size": 15}
+    (tmp_path / ARCHIVE_FILE).write_text('{"race_key": "2026-11-14|東京|1", "field_si')   # 前回の追記が途中で止まった
+    col.refresh = lambda *a, **k: None
+    col.tick(log=lambda *a: None)
+    assert archived_keys(tmp_path / ARCHIVE_FILE) == {"2026-11-21|福島|1", "2026-11-21|福島|2"}
+    assert not col.state["races"]
+
+
+def test_failed_archive_write_keeps_races_scheduled(tmp_path, monkeypatch):
+    from keiba.live import collector as c
+    col = Collector(tmp_path, client=None, now=lambda: datetime(2026, 12, 1, 10, 0, tzinfo=JST))
+    col.state["races"]["2026-11-21|福島|1"] = {"race_date": "2026-11-21", "venue": "福島", "race_number": 1,
+                                              "post_time": "09:45", "field_size": 15}
+    col.refresh = lambda *a, **k: None
+
+    def broken(path, lines):
+        raise OSError("disk full")
+    monkeypatch.setattr(c, "append_lines", broken)
+    col.tick(log=lambda *a: None)
+    assert "2026-11-21|福島|1" in col.state["races"]                  # 記録できなければ予定表に残す
+
+
+def test_refresh_keeps_known_head_count(tmp_path, monkeypatch):
+    from keiba.live import collector as c
+    col = Collector(tmp_path, client=None, now=lambda: datetime(2026, 11, 22, 9, 0, tzinfo=JST))
+    rk = "2026-11-22|東京|1"
+    col.state["races"][rk] = {"race_date": "2026-11-22", "venue": "東京", "race_number": 1, "post_time": "10:00",
+                              "field_size": 4, "known_at": "2026-11-21T09:00:00+09:00"}
+    meeting = {"race_date": "2026-11-22", "venue": "東京",
+               "races": [{"race_number": 1, "post_time": "10:00", "field_size": None, "card_cname": "new"}]}   # 頭数の欄だけ読めない
+    monkeypatch.setattr(c.jra, "links", lambda page: [("/JRADB/accessD.html", "pw01drl-test")])
+    monkeypatch.setattr(c.jra, "parse_race_list", lambda page: meeting)
+
+    class Client:
+        count = 0
+
+        def get(self, path, cname):
+            return ""
+    col.client = Client()
+    col.refresh(force=True)
+    race = col.state["races"][rk]
+    assert race["field_size"] == 4 and race["card_cname"] == "new"      # 確かめた頭数は残し、新しい値は取り込む

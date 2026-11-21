@@ -444,8 +444,7 @@ class Source:
                 x["nums"].append(int(r.horse_number))
                 if r.status == "finished":
                     x["n"] += 1
-                    if pd.notna(r.finish_position):
-                        x["fin"].append((int(r.horse_number), int(r.finish_position)))
+                    x["fin"].append((int(r.horse_number), int(r.finish_position) if pd.notna(r.finish_position) else None))
                 elif r.status in ("withdrawn", "excluded"):
                     x["scr"].add(int(r.horse_number))
             for rk, x in per.items():

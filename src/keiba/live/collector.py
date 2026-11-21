@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -40,8 +41,62 @@ def deadline(race_date: str, post_time: str, tp: str) -> datetime:
 
 REFRESH_MINUTES = 30
 ARCHIVE_FILE = "races_archive.jsonl"   # 予定表から外したレースの記録（追記だけ）
+KEEP_FIELDS = ("post_time", "field_size", "race_name", "surface", "distance_m")   # 一覧の再取得で欠けても前の値を残す欄
 ARCHIVE_FIELDS = ("race_date", "venue", "race_number", "race_name", "post_time", "field_size", "surface", "distance_m")
 ODDS_TABS = {"win": ("単勝",), "trio": ("3連複", "３連複")}
+
+
+def _ends_without_newline(path: Path) -> bool:
+    """ファイルの最後が改行で終わっていないか（前回の追記が途中で止まったか）。OS の読取で最後の1バイトだけ見る。"""
+    try:
+        size = os.stat(path).st_size
+    except FileNotFoundError:
+        return False
+    if size == 0:
+        return False
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.lseek(fd, -1, os.SEEK_END)
+        return os.read(fd, 1) != b"\n"
+    finally:
+        os.close(fd)
+
+
+def append_lines(path: Path, lines: list[str]):
+    """1行ずつの記録ファイル（JSON Lines）に追記する。前回の追記が途中で止まって最後が改行で終わっていなければ、
+    先に改行を足してその行を閉じる（新しい行がくっつかないように。途中の行は読む側で飛ばす）。"""
+    text = ("\n" if _ends_without_newline(path) else "") + "".join(x + "\n" for x in lines)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
+def read_jsonl(path: Path) -> tuple[list[dict], int]:
+    """JSON Lines を読む。（読めた行, 読めなかった行の数）。途中で止まった行などは飛ばす。"""
+    rows, bad = [], 0
+    if not path.exists():
+        return rows, bad
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            x = json.loads(line)
+        except ValueError:
+            bad += 1
+            continue
+        if isinstance(x, dict):
+            rows.append(x)
+        else:
+            bad += 1
+    return rows, bad
+
+
+def archived_keys(path: Path) -> set[str]:
+    return {x["race_key"] for x in read_jsonl(path)[0] if isinstance(x.get("race_key"), str)}
 
 
 def _now() -> datetime:
@@ -79,8 +134,7 @@ class Collector:
         rec = {"race_key": race_key, "kind": kind, "time_point": tp, "fetched_at": ts.isoformat(timespec="seconds"),
                "path": str((d / name).relative_to(self.root)), "sha256": hashlib.sha256(body).hexdigest(),
                "source": jra.BASE + path, "cname": cname}
-        with open(self.root / "snapshots.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        append_lines(self.root / "snapshots.jsonl", [json.dumps(rec, ensure_ascii=False)])
         return rec
 
     def _write_state(self):
@@ -104,6 +158,8 @@ class Collector:
             for r in meeting["races"]:
                 rk = f"{meeting['race_date']}|{meeting['venue']}|{r['race_number']}"
                 prev = self.state["races"].get(rk, {})
+                # 一覧の一部の欄だけ読めなかったとき（None）は、前に確かめた値（頭数・発走時刻など）を消さない
+                r = {**r, **{k: prev[k] for k in KEEP_FIELDS if r.get(k) is None and prev.get(k) is not None}}
                 self.state["races"][rk] = {**r, "race_date": meeting["race_date"], "venue": meeting["venue"],
                                            "list_cname": cname,
                                            "known_at": prev.get("known_at", self.now().isoformat(timespec="seconds"))}
@@ -143,8 +199,7 @@ class Collector:
             if not odds_links:
                 saved.append({"race_key": rk, "kind": "odds_unavailable", "time_point": tp,
                               "fetched_at": self.now().isoformat(timespec="seconds"), "odds_status": r.get("odds_status")})
-                with open(self.root / "snapshots.jsonl", "a", encoding="utf-8") as f:
-                    f.write(json.dumps(saved[-1], ensure_ascii=False) + "\n")
+                append_lines(self.root / "snapshots.jsonl", [json.dumps(saved[-1], ensure_ascii=False)])
             else:
                 path, cname = odds_links[0]
                 first = self.client.get(path, cname)
@@ -198,13 +253,16 @@ class Collector:
         cutoff = (self.now() - timedelta(days=7)).date().isoformat()
         old = [k for k, v in self.state["races"].items() if v["race_date"] < cutoff]
         if old:
-            with open(self.root / ARCHIVE_FILE, "a", encoding="utf-8") as f:
-                for rk in old:
-                    v = self.state["races"][rk]
-                    f.write(json.dumps({"race_key": rk, **{k: v.get(k) for k in ARCHIVE_FIELDS},
-                                        "archived_at": self.now().isoformat(timespec="seconds")}, ensure_ascii=False) + "\n")
+            try:
+                append_lines(self.root / ARCHIVE_FILE, [
+                    json.dumps({"race_key": rk, **{k: self.state["races"][rk].get(k) for k in ARCHIVE_FIELDS},
+                                "archived_at": self.now().isoformat(timespec="seconds")}, ensure_ascii=False) for rk in old])
+            except OSError as exc:   # 書けなければ予定表に残し、次の回にもう一度
+                log(f"過去のレースの記録を書けなかった（予定表に残す）：{exc!r}")
+            saved = archived_keys(self.root / ARCHIVE_FILE)
             for rk in old:
-                self.state["races"].pop(rk)
+                if rk in saved:   # 記録を読み戻せたレースだけ予定表から外す
+                    self.state["races"].pop(rk)
         self._write_state()
         return {"requests": self.client.count, "saved": len(done), "races_known": len(self.state["races"]),
                 "missed": len(missed), "errors": len(errors)}

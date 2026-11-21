@@ -67,6 +67,9 @@ def result_problem(finished: list, finishers: int, scratched, payouts, rows: int
     numbers：結果の全行の馬番（取消・除外も含む。重複を見る）。
     一部しか読めていない結果を「完走3頭未満＝不成立」と取り違えないために、精算の前に確かめる。
     """
+    if any(pos is None for _, pos in finished):
+        # 完走なのに着順が空欄の馬がいる（途中まで読めたページなど）：同着の的中組が決まらないので待つ
+        return "着順が空欄の完走馬がいる（結果がそろうまで待つ）"
     nums = [int(n) for n, _ in finished]
     if numbers is not None:
         alln = [int(n) for n in numbers]

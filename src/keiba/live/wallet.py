@@ -52,7 +52,13 @@ def _snapshots(root: Path) -> pd.DataFrame:
     f = root / "snapshots.jsonl"
     if not f.exists():
         return pd.DataFrame(columns=["race_key", "kind", "time_point", "path", "sha256", "fetched_at"])
-    return pd.DataFrame([json.loads(x) for x in f.read_text(encoding="utf-8").splitlines() if x.strip()])
+    from .collector import read_jsonl
+    rows, bad = read_jsonl(f)   # 追記が途中で止まった行などは飛ばす（ほかの行は使う）
+    if bad:
+        print(f"snapshots.jsonl に読めない行が {bad}件（飛ばした）")
+    if not rows:
+        return pd.DataFrame(columns=["race_key", "kind", "time_point", "path", "sha256", "fetched_at"])
+    return pd.DataFrame(rows)
 
 
 def _read(root: Path, rec) -> str:

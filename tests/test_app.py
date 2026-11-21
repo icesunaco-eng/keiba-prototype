@@ -1206,3 +1206,32 @@ def test_wallet_skips_empty_snapshot_and_unknown_size(tmp_path):
     from keiba.settle import result_problem
     assert result_problem([(1, 1), (2, 2)], 2, set(), {}, 2, None)          # 頭数が分からなければ精算しない
     assert result_problem([(1, 1), (2, 2)], 2, set(), {}, 2, True)
+
+
+# ---------------- 受け入れ検証（💚20261121-17）の「止める」4件 ----------------
+
+def test_blank_rank_holds_dead_heat_settlement():
+    from keiba.settle import result_problem
+    from keiba.app.data import make_result
+    fin = [(1, 1), (2, 2), (3, 3), (4, None)]          # 4番の着順が空欄（途中まで読めたページ）
+    assert result_problem(fin, 4, set(), {"1-2-3": 500}, 4, 4)
+    res = make_result(fin, 4, set(), {"1-2-3": 500}, 4, 4, [1, 2, 3, 4])
+    st = settle_purchase({"kind": "buy", "total": 100, "stakes": {"1-2-4": 100}}, res)
+    assert st["status"] == "partial_result" and not st["counted"]
+
+
+def test_interrupted_snapshot_index_keeps_other_rows(live_paths, tmp_path):
+    live = live_paths.data_dir / "live"
+    (live / "snapshots").mkdir(exist_ok=True)
+    _archive_result(live, RK, "2026-11-22", [3, 7, 11, 1, 2, 4, 5, 6])
+    with open(live / "snapshots.jsonl", "a") as f:
+        f.write('{"race_key": "2026-11-22|東京|9", "kind": "res')        # 追記が途中で止まった
+    from keiba.live.collector import append_lines
+    append_lines(live / "snapshots.jsonl", [json.dumps({"race_key": "2026-11-22|東京|9", "kind": "odds_unavailable",
+                                                         "time_point": "1h", "fetched_at": "2026-11-22T10:00:00+09:00"})])
+    lines = (live / "snapshots.jsonl").read_text().splitlines()
+    assert json.loads(lines[-1])["kind"] == "odds_unavailable"        # 新しい行は途中の行にくっつかない
+    src = Source(live_paths, "live")
+    assert src.results[RK]["complete"] is True                          # ほかの行は読める
+    from keiba.live.wallet import _snapshots
+    assert len(_snapshots(live)) == len(lines) - 1
