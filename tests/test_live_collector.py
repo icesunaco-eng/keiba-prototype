@@ -128,3 +128,19 @@ def test_client_spacing_and_cap():
 def test_no_capture_after_deadline(tmp_path):
     col, _ = _collector(tmp_path, datetime(2026, 11, 22, 15, 32, tzinfo=JST))  # 発走8分前：15m の締切を過ぎている
     assert col.tick()["saved"] == 0
+
+
+def test_pruned_races_are_archived(tmp_path):
+    """予定表から外す（7日より前）ときに、頭数・発走時刻を races_archive.jsonl に追記して残す。"""
+    from keiba.live.collector import Collector
+    col = Collector(tmp_path, client=None, now=lambda: datetime(2026, 12, 1, 10, 0, tzinfo=JST))
+    col.state["races"]["2026-11-21|福島|1"] = {"race_date": "2026-11-21", "venue": "福島", "race_number": 1,
+                                              "race_name": "2歳未勝利", "post_time": "09:45", "field_size": 15}
+    col.state["races"]["2026-11-30|福島|1"] = {"race_date": "2026-11-30", "venue": "福島", "race_number": 1,
+                                              "post_time": "09:45", "field_size": 15}
+    col.refresh = lambda *a, **k: None
+    col.tick(log=lambda *a: None)
+    lines = [json.loads(x) for x in (tmp_path / "races_archive.jsonl").read_text().splitlines()]
+    assert [x["race_key"] for x in lines] == ["2026-11-21|福島|1"]
+    assert lines[0]["field_size"] == 15 and lines[0]["post_time"] == "09:45" and lines[0]["race_name"] == "2歳未勝利"
+    assert "2026-11-21|福島|1" not in col.state["races"] and "2026-11-30|福島|1" in col.state["races"]

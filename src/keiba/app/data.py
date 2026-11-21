@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import sqlite3
 import threading
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ..settle import result_problem, winning_combos  # noqa: F401（winning_combos は画面側からも使う）
+from ..settle import result_problem, valid_size, winning_combos  # noqa: F401（winning_combos は画面側からも使う）
 
 TIME_POINTS = ("24h", "1h", "15m")
 TP_LABEL = {"24h": "24時間前", "1h": "1時間前", "15m": "15分前"}
@@ -94,7 +95,8 @@ def is_skip(p: dict, alloc: str) -> bool:
 
 def ro_connect(path) -> sqlite3.Connection:
     """読取専用で開く。ファイル名に ? や # があっても別のファイルを作らないように、正しい file: URI にする。"""
-    return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+    # 収集が台帳に書いている間は少し待つ（すぐ「database is locked」にしない）
+    return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=15)
 
 
 def make_result(finished: list, finishers: int, scratched: set, payouts: dict, rows: int | None = None,
@@ -247,7 +249,7 @@ class Source:
             conn.close()
             live_versions = [v["version"] for v in self.versions if v["version"].startswith("live-")]
             self.version = live_versions[-1] if live_versions else None
-        self.race_meta = self._race_meta(state)
+        self.race_meta = self._race_archive(root)
         self._live_pages(root, state)
 
     def _live_pages(self, root: Path, state: dict):
@@ -266,7 +268,7 @@ class Source:
             meta = self.race_meta
             for rk in self.past_keys:   # 過去のレースとして、詳細・時点の変化・記録の画面でも開けるようにする（予定の一覧には出さない）
                 d, venue, num = (rk.split("|") + ["", "", "0"])[:3]
-                m = meta.get(rk) or {}   # 予定表にあったときの控え（頭数・発走時刻）。読めた行の数から頭数を推測しない
+                m = meta.get(rk) or {}   # 収集が予定表から外すときに残した記録（頭数・発走時刻）。読めた行の数から頭数を推測しない
                 self.races[rk] = {"race_key": rk, "race_date": d, "venue": venue,
                                   "race_number": int(num) if num.isdigit() else 0, "race_name": m.get("race_name") or "",
                                   "post_time": m.get("post_time"), "surface": None, "distance_m": None,
@@ -316,7 +318,7 @@ class Source:
                     sum(r["status"] == "finished" for r in rows), scr,
                     {p["combo"]: p["payout_yen"] for p in res.get("trio_payouts", [])},
                     len(rows), race.get("field_size"), [r["horse_number"] for r in rows])
-                if not race.get("field_size") and res_["complete"]:
+                if not valid_size(race.get("field_size")) and res_["complete"]:
                     # 予定の頭数を確かめられないレースは、行の欠けを見分けられないので保留
                     res_.update(complete=False, incomplete="予定の頭数を確かめられない（過去の原本）ので結果がそろっているか分からない")
                 self.results[rk] = res_
@@ -324,28 +326,44 @@ class Source:
         except Exception as exc:  # 原本の読取の失敗で画面を止めない
             self.notes.append(f"原本の読取に失敗：{exc!r}"[:200])
 
-    def _race_meta(self, state: dict) -> dict:
-        """予定表にあるレースの頭数・発走時刻を控えておき、予定表から外れた後も使う（確認アプリ専用の控え。台帳は書かない）。"""
-        f = self.paths.data_dir / "app" / "race_meta.json"
+    def _race_archive(self, root: Path) -> dict:
+        """収集が予定表から外したレースの記録（races_archive.jsonl、追記だけ）を読む。確認アプリは書かない。
+
+        1行ずつ中身を確かめ、おかしい行は使わない（そのレースは頭数が分からないので結果は保留になる）。同じレースは後の行を使う。
+        """
+        f = root / "races_archive.jsonl"
+        out: dict = {}
+        if not f.exists():
+            return out
+        bad = 0
         try:
-            meta = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
-        except (OSError, ValueError):
-            meta = {}
-        changed = False
-        for rk, r in (state.get("races") or {}).items():
-            row = {k: r.get(k) for k in ("field_size", "post_time", "race_name") if r.get(k)}
-            if row and meta.get(rk) != {**meta.get(rk, {}), **row}:
-                meta[rk] = {**meta.get(rk, {}), **row}
-                changed = True
-        if changed:
+            lines = f.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            self.notes.append(f"過去のレースの記録を読めない：{exc!r}"[:200])
+            return out
+        for line in lines:
+            if not line.strip():
+                continue
             try:
-                f.parent.mkdir(parents=True, exist_ok=True)
-                tmp = f.with_name(f".race_meta.{os.getpid()}.{threading.get_ident()}.tmp")
-                tmp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-                os.replace(tmp, f)
-            except OSError as exc:   # 控えを書けなくても画面は止めない（過去のレースは保留になる）
-                self.notes.append(f"レースの控えを書けない：{exc!r}"[:200])
-        return meta
+                row = json.loads(line)
+            except ValueError:
+                bad += 1
+                continue
+            rk = row.get("race_key") if isinstance(row, dict) else None
+            if not isinstance(rk, str) or rk.count("|") != 2:
+                bad += 1
+                continue
+            size = row.get("field_size")
+            post = row.get("post_time")
+            name = row.get("race_name")
+            out[rk] = {"field_size": size if valid_size(size) else None,
+                       "post_time": post if isinstance(post, str) and re.fullmatch(r"\d{2}:\d{2}", post) else None,
+                       "race_name": name if isinstance(name, str) else ""}
+            if not valid_size(size):
+                bad += 1
+        if bad:
+            self.notes.append(f"過去のレースの記録に読めない行・おかしい値が {bad}件（そのレースは保留）")
+        return out
 
     def _resettle_unsettled(self):
         """前の版が台帳に書いた「払戻待ち」の精算を、いま読めている完全な結果で計算し直して表示する（台帳は書き直さない）。"""
@@ -407,7 +425,8 @@ class Source:
                 self.races[r["race_key"]] = {
                     "race_key": r["race_key"], "race_date": str(r["race_date"])[:10], "venue": r["venue"],
                     "race_number": int(r["race_number"]), "race_name": "", "post_time": r.get("post_time"),
-                    "surface": r.get("surface"), "distance_m": r.get("distance_m"), "field_size": r.get("field_size"),
+                    "surface": r.get("surface"), "distance_m": r.get("distance_m"),
+                    "field_size": int(r["field_size"]) if r.get("field_size") is not None else None,
                     "going": r.get("going"), "race_class": r.get("race_class")}
         if (t / "runners.parquet").exists():
             run = pd.read_parquet(t / "runners.parquet", columns=["race_key", "horse_number", "horse_name", "finish_position", "status"])
@@ -478,7 +497,7 @@ class Cache:
         files = [self.paths.ledger_path]
         if mode == "live":
             root = self.paths.data_dir / "live"
-            files += [root / "state.json", root / "snapshots.jsonl"]
+            files += [root / "state.json", root / "snapshots.jsonl", root / "races_archive.jsonl"]
         else:
             files += [self.paths.tables_dir / f for f in ("races.parquet", "runners.parquet", "payouts.parquet")]
         return tuple(os.stat(f).st_mtime_ns if f.exists() else 0 for f in files)

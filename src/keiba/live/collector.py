@@ -39,6 +39,8 @@ def deadline(race_date: str, post_time: str, tp: str) -> datetime:
 
 
 REFRESH_MINUTES = 30
+ARCHIVE_FILE = "races_archive.jsonl"   # 予定表から外したレースの記録（追記だけ）
+ARCHIVE_FIELDS = ("race_date", "venue", "race_number", "race_name", "post_time", "field_size", "surface", "distance_m")
 ODDS_TABS = {"win": ("単勝",), "trio": ("3連複", "３連複")}
 
 
@@ -191,10 +193,18 @@ class Collector:
         health = {"checked_at": self.now().isoformat(timespec="seconds"), "missed": missed, "errors": errors,
                   "races_known": len(self.state["races"]), "taken": len(self.state["taken"])}
         (self.root / "health.json").write_text(json.dumps(health, ensure_ascii=False, indent=1))
-        # 終わった開催は state から外す（7日より前）
+        # 終わった開催は state から外す（7日より前）。外す前に、レースの情報（頭数・発走時刻など）を
+        # races_archive.jsonl に1行ずつ追記して残す（確認アプリが、過去のレースの結果がそろっているかを確かめるのに使う）
         cutoff = (self.now() - timedelta(days=7)).date().isoformat()
-        for rk in [k for k, v in self.state["races"].items() if v["race_date"] < cutoff]:
-            self.state["races"].pop(rk)
+        old = [k for k, v in self.state["races"].items() if v["race_date"] < cutoff]
+        if old:
+            with open(self.root / ARCHIVE_FILE, "a", encoding="utf-8") as f:
+                for rk in old:
+                    v = self.state["races"][rk]
+                    f.write(json.dumps({"race_key": rk, **{k: v.get(k) for k in ARCHIVE_FIELDS},
+                                        "archived_at": self.now().isoformat(timespec="seconds")}, ensure_ascii=False) + "\n")
+            for rk in old:
+                self.state["races"].pop(rk)
         self._write_state()
         return {"requests": self.client.count, "saved": len(done), "races_known": len(self.state["races"]),
                 "missed": len(missed), "errors": len(errors)}

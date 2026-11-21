@@ -142,7 +142,7 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame) -> tuple[pd.DataFr
             if last:
                 for c in inputs[(rk, last)]["card"]:
                     runners.append(_runner(rk, r, c, "pending"))
-        except (OSError, ValueError, KeyError, IndexError) as exc:
+        except Exception as exc:   # ファイルが無い・空・壊れている（lxml の ParserError など）
             del races[n_races:], runners[n_runners:]
             for k in [k for k in inputs if k[0] == rk]:
                 inputs.pop(k)

@@ -54,6 +54,11 @@ def missing_payouts(stakes: dict, finished: list, scratched, payouts) -> set[str
     return (winning_combos(finished) - set(payouts)) & live
 
 
+def valid_size(n) -> bool:
+    """予定の頭数として使える値か（真偽値を除く正の整数）。"""
+    return isinstance(n, int) and not isinstance(n, bool) and n > 0
+
+
 def result_problem(finished: list, finishers: int, scratched, payouts, rows: int | None = None, field_size=None,
                    numbers: list | None = None) -> str | None:
     """結果を精算に使えない理由（一部しか読めていない等）。使えれば None。
@@ -68,10 +73,10 @@ def result_problem(finished: list, finishers: int, scratched, payouts, rows: int
         if len(set(alln)) != len(alln):
             return "結果の馬番が重複している（着順を照合できない）"
     placed = [n for n, pos in finished if pos and pos <= 3]
-    try:
-        size = int(field_size) if field_size is not None else None
-    except (TypeError, ValueError):
-        size = None
+    if not valid_size(field_size):
+        # 予定の頭数が分からない・おかしいと、行の欠けを見分けられない（読めた行の数から推測しない）
+        return "予定の頭数が分からないので、結果がそろっているか確かめられない"
+    size = field_size
     if len(set(nums)) != len(nums) or set(nums) & {int(n) for n in scratched or ()}:
         return "結果の馬番が重複している（着順を照合できない）"
     if size and rows is not None and rows < size:

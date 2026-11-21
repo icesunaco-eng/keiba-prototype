@@ -56,9 +56,12 @@ def test_store_is_append_only_and_latest_rev_wins(tmp_path):
     assert s.note(RK) == "メモ2"
 
 
-def _res(fin, finishers=None, scratched=(), payouts=None):
+def _res(fin, finishers=None, scratched=(), payouts=None, field_size=None):
+    """全部の行を読めた結果（予定の頭数＝完走＋取消の行数。頭数を変えたいときは field_size）。"""
     from keiba.app.data import make_result
-    return make_result(fin, len(fin) if finishers is None else finishers, set(scratched), payouts or {})
+    rows = len(fin) + len(set(scratched))
+    return make_result(fin, len(fin) if finishers is None else finishers, set(scratched), payouts or {},
+                       rows, field_size or rows)
 
 
 def test_settle_purchase():
@@ -1006,12 +1009,9 @@ def test_archived_race_reads_result_and_opens_all_pages(live_paths, tmp_path):
 # ---------------- 再検証（💚20261121-7）の反例 ----------------
 
 def _meta(live, rk, field_size, post_time="09:45"):
-    """予定表にあったときの控え（確認アプリが書く data/app/race_meta.json）を作る。"""
-    f = live.parent / "app" / "race_meta.json"
-    f.parent.mkdir(parents=True, exist_ok=True)
-    meta = json.loads(f.read_text()) if f.exists() else {}
-    meta[rk] = {"field_size": field_size, "post_time": post_time}
-    f.write_text(json.dumps(meta, ensure_ascii=False))
+    """収集が予定表から外すときに残す記録（data/live/races_archive.jsonl）を1行足す。"""
+    with open(live / "races_archive.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"race_key": rk, "field_size": field_size, "post_time": post_time}, ensure_ascii=False) + "\n")
 
 
 def _archive_card(live, rk, day, n, post="9時45分", numbers=None):
@@ -1094,10 +1094,9 @@ def test_partial_card_and_result_do_not_guess_field_size(live_paths):
     assert st["status"] == "partial_result" and not st["counted"]
 
 
-def test_meta_is_kept_while_race_is_scheduled(live_paths):
+def test_app_does_not_write_race_files(live_paths):
     Source(live_paths, "live")
-    meta = json.loads((live_paths.data_dir / "app" / "race_meta.json").read_text())
-    assert meta[RK]["field_size"] == 8 and meta[RK]["post_time"] == "15:40"
+    assert not (live_paths.data_dir / "app" / "race_meta.json").exists()   # 確認アプリは控えを書かない（収集の記録を読むだけ）
 
 
 def test_real_card_post_time_across_tags():
@@ -1137,3 +1136,73 @@ def test_legacy_unsettled_rows_are_recomputed_for_display(live_paths, tmp_path):
     assert row["status"] == "settled" and row["recomputed"] and row["returned"] == 1200 * 4560 // 100
     tbl = {x["method"]: x for x in pages.wallet_table(src, "kelly")}
     assert tbl["ml_lgbm"]["pending"] == 0 and tbl["ml_lgbm"]["returned"] == 1200 * 4560 // 100
+
+
+# ---------------- 再検証（💚20261121-15）の反例 ----------------
+
+def test_bad_archive_values_are_held(live_paths):
+    from datetime import date as real_date
+    live = live_paths.data_dir / "live"
+    keys = []
+    for i, bad in enumerate(("not-a-number", True, -1, 0, None, 2.0)):
+        d = (real_date.today() - timedelta(days=8 + i)).isoformat()
+        rk = f"{d}|東京|{i + 1}"
+        keys.append(rk)
+        _archive_card(live, rk, d, 4, numbers=[1, 2])
+        _archive_result(live, rk, d, [1, 2], payout=False)
+        _meta(live, rk, bad)
+    src = Source(live_paths, "live")
+    for rk in keys:
+        st = settle_purchase({"kind": "buy", "total": 100, "stakes": {"1-2-3": 100}}, src.results[rk])
+        assert st["status"] == "partial_result" and not st["counted"], rk
+    assert any("おかしい値" in n for n in src.notes)
+
+
+def test_broken_archive_lines_do_not_break_pages(live_paths, tmp_path):
+    from datetime import date as real_date
+    live = live_paths.data_dir / "live"
+    d = (real_date.today() - timedelta(days=8)).isoformat()
+    good = f"{d}|東京|1"
+    _archive_card(live, good, d, 4)
+    _archive_result(live, good, d, [3, 1, 2, 4])
+    with open(live / "races_archive.jsonl", "a", encoding="utf-8") as f:
+        f.write("[1, 2]\nnull\n{broken\n" + json.dumps({"race_key": None}) + "\n" + '"文字列"\n')
+    _meta(live, good, 4)
+    (live / "snapshots").mkdir(exist_ok=True)
+    _archive_result(live, RK, "2026-11-22", [3, 7, 11, 1, 2, 4, 5, 6])      # 予定中のレース
+    src = Source(live_paths, "live")
+    assert src.results[good]["complete"] is True and src.results[RK]["complete"] is True
+    store = Store(tmp_path / "p.sqlite")
+    ctx = {"token": "t", "mode": "live", "theme": "auto", "size": "normal", "refresh": "off"}
+    for fn, q in ((pages.races_page, {}), (pages.history_page, {"f": "2w"}), (pages.results_page, {})):
+        assert "<html" in fn(ctx, src, store, q)
+
+
+def test_archive_change_reloads_cache(live_paths):
+    live = live_paths.data_dir / "live"
+    c = Cache(live_paths)
+    a = c.get("live")
+    _meta(live, "2026-11-01|東京|1", 4)
+    assert c.get("live") is not a
+
+
+def test_wallet_skips_empty_snapshot_and_unknown_size(tmp_path):
+    from keiba.live.wallet import _snapshots, live_tables
+    from tests.test_live_wallet import result_html
+    live = tmp_path / "live"
+    (live / "snapshots").mkdir(parents=True)
+    state = {"races": {
+        "2026-11-22|東京|1": {"race_date": "2026-11-22", "venue": "東京", "race_number": 1, "post_time": "10:00", "field_size": 4},
+        "2026-11-22|東京|2": {"race_date": "2026-11-22", "venue": "東京", "race_number": 2, "post_time": "10:30", "field_size": 4}}}
+    (live / "snapshots" / "empty.html").write_text("")                   # 0バイトの原本
+    (live / "snapshots" / "ok.html").write_text(result_html([3, 1, 2, 4]))
+    rows = [{"race_key": "2026-11-22|東京|1", "kind": "result", "time_point": "result", "path": "snapshots/empty.html",
+             "fetched_at": "2026-11-22T11:00:00+09:00"},
+            {"race_key": "2026-11-22|東京|2", "kind": "result", "time_point": "result", "path": "snapshots/ok.html",
+             "fetched_at": "2026-11-22T11:30:00+09:00"}]
+    (live / "snapshots.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+    _, _, inputs = live_tables(live, state, _snapshots(live))
+    assert ("2026-11-22|東京|2", "result") in inputs                       # 空の原本は、そのレースだけ飛ばす
+    from keiba.settle import result_problem
+    assert result_problem([(1, 1), (2, 2)], 2, set(), {}, 2, None)          # 頭数が分からなければ精算しない
+    assert result_problem([(1, 1), (2, 2)], 2, set(), {}, 2, True)
