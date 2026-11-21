@@ -150,7 +150,10 @@ def parse_card(page: str) -> list[dict]:
                          "f3": _t(td.xpath('.//div[@class="f3"]')[0]).replace("3F", "").strip() if td.xpath('.//div[@class="f3"]') else None,
                          "corners": [_t(li) for li in td.xpath('.//div[@class="corner_list"]//li')]})
         num_cells = tr.xpath(f"./td[{_has_class('num')}]")
-        num = _t(num_cells[0]) if len(num_cells) == 1 else ""
+        if len(num_cells) != 1:  # 実物の出走の行は馬番の欄がちょうど1つ。違う行があれば出馬表ごと使わない
+            rows.problems.append(f"馬番の欄が{len(num_cells)}個の行がある")
+            continue
+        num = _t(num_cells[0])
         # 取消・除外は、実物だと馬番の欄（と馬の欄の人気の行）が「取消」だけになる。欄の中身がその語とぴったり同じときだけ取消と見る
         # （馬名の注記などに「取消」の字があっても取消にしない）
         odds_line = horse.xpath('.//div[@class="odds_line"]')
@@ -175,6 +178,9 @@ def parse_card(page: str) -> list[dict]:
             "past_runs": past,
             "scratch": scratch,
         })
+    if rows.problems:
+        del rows[:]  # 問題のある出馬表は、途中まで読めた行も使わない
+        return rows
     _infer_scratched_numbers(rows)
     return rows
 
@@ -303,11 +309,12 @@ def parse_win_odds(page: str, field=None) -> dict:
             nums, tans = tr.xpath(f"./td[{_has_class('num')}]"), tr.xpath(f"./td[{_has_class('odds_tan')}]")
             if not nums and not tans:
                 continue  # 見出しの行など
-            digits = [int(_t(x)) for x in nums if _t(x).isdigit()]
-            if digits:  # 重複は、行の形の検査より先に数える（形の崩れた「取消」の行でも同じ馬番なら重複）
-                if digits[0] in seen:
+            # 重複は、行の形の検査より先に、行の中の馬番の欄すべてで数える
+            # （形の崩れた「取消」の行でも、どの欄の馬番でもほかの行と同じなら重複）
+            for d in (int(_t(x)) for x in nums if _t(x).isdigit()):
+                if d in seen:
                     dups += 1
-                seen.add(digits[0])
+                seen.add(d)
             if len(nums) != 1 or len(tans) != 1 or not _t(nums[0]).isdigit() or tans[0].xpath(".//table"):
                 bad += 1
                 continue
@@ -359,9 +366,11 @@ def parse_trio_odds(page: str, horses) -> dict:
             ths, tds = tr.xpath("./th"), tr.xpath("./td")
             if not ths and not tds:
                 continue
-            digits = [int(_t(x)) for x in ths if _t(x).isdigit()]
-            if digits and digits[0] not in head:  # 重複は、行の形の検査より先に数える（形の崩れた「取消」の行でも同じ組なら重複）
-                key = "-".join(map(str, sorted(head + [digits[0]])))
+            # 重複は、行の形の検査より先に、行の中の馬番の欄すべてで数える（形の崩れた「取消」の行でも、どの欄でも同じ組なら重複）
+            for d in (int(_t(x)) for x in ths if _t(x).isdigit()):
+                if d in head:
+                    continue
+                key = "-".join(map(str, sorted(head + [d])))
                 if key in seen:
                     dups += 1
                 seen.add(key)

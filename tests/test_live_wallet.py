@@ -743,3 +743,51 @@ def test_too_few_readable_runners_leaves_reason(tmp_path):
     held = {}
     live_tables(root, json.loads((root / "state.json").read_text()), _snapshots(root), held)
     assert "2頭" in held[f"{RK}|1h"]
+
+
+@pytest.mark.parametrize("order", ["second", "first"])
+def test_duplicate_in_any_number_cell_counts(order):
+    """みに💚20261121-23：馬番の欄が2つある「取消」行で、どちらかの欄が現役の馬番・組と同じなら重複（順番によらない）。"""
+    n = 4
+    full = list(range(1, n + 1))
+    cells = '<td class="num">5</td><td class="num">3</td>' if order == "second" else '<td class="num">3</td><td class="num">5</td>'
+    win = win_html(n=n).replace("<tbody>", f'<tbody><tr>{cells}<td class="odds_tan">取消</td></tr>', 1)
+    w = jra.parse_win_odds(win, full)
+    assert not w["ok"] and "馬番の重複1" in w["problems"]
+    ths = '<th scope="row">1</th><th scope="row">3</th>' if order == "second" else '<th scope="row">3</th><th scope="row">1</th>'
+    trio = trio_html(n=n).replace("<caption>1-2</caption><tbody>", f"<caption>1-2</caption><tbody><tr>{ths}<td>取消</td></tr>", 1)
+    t = jra.parse_trio_odds(trio, full)
+    assert not t["ok"] and t["duplicates"] == 1
+
+
+def test_card_row_with_two_number_cells_is_rejected():
+    """同じ穴の横展開：出馬表の出走の行に馬番の欄が2つあれば、出馬表ごと使わない。"""
+    ids = [f"H{h:04d}" for h in range(N)]
+    bad = card_html(ids).replace('<td class="num">8</td>', '<td class="num">8</td><td class="num">3</td>', 1)
+    rows = jra.parse_card(bad)
+    assert rows.problems and not list(rows)
+
+
+def test_odds_but_no_readable_numbers_leaves_reason(tmp_path):
+    """みに提案：オッズのページがあるのに出馬表の馬番が全部空なら、枠順確定前と区別して理由を残す。"""
+    from keiba.live.wallet import _snapshots, live_tables
+    ids = [f"H{h:04d}" for h in range(N)]
+    empty = card_html(ids)
+    for k in range(1, N + 1):
+        empty = empty.replace(f'<td class="num">{k}</td>', '<td class="num"></td>', 1)
+    paths, col = _setup(tmp_path, card=empty)
+    root = tmp_path / "live"
+    held = {}
+    live_tables(root, json.loads((root / "state.json").read_text()), _snapshots(root), held)
+    assert "1つも読めない" in held[f"{RK}|1h"]
+
+
+@pytest.mark.parametrize("fetched,odds_time,ok", [
+    ("2025-08-30T23:59:30+09:00", "00:00", True),   # 時計の進み30秒が日付をまたぐ（翌日 0:00 の発表）
+    ("2025-08-30T23:59:30+09:00", "00:02", False),  # 2分先は進みすぎ → 前日扱いで古い
+    ("2025-08-30T14:30:00+09:00", "14:31", True),   # 同じ日の1分の進み
+])
+def test_clock_skew_tolerance_across_midnight(fetched, odds_time, ok):
+    from keiba.live.wallet import time_reasons
+    race = {"race_date": "2025-09-01", "post_time": "15:40"}
+    assert (not time_reasons(odds_time, fetched, race, "24h")) == ok

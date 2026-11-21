@@ -124,9 +124,9 @@ def time_reasons(odds_time, fetched_at: str, race: dict, tp: str, label: str = "
     # 発表時刻には日付が無い。取得した日（日本時間）の時刻として読み、取得より後になるなら前の日の発表と見る
     # （前日に取る24時間前のオッズは、レース当日ではなく取得した日の発表。実物：11/22京都11Rを11/21 15:25に取得、発表15:24）
     fetched_jst = fetched.astimezone(dl.tzinfo)
-    t = datetime.fromisoformat(f"{fetched_jst.date()}T{odds_time}:00").replace(tzinfo=dl.tzinfo)
-    if t - fetched > timedelta(minutes=1):
-        t -= timedelta(days=1)
+    # 時計の進み（1分まで）は日付をまたいでも許す：前日・当日・翌日の候補のうち、取得+1分までで一番遅いものを使う
+    base = datetime.fromisoformat(f"{fetched_jst.date()}T{odds_time}:00").replace(tzinfo=dl.tzinfo)
+    t = max(c for c in (base + timedelta(days=k) for k in (-1, 0, 1)) if c - fetched <= timedelta(minutes=1))
     if t > dl:
         out.append(f"{label}締切後のオッズ（発表 {odds_time}）")
     if fetched - t > timedelta(minutes=STALE_MINUTES) or t - fetched > timedelta(minutes=1):
@@ -188,7 +188,11 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                     held[f"{rk}|{tp}"] = "出馬表を使わない：" + "・".join(card_all.problems)
                     continue
                 if not any(c["horse_number"] for c in card_all):
-                    continue  # 枠順の確定前（馬番が空）。この時点の入力は作らない
+                    # 枠順の確定前（馬番が空）。この時点の入力は作らない。
+                    # ただし、この時点のオッズのページがあるのに馬番が全部読めないのは確定前ではないので、理由を残す
+                    if len(s) and (s["kind"].isin(["odds_win", "odds_first", "odds_trio"]) & (s["time_point"] == tp)).any():
+                        held[f"{rk}|{tp}"] = "オッズのページはあるのに、出馬表の馬番が1つも読めない"
+                    continue
                 scratched = sorted(c["horse_number"] for c in card_all if c.get("scratch") and c["horse_number"] is not None)
                 # 番号の読めない行は出走馬に入れない（名簿の検査で不合格にして、理由を残す。例外で止めない）
                 card = [c for c in card_all if not c.get("scratch") and c["horse_number"] is not None]
