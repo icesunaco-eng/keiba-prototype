@@ -61,12 +61,15 @@ def _read(root: Path, rec) -> str:
 
 def card_problem(nums: list[int], field_size) -> str | None:
     """出馬表の名簿が信用できるか。馬番は1から頭数まで欠けず・重ならず、レース一覧の頭数とも同じであること。
+    頭数が分からないときも信用しない（末尾の欠けを見分けられないため）。名簿が信用できなければ、単勝・三連複とも使わない。
     取消の馬も名簿には残る（取消の印つき）ので、取消があってもこの決まりは変わらない。"""
     if len(nums) != len(set(nums)):
         return "出馬表の馬番が重複している"
     if sorted(nums) != list(range(1, len(nums) + 1)):
         return "出馬表の馬番が欠けている"
-    if field_size and int(field_size) != len(nums):
+    if not field_size:
+        return "レース一覧の頭数が分からない（出馬表の欠けを確かめられない）"
+    if int(field_size) != len(nums):
         return f"出馬表の頭数がレース一覧と合わない（出馬表 {len(nums)}・一覧 {field_size}）"
     return None
 
@@ -138,6 +141,8 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame) -> tuple[pd.DataFr
             active = [int(c["horse_number"]) for c in card]  # 出走馬（取消を除く）。オッズの組はこれとぴったり照らす
             card_issue = card_problem([int(c["horse_number"]) for c in card_all], r.get("field_size"))
             w = jra.parse_win_odds(_read(root, win.iloc[-1]), active) if len(win) else {"ok": False, "odds": {}}
+            if card_issue:  # 名簿が信用できなければ単勝も使わない（学習＋単勝・統合へ誤った入力を渡さない）
+                w = {"ok": False, "odds": {}, "reason": card_issue}
             t = {"ok": False, "odds": {}}
             trio_rec = trio.iloc[-1] if len(trio) else None
             if trio_rec is not None:

@@ -282,7 +282,7 @@ def parse_trio_odds(page: str, horses) -> dict:
                 num, val = tr.xpath('./*[contains(@class,"num")]'), tr.xpath('./td[contains(@class,"odds")]')
             else:
                 ths, tds = tr.xpath("./th"), tr.xpath("./td")
-                if len(ths) == 1 and _t(ths[0]).isdigit() and (len(tds) != 1 or tds[0].xpath(".//table")):
+                if any(_t(x).isdigit() for x in ths) and (len(ths) != 1 or len(tds) != 1 or tds[0].xpath(".//table")):
                     bad += 1  # 実物は「馬番の th 1つ・オッズの td 1つ」。形が違う行は使わない
                     continue
                 num, val = ths[:1], tds[:1]
@@ -296,7 +296,7 @@ def parse_trio_odds(page: str, horses) -> dict:
             third = int(_t(num[0]))
             if third in head:
                 continue
-            if not v:
+            if not v or not math.isfinite(v) or v <= 0:
                 bad += 1
                 continue
             key = "-".join(map(str, sorted(head + [third])))

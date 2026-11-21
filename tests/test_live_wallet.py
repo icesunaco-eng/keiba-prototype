@@ -360,3 +360,40 @@ def test_trio_odds_ignores_nested_tables_and_extra_cells():
     page = _fuku3(rows).replace('<th scope="row">3</th><td>16.0</td>', '<th scope="row">3</th><td>1</td><td>123.5</td>', 1)
     t = jra.parse_trio_odds(page, [1, 2, 3, 4])
     assert not t["ok"] and t["odds"].get("1-2-3") is None
+
+
+def _live_inputs(tmp_path, **kw):
+    from keiba.live.wallet import _snapshots, live_tables
+    paths, col = _setup(tmp_path, **kw)
+    root = tmp_path / "live"
+    state = json.loads((root / "state.json").read_text())
+    return paths, col, root, state, live_tables(root, state, _snapshots(root))[2][(RK, "1h")]
+
+
+def test_broken_or_unknown_roster_blocks_win_odds_too(tmp_path):
+    """みに指摘（3回目 重大）：名簿の末尾が欠けたとき・頭数が分からないときは、単勝も三連複も使わない。"""
+    from keiba.live.wallet import _snapshots, card_problem, live_tables
+    assert "分からない" in card_problem([1, 2, 3], None)
+    ids = [f"H{h:04d}" for h in range(N)]
+    rows = card_html(ids).split("<tr>")
+    tail_missing = "<tr>".join(r for r in rows if f'<td class="num">{N}</td>' not in r)
+    *_, inp = _live_inputs(tmp_path / "a", card=tail_missing)
+    assert not inp["gate"]["pass"] and not inp["win"]["ok"] and "頭数" in inp["win"]["reason"]
+    paths, col, root, state, inp = _live_inputs(tmp_path / "b")
+    assert inp["gate"]["pass"] and inp["win"]["ok"]
+    state["races"][RK]["field_size"] = None
+    (root / "state.json").write_text(json.dumps(state, ensure_ascii=False))
+    inp = live_tables(root, state, _snapshots(root))[2][(RK, "1h")]
+    assert not inp["gate"]["pass"] and not inp["win"]["ok"]
+
+
+def test_trio_odds_rows_need_exactly_one_th_and_td():
+    """みに指摘（3回目 要修正）：th が2つの行の最初の td を倍率にしない。倍率は有限の正の数だけ。"""
+    rows = _all_rows([1, 2, 3, 4])
+    page = _fuku3(rows).replace('<th scope="row">3</th><td>16.0</td>',
+                                '<th scope="row">3</th><th>x</th><td>1</td><td>123.5</td>', 1)
+    t = jra.parse_trio_odds(page, [1, 2, 3, 4])
+    assert not t["ok"] and "1-2-3" not in t["odds"]
+    page = _fuku3(rows).replace('<td>16.0</td>', "<td>" + "9" * 400 + "</td>", 1)
+    t = jra.parse_trio_odds(page, [1, 2, 3, 4])
+    assert not t["ok"] and "1-2-3" not in t["odds"]
