@@ -303,13 +303,15 @@ def parse_win_odds(page: str, field=None) -> dict:
             nums, tans = tr.xpath(f"./td[{_has_class('num')}]"), tr.xpath(f"./td[{_has_class('odds_tan')}]")
             if not nums and not tans:
                 continue  # 見出しの行など
+            digits = [int(_t(x)) for x in nums if _t(x).isdigit()]
+            if digits:  # 重複は、行の形の検査より先に数える（形の崩れた「取消」の行でも同じ馬番なら重複）
+                if digits[0] in seen:
+                    dups += 1
+                seen.add(digits[0])
             if len(nums) != 1 or len(tans) != 1 or not _t(nums[0]).isdigit() or tans[0].xpath(".//table"):
                 bad += 1
                 continue
             n, v = int(_t(nums[0])), _num(_t(tans[0]))
-            if n in seen:
-                dups += 1  # 同じ馬番の行が2つ（「取消」の行でも数える）
-            seen.add(n)
             if v is None:
                 bad += 1  # 「取消」など
                 continue
@@ -357,6 +359,12 @@ def parse_trio_odds(page: str, horses) -> dict:
             ths, tds = tr.xpath("./th"), tr.xpath("./td")
             if not ths and not tds:
                 continue
+            digits = [int(_t(x)) for x in ths if _t(x).isdigit()]
+            if digits and digits[0] not in head:  # 重複は、行の形の検査より先に数える（形の崩れた「取消」の行でも同じ組なら重複）
+                key = "-".join(map(str, sorted(head + [digits[0]])))
+                if key in seen:
+                    dups += 1
+                seen.add(key)
             if len(ths) != 1 or len(tds) != 1 or not _t(ths[0]).isdigit() or tds[0].xpath(".//table"):
                 bad += 1  # 形が違う行は使わない
                 continue
@@ -365,9 +373,6 @@ def parse_trio_odds(page: str, horses) -> dict:
                 bad += 1
                 continue
             key = "-".join(map(str, sorted(head + [third])))
-            if key in seen:
-                dups += 1  # 同じ組の行が2つ（「取消」の行でも数える）
-            seen.add(key)
             if v is None:
                 bad += 1  # 「取消」「---」など
                 continue

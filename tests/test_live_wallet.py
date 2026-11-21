@@ -67,7 +67,7 @@ def test_parsers_self_check():
     assert r["trio_payouts"] == [{"combo": "1-2-3", "payout_yen": 4560}] and r["rows"][0]["finish_time_s"] == 95.1
 
 
-def _setup(tmp_path, trio=None, card=None, at=(14, 30), tp="1h"):
+def _setup(tmp_path, trio=None, card=None, at=(14, 30), tp="1h", day=30, win=None):
     paths = Paths(data_dir=tmp_path)
     races, runners = make_tables(n_days=34, races_per_day=6, field=10, horses=60)
     paths.tables_dir.mkdir(parents=True)
@@ -75,10 +75,10 @@ def _setup(tmp_path, trio=None, card=None, at=(14, 30), tp="1h"):
     runners.to_parquet(paths.tables_dir / "runners.parquet")
     ids = [f"H{h:04d}" for h in range(N)]
     root = tmp_path / "live"
-    col = Collector(root, client=None, now=lambda: datetime(2025, 8, 30, *at, tzinfo=JST))
+    col = Collector(root, client=None, now=lambda: datetime(2025, 8, day, *at, tzinfo=JST))
     col.state["races"][RK] = {"race_date": "2025-08-30", "venue": "東京", "race_number": 11, "post_time": "15:40",
                               "surface": "芝", "distance_m": 1600, "field_size": N}
-    for kind, page in (("card", card or card_html(ids)), ("odds_win", win_html()), ("odds_trio", trio or trio_html())):
+    for kind, page in (("card", card or card_html(ids)), ("odds_win", win or win_html()), ("odds_trio", trio or trio_html())):
         col._save(RK, kind, tp, "/JRADB/x", "c", page)
     col._write_state()
     return paths, col
@@ -677,3 +677,69 @@ def test_win_odds_with_good_time_is_used(tmp_path):
     root = tmp_path / "live"
     inp = live_tables(root, json.loads((root / "state.json").read_text()), _snapshots(root))[2][(RK, "1h")]
     assert inp["win"]["ok"] and inp["win"]["odds_time"] == "14:25"
+
+
+# ---- みにの6回目の独立検証（💚20261121-22）の指摘 ----
+
+def test_previous_day_24h_odds_are_dated_by_fetch_day(tmp_path):
+    """指摘1：前日に取った24時間前のオッズの発表時刻は、取得した日の時刻。レース当日の時刻として「締切後・古い」にしない。"""
+    from keiba.live.wallet import _snapshots, live_tables
+    paths, col = _setup(tmp_path, tp="24h", day=29)  # レースは 8/30 15:40。24時間前の締切は 8/29 15:40。取得 8/29 14:30・発表 14:25
+    root = tmp_path / "live"
+    inp = live_tables(root, json.loads((root / "state.json").read_text()), _snapshots(root))[2][(RK, "24h")]
+    assert inp["gate"]["pass"], inp["gate"]["reasons"]
+    assert inp["win"]["ok"]
+
+
+@pytest.mark.parametrize("fetched,odds_time,ok", [
+    ("2025-08-30T00:05:00+09:00", "23:58", True),   # 日付をまたいだ直後：前の日の 23:58 発表
+    ("2025-08-30T00:05:00+09:00", "00:04", True),
+    ("2025-08-30T00:05:00+09:00", "00:30", False),  # 取得より後の時刻 → 前の日の発表と見なすと古すぎる
+    ("2025-08-30T14:30:00+09:00", "13:00", False),  # 古い
+])
+def test_odds_time_date_rolls_back_only_across_midnight(fetched, odds_time, ok):
+    from keiba.live.wallet import time_reasons
+    race = {"race_date": "2025-08-31", "post_time": "15:40"}
+    assert (not time_reasons(odds_time, fetched, race, "24h")) == ok
+
+
+def test_index_line_cut_before_newline_does_not_swallow_next_record(tmp_path):
+    """指摘2：目録の最後の行が改行の前で切れていても、次に足す行は別の行になり、次のレースの記録が消えない。"""
+    from keiba.live.wallet import _snapshots
+    paths, col = _setup(tmp_path)
+    root = tmp_path / "live"
+    with open(root / "snapshots.jsonl", "a", encoding="utf-8") as f:
+        f.write('{"race_key": "2025-08-30|東京|11", "kind": "odds_tr')  # 改行の前で切れた
+    rec = col._save("2025-08-30|東京|12", "card", "1h", "/JRADB/x", "c", card_html([f"H{h:04d}" for h in range(N)]))
+    snaps = _snapshots(root)
+    assert snaps.attrs["bad_lines"] == 1 and rec["path"] in set(snaps["path"])
+    # すでにつながってしまった行（古い版で書かれたもの）も、読める記録は拾う
+    joined = '{"race_key": "x", "kind": "odds_tr' + json.dumps(rec, ensure_ascii=False) + "\n"
+    (root / "snapshots.jsonl").write_text(joined, encoding="utf-8")
+    snaps = _snapshots(root)
+    assert list(snaps["path"]) == [rec["path"]] and snaps.attrs["bad_lines"] == 1
+
+
+def test_duplicate_rows_with_extra_cells_still_count():
+    """指摘3：有効な行と同じ馬番・組の「取消」の行に余分なセルがあっても、重複として数える。"""
+    full = list(range(1, N + 1))
+    page = trio_html().replace('<th scope="row">3</th><td>16.0</td>',
+                               '<th scope="row">3</th><td>16.0</td></tr><tr><th scope="row">3</th><td>取消</td><td>9.9</td>', 1)
+    t = jra.parse_trio_odds(page, full)
+    assert not t["ok"] and t["duplicates"] == 1
+    win = win_html().replace("</tbody>", '<tr><td class="num">3</td><td class="odds_tan">取消</td><td class="odds_tan">9.9</td></tr></tbody>')
+    assert not jra.parse_win_odds(win, full)["ok"]
+
+
+def test_too_few_readable_runners_leaves_reason(tmp_path):
+    """提案：取消のあと読める出走馬が3頭未満なら、理由を残す。"""
+    from keiba.live.wallet import _snapshots, live_tables
+    ids = [f"H{h:04d}" for h in range(N)]
+    card = card_html(ids)
+    for k in range(3, N + 1):
+        card = card.replace(f'<td class="num">{k}</td>', '<td class="num"><span class="cap">取消</span></td>', 1)
+    paths, col = _setup(tmp_path, card=card)
+    root = tmp_path / "live"
+    held = {}
+    live_tables(root, json.loads((root / "state.json").read_text()), _snapshots(root), held)
+    assert "2頭" in held[f"{RK}|1h"]

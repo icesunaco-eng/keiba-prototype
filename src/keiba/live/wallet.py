@@ -56,15 +56,28 @@ def _snapshots(root: Path) -> pd.DataFrame:
     for x in f.read_text(encoding="utf-8", errors="replace").splitlines():
         if not x.strip():
             continue
-        try:
-            rec = json.loads(x)
-        except json.JSONDecodeError:
-            bad += 1  # 途中で切れた行など。その行だけ使わず、全体は止めない
-            continue
-        if isinstance(rec, dict):
-            rows.append(rec)  # ページの無い記録（odds_unavailable など）も今までどおり残す
-        else:
-            bad += 1
+        # 1行に複数の記録がつながっていることがある（前の書き込みが改行の前で切れ、次の行が続けて書かれた）。
+        # 行の頭から順に JSON を読み、読めた記録は使う。読めない部分（切れた記録）だけ捨てる
+        pos, dec = 0, json.JSONDecoder()
+        while pos < len(x):
+            while pos < len(x) and x[pos].isspace():
+                pos += 1
+            if pos >= len(x):
+                break
+            try:
+                rec, end = dec.raw_decode(x, pos)
+            except json.JSONDecodeError:
+                nxt = x.find('{"race_key"', pos + 1)  # 切れた記録を飛ばして、次の記録の頭から読み直す
+                bad += 1
+                if nxt < 0:
+                    break
+                pos = nxt
+                continue
+            if isinstance(rec, dict):
+                rows.append(rec)  # ページの無い記録（odds_unavailable など）も今までどおり残す
+            else:
+                bad += 1
+            pos = end
     df = pd.DataFrame(rows, columns=None if rows else ["race_key", "kind", "time_point", "path", "sha256", "fetched_at"])
     df.attrs["bad_lines"] = bad
     return df
@@ -108,7 +121,12 @@ def time_reasons(odds_time, fetched_at: str, race: dict, tp: str, label: str = "
     if not odds_time:
         out.append(f"{label}オッズの時刻が分からない")
         return out
-    t = datetime.fromisoformat(f"{race['race_date']}T{odds_time}:00{JST}")
+    # 発表時刻には日付が無い。取得した日（日本時間）の時刻として読み、取得より後になるなら前の日の発表と見る
+    # （前日に取る24時間前のオッズは、レース当日ではなく取得した日の発表。実物：11/22京都11Rを11/21 15:25に取得、発表15:24）
+    fetched_jst = fetched.astimezone(dl.tzinfo)
+    t = datetime.fromisoformat(f"{fetched_jst.date()}T{odds_time}:00").replace(tzinfo=dl.tzinfo)
+    if t - fetched > timedelta(minutes=1):
+        t -= timedelta(days=1)
     if t > dl:
         out.append(f"{label}締切後のオッズ（発表 {odds_time}）")
     if fetched - t > timedelta(minutes=STALE_MINUTES) or t - fetched > timedelta(minutes=1):
@@ -175,6 +193,7 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                 # 番号の読めない行は出走馬に入れない（名簿の検査で不合格にして、理由を残す。例外で止めない）
                 card = [c for c in card_all if not c.get("scratch") and c["horse_number"] is not None]
                 if len(card) < 3:
+                    held[f"{rk}|{tp}"] = f"出走馬（番号の読める・取消でない馬）が{len(card)}頭で、三連複を作れない"
                     continue
                 win = s[(s["kind"].isin(["odds_win", "odds_first"])) & (s["time_point"] == tp) & before]
                 trio = s[(s["kind"] == "odds_trio") & (s["time_point"] == tp)]  # 締切後のものも判定に出して不合格にする
