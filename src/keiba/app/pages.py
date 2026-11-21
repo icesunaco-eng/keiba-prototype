@@ -840,7 +840,7 @@ def history_page(ctx, src, store, q) -> str:
 def history_detail_page(ctx, src, store, q) -> str:
     rk = q.get("rk", "")
     r = src.races.get(rk)
-    if not r and not store.entries(race_key=rk):
+    if not r and not store.entries(race_key=rk) and rk not in src.past_keys and not store.note(rk):
         return layout(ctx, "履歴の詳細", empty("レースが見つからないよ", ""), "history", "/history")
     r = r or {"race_key": rk, "venue": rk.split("|")[1], "race_number": rk.split("|")[2], "race_date": rk.split("|")[0]}
     body = [f'<p class="muted" style="margin:0">{h(race_title(r))}・{day_label(r["race_date"])}</p>'

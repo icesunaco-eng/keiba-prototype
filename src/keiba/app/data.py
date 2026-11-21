@@ -132,7 +132,10 @@ def make_result(finished: list, finishers: int, scratched: set, payouts: dict, r
     except (TypeError, ValueError):
         size = None
     incomplete = None
-    if size and rows is not None and rows < size:
+    fin_nums = [int(n) for n, _ in finished]
+    if len(set(fin_nums)) != len(fin_nums) or set(fin_nums) & {int(n) for n in scratched}:
+        incomplete = "結果の馬番が重複している（着順を照合できない）"
+    elif size and rows is not None and rows < size:
         incomplete = f"結果は{size}頭のうち{rows}頭分しか読めていない"
     elif int(finishers) >= 3 and len(placed) < 3:
         incomplete = f"3着までの着順が{len(placed)}頭分しか読めていない"
@@ -164,6 +167,8 @@ def card_problem(card: list, field_size=None) -> str | None:
     except (TypeError, ValueError):
         size = None
     expect = set(range(1, max(size or 0, max(nums)) + 1))
+    if size and len(nums) > size:
+        return f"予定の{size}頭より多い{len(nums)}頭の行がある（{max(nums)}番まで）"
     lack = sorted(expect - set(nums))
     if lack:
         return f"{len(expect)}頭のうち " + "、".join(f"{n}番" for n in lack) + " の行が無い"

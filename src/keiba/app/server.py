@@ -345,12 +345,15 @@ def make_handler(app: App, port: int, extra_hosts=()):
                 body = pages.buy_form(ctx, src, app.store, q, str(exc), {"kind": kind, "rows": rows, "memo": one.get("memo", ""),
                                                                        "fm": as_mode or fm})
                 return self._send(HTTPStatus.BAD_REQUEST, body)
+            # 確認で表示とちがうモードを選んで保存したら、保存した記録が見えるように表示もそのモードに切り替える
+            switch = ([f"mode={mode}; Path=/; Max-Age=31536000; SameSite=Strict; HttpOnly"]
+                      if as_mode and as_mode != ctx["mode"] else None)
             if one.get("back") == "race":   # 戻り先は、送られた文字ではなく決まった画面からサーバーが組み立てる
                 tab = one.get("tab") if one.get("tab") in METHOD_TABS else "ml"
                 tp = one.get("tp") if one.get("tp") in TIME_POINTS else None
                 a = one.get("a") if one.get("a") in ALLOC_LABEL else None
-                return self._redirect(pages.url("/race", rk=rk, m=tab, tp=tp, a=a, saved="skip"))
-            return self._redirect(pages.url("/history/detail", rk=rk))
+                return self._redirect(pages.url("/race", rk=rk, m=tab, tp=tp, a=a, saved="skip"), switch)
+            return self._redirect(pages.url("/history/detail", rk=rk), switch)
 
     return Handler
 

@@ -894,3 +894,56 @@ def test_failed_reinstall_keeps_current_plist(tmp_path):
     first.mkdir()
     r = _autostart(first, "install", loaded=False)                    # 初めて：LaunchAgents のフォルダも無い
     assert r.returncode == 0 and (first / "home/Library/LaunchAgents/com.heroines.keiba-app.plist").exists()
+
+
+# ---------------- 再検証（💚20261120-12）の反例 ----------------
+
+def test_duplicate_result_numbers_are_held():
+    from keiba.app.data import make_result
+    res = make_result([(1, 1), (2, 2), (1, 1), (2, 2)], 4, set(), {}, rows=4, field_size=4)
+    assert res["complete"] is False and "重複" in res["incomplete"]
+    st = settle_purchase({"kind": "buy", "total": 100, "stakes": {"1-2-4": 100}}, res)
+    assert st["status"] == "partial_result" and not st["counted"]
+
+
+def test_card_with_more_rows_than_planned():
+    from keiba.app.data import card_problem
+    assert "多い" in card_problem(_card([1, 2, 3, 4, 5, 6, 7]), 6)
+    assert card_problem(_card([1, 2, 3, 4, 5, 6]), 6) is None
+
+
+def test_archived_race_detail_opens(live_paths, tmp_path):
+    from datetime import date as real_date
+    old = (real_date.today() - timedelta(days=10)).isoformat()
+    live = live_paths.data_dir / "live"
+    (live / "snapshots.jsonl").write_text(json.dumps({"race_key": f"{old}|東京|5", "kind": "odds_unavailable",
+                                                      "time_point": "24h", "fetched_at": f"{old}T09:00:00+09:00"},
+                                                     ensure_ascii=False) + "\n")
+    src = Source(live_paths, "live")
+    out = pages.history_detail_page({"token": "t", "mode": "live"}, src, Store(tmp_path / "p.sqlite"), {"rk": f"{old}|東京|5"})
+    assert "見つからない" not in out and "東京" in out
+
+
+def test_chosen_mode_switches_view_after_save(server):
+    app, port = server
+    form = {"token": app.token, "rk": RK, "kind": "buy", "m": "ml_lgbm", "tp": "15m", "fm": "check",
+            "combo": ["3-7-11"], "yen": ["100"], "memo": "", "as_mode": "check"}
+    code, _, headers = _req(port, "/buy", form, origin=f"http://127.0.0.1:{port}")
+    assert code == 303 and "mode=check" in headers.get("Set-Cookie", "")     # 保存した練習の記録が見える表示へ
+
+
+def test_failed_plist_move_rolls_back_running_job(tmp_path):
+    agents = tmp_path / "home/Library/LaunchAgents"
+    agents.mkdir(parents=True)
+    plist = agents / "com.heroines.keiba-app.plist"
+    plist.write_text("OLD")
+    agents.chmod(0o555)          # 置き換え（mv）だけが失敗する
+    try:
+        r = _autostart(tmp_path, "install")
+    finally:
+        agents.chmod(0o755)
+    calls = (tmp_path / "calls").read_text().split("\n")
+    assert r.returncode == 1 and plist.read_text() == "OLD"
+    assert "置けなかった" in r.stderr and "前の設定で登録し直した" in r.stderr
+    # 新しい登録のあとに外して、前の設定で登録し直している
+    assert calls[-4:-1] == ["launchctl bootstrap", "launchctl bootout", "launchctl bootstrap"]

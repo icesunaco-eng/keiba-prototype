@@ -41,17 +41,17 @@ install)
 PL
   ST=$(job_state)
   if [ "$ST" = unknown ]; then
-    rm -f "$NEW"; rmdir "$TMPD"
+    rm -rf "$TMPD" || true
     echo "自動起動の状態を調べられなかったので、入れ直すのをやめたよ。今の plist はそのまま：${PLIST}" >&2
     exit 1
   fi
   if [ "$ST" = loaded ] && ! launchctl bootout "gui/$(id -u)/$LABEL"; then
-    rm -f "$NEW"; rmdir "$TMPD"
+    rm -rf "$TMPD" || true
     echo "今の自動起動を止められなかったよ（launchctl bootout が失敗）。今の plist はそのまま：${PLIST}" >&2
     exit 1
   fi
   if ! launchctl bootstrap "gui/$(id -u)" "$NEW"; then
-    rm -f "$NEW"; rmdir "$TMPD"
+    rm -rf "$TMPD" || true
     echo "新しい設定で登録できなかったよ（launchctl bootstrap が失敗）。plist は前のまま：${PLIST}" >&2
     if [ "$ST" = loaded ] && [ -f "$PLIST" ]; then
       if launchctl bootstrap "gui/$(id -u)" "$PLIST"; then
@@ -63,11 +63,20 @@ PL
     exit 1
   fi
   if ! mv "$NEW" "$PLIST"; then
-    rmdir "$TMPD" 2>/dev/null
-    echo "登録はできたけど plist を置き換えられなかったよ（次のログインでは前の設定になる）：${PLIST}" >&2
+    # 動いている設定とディスクの設定がずれないように、新しい登録を外して前の状態に戻す
+    echo "新しい plist を置けなかったよ（${PLIST}）。新しい登録を外して前の状態に戻すね" >&2
+    launchctl bootout "gui/$(id -u)/$LABEL" || echo "新しい登録を外せなかったよ。sh ${0} status で確認してね" >&2
+    if [ "$ST" = loaded ] && [ -f "$PLIST" ]; then
+      if launchctl bootstrap "gui/$(id -u)" "$PLIST"; then
+        echo "前の設定で登録し直したよ" >&2
+      else
+        echo "前の設定でも登録し直せなかったよ。sh ${0} status で確認してね" >&2
+      fi
+    fi
+    rm -rf "$TMPD" || true
     exit 1
   fi
-  rmdir "$TMPD"
+  rm -rf "$TMPD" || true
   echo "入れたよ：${PLIST}（ログ ${LOG}）"
   ;;
 uninstall)
