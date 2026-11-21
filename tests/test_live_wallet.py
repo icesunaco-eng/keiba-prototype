@@ -571,3 +571,15 @@ def test_scratch_race_end_to_end(tmp_path):
     inp = live_tables(root, json.loads((root / "state.json").read_text()), _snapshots(root))[2][(RK, "1h")]
     assert inp["scratched"] == [5] and inp["gate"]["pass"] and inp["win"]["ok"]
     assert len(inp["trio"]["odds"]) == 35 and not any("5" in k.split("-") for k in inp["trio"]["odds"])
+
+
+def test_unreadable_card_row_fails_gate_with_reason(tmp_path):
+    """番号の読めない行（取消でない）がある出馬表：例外で保留にせず、理由つきで不合格にする。単勝も使わない。"""
+    ids = [f"H{h:04d}" for h in range(N)]
+    bad = card_html(ids).replace(f'<td class="num">{N}</td>', '<td class="num">―</td>', 1)
+    held = {}
+    from keiba.live.wallet import _snapshots, live_tables
+    paths, col = _setup(tmp_path, card=bad)
+    root = tmp_path / "live"
+    inp = live_tables(root, json.loads((root / "state.json").read_text()), _snapshots(root), held)[2][(RK, "1h")]
+    assert not held and not inp["gate"]["pass"] and not inp["win"]["ok"] and "読めない" in inp["gate"]["card_issue"]

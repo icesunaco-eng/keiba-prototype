@@ -145,8 +145,9 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                 card_all = jra.parse_card(_read(root, cards.iloc[-1]))
                 if not any(c["horse_number"] for c in card_all):
                     continue  # 枠順の確定前（馬番が空）。この時点の入力は作らない
-                scratched = sorted(c["horse_number"] for c in card_all if c.get("scratch"))
-                card = [c for c in card_all if not c.get("scratch")]
+                scratched = sorted(c["horse_number"] for c in card_all if c.get("scratch") and c["horse_number"] is not None)
+                # 番号の読めない行は出走馬に入れない（名簿の検査で不合格にして、理由を残す。例外で止めない）
+                card = [c for c in card_all if not c.get("scratch") and c["horse_number"] is not None]
                 if len(card) < 3:
                     continue
                 win = s[(s["kind"].isin(["odds_win", "odds_first"])) & (s["time_point"] == tp) & before]
