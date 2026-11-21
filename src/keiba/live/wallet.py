@@ -59,6 +59,25 @@ def _read(root: Path, rec) -> str:
     return (root / rec["path"]).read_text(encoding="utf-8")
 
 
+def card_problem(nums: list[int], field_size) -> str | None:
+    """出馬表の名簿が信用できるか。馬番は1から頭数まで欠けず・重ならず、レース一覧の頭数とも同じであること。
+    取消の馬も名簿には残る（取消の印つき）ので、取消があってもこの決まりは変わらない。"""
+    if len(nums) != len(set(nums)):
+        return "出馬表の馬番が重複している"
+    if sorted(nums) != list(range(1, len(nums) + 1)):
+        return "出馬表の馬番が欠けている"
+    if field_size and int(field_size) != len(nums):
+        return f"出馬表の頭数がレース一覧と合わない（出馬表 {len(nums)}・一覧 {field_size}）"
+    return None
+
+
+def _with_card_issue(gate: dict, issue: str | None) -> dict:
+    if issue:
+        gate = dict(gate, card_issue=issue, reasons=[*gate.get("reasons", []), issue])
+        gate["pass"] = False
+    return gate
+
+
 def odds_gate(trio: dict, trio_rec, race: dict, tp: str) -> dict:
     """三連複オッズの合格判定（週末の確認の物差し）。"""
     g = {"trio_found": trio.get("found"), "trio_expected": trio.get("expected"), "duplicates": trio.get("duplicates"),
@@ -117,6 +136,7 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame) -> tuple[pd.DataFr
             if tp == "15m" and not (len(win) or len(trio)):
                 continue  # 15分前は配分の見直しだけ。新しいオッズが無ければ作らない
             active = [int(c["horse_number"]) for c in card]  # 出走馬（取消を除く）。オッズの組はこれとぴったり照らす
+            card_issue = card_problem([int(c["horse_number"]) for c in card_all], r.get("field_size"))
             w = jra.parse_win_odds(_read(root, win.iloc[-1]), active) if len(win) else {"ok": False, "odds": {}}
             t = {"ok": False, "odds": {}}
             trio_rec = trio.iloc[-1] if len(trio) else None
@@ -125,8 +145,9 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame) -> tuple[pd.DataFr
                 t = jra.parse_trio_odds(page, active)
                 t["odds_time"] = jra.parse_odds_time(page)
             inputs[(rk, tp)] = {"card": card, "scratched": scratched, "win": w, "trio": t,
-                                "gate": odds_gate(t, trio_rec, r, tp) if tp != "24h" or trio_rec is not None else
-                                {"pass": False, "reasons": ["前日はオッズを使わない（未発売のことが多い）"]},
+                                "gate": _with_card_issue(odds_gate(t, trio_rec, r, tp) if tp != "24h" or trio_rec is not None else
+                                                         {"pass": False, "reasons": ["前日はオッズを使わない（未発売のことが多い）"]},
+                                                         card_issue),
                                 "card_fetched_at": cards.iloc[-1]["fetched_at"],
                                 "snapshots": [cards.iloc[-1]["sha256"], *win["sha256"].tolist()[-1:], *trio["sha256"].tolist()[-1:]]}
         res = s[s["kind"] == "result"] if len(s) else s

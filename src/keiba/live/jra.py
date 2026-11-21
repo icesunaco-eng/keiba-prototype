@@ -237,8 +237,12 @@ def parse_win_odds(page: str, field=None) -> dict:
     elif isinstance(field, int):
         ok = bool(odds) and len(odds) == field
     else:
-        ok = bool(odds) and set(odds) == {int(x) for x in field}
+        nums = [int(x) for x in field]
+        ok = bool(odds) and len(nums) == len(set(nums)) and set(odds) == set(nums)  # 名簿の重複も不合格
     return {"odds": odds, "ok": ok}
+
+
+_ODDS_TEXT = re.compile(r"\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?")
 
 
 def _expected_set(horses) -> tuple[set[str] | None, int | None]:
@@ -247,7 +251,10 @@ def _expected_set(horses) -> tuple[set[str] | None, int | None]:
         return None, None
     if isinstance(horses, int):
         return None, (math.comb(horses, 3) if horses >= 3 else None)
-    nums = sorted({int(h) for h in horses})
+    raw = [int(h) for h in horses]
+    if len(raw) != len(set(raw)):
+        return set(), None  # 名簿に同じ馬番が2回ある：照らす相手が信用できないので不合格にする
+    nums = sorted(raw)
     combos = {"-".join(map(str, c)) for c in itertools.combinations(nums, 3)}
     return combos, (len(combos) or None)
 
@@ -269,19 +276,28 @@ def parse_trio_odds(page: str, horses) -> dict:
         if not m:
             continue
         head = [int(m.group(1)), int(m.group(2))]
-        for tr in table.xpath(".//tr"):
+        # 表そのものの行だけ読む（入れ子の表の行は読まない）
+        for tr in table.xpath("./tr | ./thead/tr | ./tbody/tr | ./tfoot/tr"):
             if legacy:
                 num, val = tr.xpath('./*[contains(@class,"num")]'), tr.xpath('./td[contains(@class,"odds")]')
             else:
-                num, val = tr.xpath("./th[1]"), tr.xpath("./td[1]")
+                ths, tds = tr.xpath("./th"), tr.xpath("./td")
+                if len(ths) == 1 and _t(ths[0]).isdigit() and (len(tds) != 1 or tds[0].xpath(".//table")):
+                    bad += 1  # 実物は「馬番の th 1つ・オッズの td 1つ」。形が違う行は使わない
+                    continue
+                num, val = ths[:1], tds[:1]
             if not (num and val and _t(num[0]).isdigit()):
+                continue
+            if not _ODDS_TEXT.fullmatch(_t(val[0])):
+                if int(_t(num[0])) not in head:
+                    bad += 1  # 「取消」「---」など、倍率の形でないもの
                 continue
             v = _num(_t(val[0]))
             third = int(_t(num[0]))
             if third in head:
                 continue
             if not v:
-                bad += 1  # 「取消」「---」など、数字でないオッズ
+                bad += 1
                 continue
             key = "-".join(map(str, sorted(head + [third])))
             if key in odds:

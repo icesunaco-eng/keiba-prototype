@@ -323,3 +323,40 @@ def test_trio_odds_scratched_row_on_real_page():
         rows[k] = [(c, "取消" if 4 in (k[0], k[1], c) else v) for c, v in r]
     t = jra.parse_trio_odds(_fuku3(rows), [1, 2, 3, 5])
     assert t["ok"] and len(t["odds"]) == 4 and t["unreadable"] == 6
+
+
+def test_roster_with_gaps_or_duplicates_is_rejected():
+    """みに指摘（再検証 重大）：名簿が欠けている・重複しているときは、組が一致しても合格にしない。"""
+    from keiba.live.wallet import card_problem
+    page = _fuku3({(1, 2): [(5, "12.0")]})
+    assert not jra.parse_trio_odds(page, [1, 2, 5, 5])["ok"]  # 名簿の重複
+    assert not jra.parse_win_odds('<table><tr><td class="num">1</td><td class="odds_tan">2.0</td></tr></table>', [1, 1])["ok"]
+    assert card_problem([1, 2, 4, 5, 5], 5) == "出馬表の馬番が重複している"
+    assert card_problem([1, 2, 4, 5], 5) == "出馬表の馬番が欠けている"
+    assert "頭数" in card_problem([1, 2, 3, 4], 5)
+    assert card_problem([1, 2, 3, 4, 5], 5) is None
+
+
+def test_gate_fails_on_broken_card(tmp_path):
+    """出馬表から3番が抜けたページでは、オッズがそろっていても合格にしない（配分しない）。"""
+    ids = [f"H{h:04d}" for h in range(N)]
+    html = card_html(ids)
+    # 3番の行を消す（名簿の欠け）
+    rows = html.split("<tr>")
+    broken = "<tr>".join(r for r in rows if '<td class="num">3</td>' not in r)
+    r = _gate(tmp_path, card=broken)
+    assert not r["pass"] and "欠けている" in r["reasons"]
+
+
+def test_trio_odds_ignores_nested_tables_and_extra_cells():
+    """みに指摘（再検証 要修正）：fuku3 の中の入れ子の表や、倍率の前の余分な数字のセルを倍率に使わない。"""
+    rows = _all_rows([1, 2, 3, 4], skip={(2, 3, 4)})
+    page = _fuku3(rows).replace(
+        "<caption>2-3</caption><tbody>",
+        '<caption>2-3</caption><tbody><tr><td><table class="note"><tr><th scope="row">4</th><td>12.3</td></tr></table></td></tr>')
+    t = jra.parse_trio_odds(page, [1, 2, 3, 4])
+    assert not t["ok"] and "2-3-4" not in t["odds"]
+    rows = _all_rows([1, 2, 3, 4])
+    page = _fuku3(rows).replace('<th scope="row">3</th><td>16.0</td>', '<th scope="row">3</th><td>1</td><td>123.5</td>', 1)
+    t = jra.parse_trio_odds(page, [1, 2, 3, 4])
+    assert not t["ok"] and t["odds"].get("1-2-3") is None
