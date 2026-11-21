@@ -136,7 +136,17 @@ def cmd_collect(paths, args):
     root = paths.data_dir / "live"
     if args.action == "tick":
         out = Collector(root).tick(notify=_notify)
-        if out["saved"]:
+        # まむの予想は、予想・統合より先に取り込む（統合の「まむ入り」に間に合わせるため）。失敗しても収集は止めない
+        got = {}
+        try:
+            from .live.mam import import_inbox
+            got = import_inbox(paths)
+            if got.get("files"):
+                out["mam_inbox"] = got
+        except Exception as exc:
+            out["mam_error"] = repr(exc)
+            _notify("まむの予想の取り込みに失敗", repr(exc)[:120])
+        if out["saved"] or got.get("accepted"):
             from .live.wallet import run_live
             try:
                 out["live"] = run_live(paths)
@@ -149,17 +159,6 @@ def cmd_collect(paths, args):
             except Exception as exc:  # 予想の失敗で収集を止めない
                 out["live_error"] = repr(exc)
                 _notify("予想・精算に失敗", repr(exc)[:120])
-        try:  # まむの予想は収集の有無に関係なく、見回りのたびに inbox を見る
-            from .live.mam import import_inbox
-            got = import_inbox(paths)
-            if got.get("files"):
-                out["mam_inbox"] = got
-                if got.get("accepted"):
-                    from .live.wallet import run_live
-                    run_live(paths)
-        except Exception as exc:
-            out["mam_error"] = repr(exc)
-            _notify("まむの予想の取り込みに失敗", repr(exc)[:120])
         print(json.dumps(out, ensure_ascii=False))
     elif args.action == "install":
         import os
