@@ -123,6 +123,30 @@ def test_partial_result_waits_for_full_result(tmp_path):
         jra.parse_card = orig
 
 
+def test_missing_payouts_wait_until_they_arrive(tmp_path):
+    """払戻がまだ載っていない結果では「未精算」を台帳に書かない（書き直せないため）。払戻が載った回に精算する。"""
+    orig = jra.parse_card
+    jra.parse_card = lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)]
+    try:
+        paths, col = _setup(tmp_path)
+        run_live(paths)
+        page = result_html([3, 1, 2, 4, 5, 6, 7, 8]).split('<li class="trio"')[0]
+        col._save(RK, "result", "result", "/JRADB/x", "c", page)
+        first = run_live(paths)["settled"]          # 買い目の無い配分（払戻に関係しない）だけが先に書かれる
+        from keiba.ledger import Ledger
+        led = Ledger(paths.ledger_path, read_only=True)
+        early = list(led.settlements())
+        led.close()
+        assert first == len(early) and all(not s.get("stake") for s in early)
+        col._save(RK, "result", "result", "/JRADB/x", "c2", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
+        assert first + run_live(paths)["settled"] == 3 * 5   # 払戻が載った回に、買い目のある分を精算
+        led = Ledger(paths.ledger_path, read_only=True)
+        assert not [s for s in led.settlements() if s["status"] == "unsettled_no_payout"]
+        led.close()
+    finally:
+        jra.parse_card = orig
+
+
 def test_missed_capture_is_reported(tmp_path):
     col = Collector(tmp_path, client=None, now=lambda: datetime(2025, 8, 30, 16, 0, tzinfo=JST))
     col.state["races"][RK] = {"race_date": "2025-08-30", "venue": "東京", "race_number": 11, "post_time": "15:40",

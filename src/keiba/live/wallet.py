@@ -278,6 +278,8 @@ def run_live(paths, log=print) -> dict:
                 if stakes and missing_payouts(stakes, finished, scratched, payouts):
                     continue   # 買った的中組の払戻が読めていない（同着の一部欠けなど）：0円で確定させず、次の回を待つ
                 st = settle_trio(stakes, finishers, scratched, payouts) if stakes else None
+                if st and st.status == "unsettled_no_payout":
+                    continue   # 払戻が分からない：台帳は書き直せないので「未精算」を確定行にせず、払戻が読めた回に精算する
                 led.add_settlement(rk, p["time_point"], m, ver, a,
                                    {"status": st.status if st else p["allocation"][a]["status"],
                                     "stake": st.stake if st else 0, "returned": st.returned if st else 0,

@@ -855,9 +855,9 @@ def test_two_weeks_reads_archived_snapshots(live_paths, tmp_path, monkeypatch):
             {"race_key": f"{too_old}|東京|6", "kind": "odds_unavailable", "time_point": "24h", "fetched_at": f"{too_old}T09:00:00+09:00"}]
     (live / "snapshots.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
     src = Source(live_paths, "live")
-    assert f"{old}|東京|5" in src.past_keys and f"{too_old}|東京|6" not in src.past_keys
+    assert f"{old}|東京|5" in src.past_keys and f"{too_old}|東京|6" in src.past_keys   # 全期間の結果のために日付で区切らない
     out = pages.history_page({"token": "t", "mode": "live"}, src, Store(tmp_path / "p.sqlite"), {"f": "2w"})
-    assert "東京5R" in out.replace(" ", "")
+    assert "東京5R" in out.replace(" ", "") and "東京6R" not in out.replace(" ", "")      # 2週間の表示は14日で区切る
 
 
 def _autostart(tmp_path, *args, stop="ok", start="ok", loaded=True):
@@ -986,9 +986,10 @@ def test_archived_race_reads_result_and_opens_all_pages(live_paths, tmp_path):
     live = live_paths.data_dir / "live"
     (live / "snapshots").mkdir(exist_ok=True)
     (live / "snapshots" / "r.html").write_text(result_html([3, 1, 2, 4]))
-    (live / "snapshots.jsonl").write_text(json.dumps({"race_key": rk, "kind": "result", "time_point": "result",
-                                                      "path": "snapshots/r.html", "fetched_at": f"{old}T16:00:00+09:00"},
-                                                     ensure_ascii=False) + "\n")
+    _archive_card(live, rk, old, 4)
+    with open(live / "snapshots.jsonl", "a") as f:
+        f.write(json.dumps({"race_key": rk, "kind": "result", "time_point": "result",
+                            "path": "snapshots/r.html", "fetched_at": f"{old}T16:00:00+09:00"}, ensure_ascii=False) + "\n")
     src = Source(live_paths, "live")
     assert src.results[rk]["payouts"] == {"1-2-3": 4560} and old not in src.days()
     store = Store(tmp_path / "p.sqlite")
@@ -999,3 +1000,63 @@ def test_archived_race_reads_result_and_opens_all_pages(live_paths, tmp_path):
     for fn, q in ((pages.timeline_page, {"rk": rk}), (pages.buy_form, {"rk": rk, "kind": "buy"})):
         assert "見つからない" not in fn(ctx, src, store, q)
     assert "¥4,560" in pages.purchases_page(ctx, src, store, {})
+
+
+# ---------------- 再検証（💚20261121-7）の反例 ----------------
+
+def _archive_card(live, rk, day, n, post="9時45分"):
+    from tests.test_live_wallet import card_html
+    (live / "snapshots").mkdir(exist_ok=True)
+    name = f"card-{rk.replace('|', '-')}.html"
+    (live / "snapshots" / name).write_text(f"<p>発走時刻： {post}</p>" + card_html([f"{i:010d}" for i in range(n)]))
+    with open(live / "snapshots.jsonl", "a") as f:
+        f.write(json.dumps({"race_key": rk, "kind": "card", "time_point": "24h", "path": f"snapshots/{name}",
+                            "fetched_at": f"{day}T09:00:00+09:00"}, ensure_ascii=False) + "\n")
+
+
+def _archive_result(live, rk, day, order, name=None, payout=True):
+    from tests.test_live_wallet import result_html
+    name = name or f"res-{rk.replace('|', '-')}.html"
+    html = result_html(order)
+    if not payout:
+        html = html.split('<li class="trio"')[0]
+    if name != "missing.html":
+        (live / "snapshots" / name).write_text(html)
+    with open(live / "snapshots.jsonl", "a") as f:
+        f.write(json.dumps({"race_key": rk, "kind": "result", "time_point": "result", "path": f"snapshots/{name}",
+                            "fetched_at": f"{day}T16:00:00+09:00"}, ensure_ascii=False) + "\n")
+
+
+def test_archived_partial_result_is_held(live_paths, tmp_path):
+    from datetime import date as real_date
+    live = live_paths.data_dir / "live"
+    for days in (8, 13):
+        d = (real_date.today() - timedelta(days=days)).isoformat()
+        rk = f"{d}|東京|{days}"
+        _archive_card(live, rk, d, 4)
+        _archive_result(live, rk, d, [1, 2], payout=False)       # 4頭のうち2行だけ
+    nocard = (real_date.today() - timedelta(days=9)).isoformat() + "|東京|9"
+    _archive_result(live, nocard, nocard[:10], [1, 2], payout=False)
+    src = Source(live_paths, "live")
+    for days in (8, 13):
+        d = (real_date.today() - timedelta(days=days)).isoformat()
+        rk = f"{d}|東京|{days}"
+        assert src.races[rk]["field_size"] == 4 and src.races[rk]["post_time"] == "09:45"   # 原本から取り直す
+        assert src.results[rk]["complete"] is False
+        st = settle_purchase({"kind": "buy", "total": 100, "stakes": {"1-2-3": 100}}, src.results[rk])
+        assert st["status"] == "partial_result" and not st["counted"]
+    assert src.results[nocard]["complete"] is False            # 出馬表が無く頭数が分からなければ保留
+
+
+def test_one_missing_archive_does_not_hide_other_results(live_paths):
+    from datetime import date as real_date
+    live = live_paths.data_dir / "live"
+    a = (real_date.today() - timedelta(days=8)).isoformat()
+    b = (real_date.today() - timedelta(days=9)).isoformat()
+    _archive_result(live, f"{a}|東京|1", a, [1, 2, 3, 4], name="missing.html")   # 原本のファイルが無い
+    _archive_card(live, f"{b}|東京|2", b, 4)
+    _archive_result(live, f"{b}|東京|2", b, [3, 1, 2, 4])
+    src = Source(live_paths, "live")
+    assert f"{a}|東京|1" not in src.results
+    assert src.results[f"{b}|東京|2"]["complete"] is True and src.results[f"{b}|東京|2"]["payouts"]
+    assert any("結果を読めない" in n for n in src.notes)

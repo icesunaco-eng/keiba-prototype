@@ -119,6 +119,13 @@ def make_result(finished: list, finishers: int, scratched: set, payouts: dict, r
             "winners": winners, "payouts_missing": missing, "complete": incomplete is None, "incomplete": incomplete}
 
 
+def card_post_time(page: str) -> str | None:
+    """出馬表の原本から発走時刻（"発走時刻： 9時45分"）を読む。読めなければ None。"""
+    import re
+    m = re.search(r"発走時刻[：:]\s*(\d{1,2})時(\d{1,2})分", page or "")
+    return f"{int(m.group(1)):02d}:{int(m.group(2)):02d}" if m else None
+
+
 def card_problem(card: list, field_size=None) -> str | None:
     """出馬表（jra.parse_card）を取消・馬番の照合に使えない理由。使えれば None。
 
@@ -243,12 +250,11 @@ class Source:
             from ..live import jra
             from ..live.wallet import _read, _snapshots, live_tables
             snaps = _snapshots(root)
-            # 収集は終わった開催を7日で予定表から外す。2週間の履歴のために、原本の記録に残っているレースを拾う
-            from datetime import date, timedelta
-            today = date.today()
-            start = (today - timedelta(days=13)).isoformat()
+            # 収集は終わった開催を7日で予定表から外す。履歴と結果のために、原本の記録に残っているレースを拾う
+            from datetime import date
+            today = date.today().isoformat()
             self.past_keys = {k for k in set(snaps["race_key"]) if isinstance(k, str) and k not in self.races
-                              and start <= k[:10] <= today.isoformat()}
+                              and k[:10] <= today}
             for rk in self.past_keys:   # 過去のレースとして、詳細・時点の変化・記録の画面でも開けるようにする（予定の一覧には出さない）
                 d, venue, num = (rk.split("|") + ["", "", "0"])[:3]
                 self.races[rk] = {"race_key": rk, "race_date": d, "venue": venue,
@@ -257,23 +263,39 @@ class Source:
                                   "race_class": None, "archived": True}
             for rk in self.races:
                 s = snaps[(snaps["race_key"] == rk) & (snaps["kind"] == "card")]
-                if len(s):
-                    card = jra.parse_card(_read(root, s.iloc[-1]))
-                    for c in card:
-                        if c.get("horse_number"):
-                            self.names[rk][int(c["horse_number"])] = c.get("horse_name") or ""
-                    problem = card_problem(card, self.races[rk].get("field_size"))
-                    if problem:
-                        self.card_problem[rk] = problem
-                    else:
-                        self.scratched_now[rk] = {int(c["horse_number"]) for c in card if c["scratch"]}
-                        self.card_checked_at[rk] = str(s.iloc[-1]["fetched_at"])
+                if not len(s):
+                    continue
+                try:   # 原本ごとに読む。1件読めなくても、ほかのレースは止めない
+                    page = _read(root, s.iloc[-1])
+                    card = jra.parse_card(page)
+                except Exception as exc:
+                    self.card_problem[rk] = "出馬表の原本を読めない"
+                    self.notes.append(f"{rk} の出馬表を読めない：{exc!r}"[:200])
+                    continue
+                for c in card:
+                    if c.get("horse_number"):
+                        self.names[rk][int(c["horse_number"])] = c.get("horse_name") or ""
+                race = self.races[rk]
+                problem = card_problem(card, race.get("field_size"))
+                if race.get("archived"):   # 予定表から外れたレースは、出馬表の原本から発走時刻と頭数を取り直す
+                    race["post_time"] = race["post_time"] or card_post_time(page)
+                    if not problem:
+                        race["field_size"] = len(card)
+                if problem:
+                    self.card_problem[rk] = problem
+                else:
+                    self.scratched_now[rk] = {int(c["horse_number"]) for c in card if c["scratch"]}
+                    self.card_checked_at[rk] = str(s.iloc[-1]["fetched_at"])
             _, _, inputs = live_tables(root, state, snaps)
             results = {rk: res for (rk, tp), res in inputs.items() if tp == "result"}
             for rk in self.past_keys:   # 予定表から外れたレースの結果は、原本から直接読む
                 s = snaps[(snaps["race_key"] == rk) & (snaps["kind"] == "result")]
-                if len(s):
+                if not len(s):
+                    continue
+                try:
                     results[rk] = jra.parse_result(_read(root, s.iloc[-1]))
+                except Exception as exc:   # このレースだけ結果待ちのまま
+                    self.notes.append(f"{rk} の結果を読めない：{exc!r}"[:200])
             for rk, res in results.items():
                 rows = res["rows"]
                 if not rows:   # 結果のページはあるが読めた行が無い：不成立とは決めず「結果待ち」のまま
@@ -281,11 +303,16 @@ class Source:
                 scr = {int(r["horse_number"]) for r in rows if r["status"] in ("withdrawn", "excluded")}
                 if rk in self.scratched_now:
                     self.scratched_now[rk] = self.scratched_now[rk] | scr
-                self.results[rk] = make_result(
+                race = self.races[rk]
+                res_ = make_result(
                     [(r["horse_number"], r["finish_position"]) for r in rows if r["status"] == "finished"],
                     sum(r["status"] == "finished" for r in rows), scr,
                     {p["combo"]: p["payout_yen"] for p in res.get("trio_payouts", [])},
-                    len(rows), self.races[rk].get("field_size"), [r["horse_number"] for r in rows])
+                    len(rows), race.get("field_size"), [r["horse_number"] for r in rows])
+                if race.get("archived") and not race.get("field_size") and res_["complete"]:
+                    # 予定の頭数を確かめられない過去のレースは、行の欠けを見分けられないので保留
+                    res_.update(complete=False, incomplete="予定の頭数を確かめられない（過去の原本）ので結果がそろっているか分からない")
+                self.results[rk] = res_
         except Exception as exc:  # 原本の読取の失敗で画面を止めない
             self.notes.append(f"原本の読取に失敗：{exc!r}"[:200])
 
