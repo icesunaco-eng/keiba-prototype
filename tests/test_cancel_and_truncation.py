@@ -334,3 +334,62 @@ def test_scratch_mark_only_from_number_or_odds_cell():
     assert not [c for c in jra.parse_card(note) if c["scratch"]]
     real = card_html(ids).replace('<td class="num">3</td>', '<td class="num"><span class="cap">取消</span></td>')
     assert [c["scratch"] for c in jra.parse_card(real)].count("取消") == 1
+
+
+# ---------------- 2の追加：実物で見つけたほかの見出しの形 ----------------
+
+def _news(*titles):
+    items = "".join(f'<li><div class="news_line"><a href="/news/x.html"><div class="txt">{t}</div></a></div></li>' for t in titles)
+    return f"<html><body><ul>{items}</ul></body></html>"
+
+
+def test_other_real_title_forms():
+    page = _news("本日【5月31日(土曜)】の東京競馬第9レースの取りやめおよび第10レース以降の発走時刻変更",
+                 "明日【9月21日(祝日・月曜)】の中山競馬は開催を中止します",
+                 "第2回中京競馬第7日第2競走の取りやめ",
+                 "京都競馬とWIN5の土曜日夜間発売を取りやめ",
+                 "9月21日(祝日・月曜)の中山競馬開催中止に伴う「指定席・入場券ネット予約」の取扱い")
+    got = [(c["race_date"], c["venue"], c.get("kai"), c.get("nichi"), c["from_race"], c["to_race"])
+           for c in jra.parse_cancellations(page, 2026, 9)]
+    assert got == [("2026-05-31", "東京", None, None, 9, 9), ("2026-09-21", "中山", None, None, 1, None),
+                   (None, "中京", 2, 7, 2, 2)]
+
+
+def test_january_notice_in_december_list_is_next_year():
+    page = _news("明日【1月5日(月曜)】の中山競馬は開催を中止します")
+    assert jra.parse_cancellations(page, 2026, 12)[0]["race_date"] == "2027-01-05"
+    assert jra.parse_cancellations(page, 2027, 1)[0]["race_date"] == "2027-01-05"
+
+
+def test_kai_form_is_dated_from_schedule_and_previous_month_is_checked(tmp_path):
+    col = Collector(tmp_path, client=None, now=lambda: datetime(2026, 8, 1, 10, 0, tzinfo=JST))
+    col.state["races"]["2026-08-01|中京|2"] = {"race_date": "2026-08-01", "venue": "中京", "race_number": 2,
+                                              "post_time": "10:20", "kai": 2, "nichi": 7}
+    asked = []
+
+    class Client:
+        count = 0
+
+        def get_url(self, url):
+            asked.append(url)
+            return _news("第2回中京競馬第7日第2競走の取りやめ") if url.endswith("/202608/") else _news()
+    col.client = Client()
+    col.check_notices()
+    assert asked == ["https://www.jra.go.jp/news/202607/", "https://www.jra.go.jp/news/202608/"]   # 前日（7月31日）の月も見る
+    rows = load_cancellations(tmp_path / "cancellations.jsonl")
+    assert [(r["race_date"], r["venue"], r["from_race"], r["to_race"]) for r in rows] == [("2026-08-01", "中京", 2, 2)]
+    assert cancel_notice("2026-08-01|中京|2", rows) and not cancel_notice("2026-08-01|中京|3", rows)
+
+
+def test_kai_form_without_matching_race_is_retried_later(tmp_path):
+    col = Collector(tmp_path, client=None, now=lambda: datetime(2026, 8, 1, 10, 0, tzinfo=JST))
+    col.state["races"]["2026-08-01|中京|2"] = {"race_date": "2026-08-01", "venue": "中京", "race_number": 2, "post_time": "10:20"}
+
+    class Client:
+        count = 0
+
+        def get_url(self, url):
+            return _news("第2回中京競馬第7日第2競走の取りやめ")
+    col.client = Client()
+    col.check_notices()
+    assert not load_cancellations(tmp_path / "cancellations.jsonl")      # 回次・日次が分からなければ書かない（推測しない）

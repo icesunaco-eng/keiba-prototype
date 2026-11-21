@@ -212,10 +212,12 @@ class Collector:
         now = self.now()
         if last and now - datetime.fromisoformat(last) < timedelta(minutes=NOTICE_MINUTES):
             return
-        today = now.date().isoformat()
-        yesterday = (now - timedelta(days=1)).date().isoformat()
-        months = sorted({r["race_date"][:7] for rk, r in self.state["races"].items()
-                         if yesterday <= r.get("race_date", "") <= today and f"{rk}|result" not in self.state["taken"]})
+        # 結果がまだのレース（予定表に残っている過去7日〜明日。Macが止まっていた日の分も含む）の月を見る
+        tomorrow = (now + timedelta(days=1)).date().isoformat()
+        days = {r["race_date"] for rk, r in self.state["races"].items()
+                if isinstance(r.get("race_date"), str) and r["race_date"] <= tomorrow and f"{rk}|result" not in self.state["taken"]}
+        # 前日に「明日【1日】の…」と出ることがあるので、前の日の月も見る
+        months = sorted({x for d in days for x in (d[:7], (datetime.fromisoformat(d) - timedelta(days=1)).strftime("%Y-%m"))})
         if not months:
             return
         known = {(c["race_date"], c["venue"], c["from_race"], c["to_race"]) for c in load_cancellations(self.root / CANCEL_FILE)}
@@ -225,7 +227,13 @@ class Collector:
                 path = f"/news/{ym.replace('-', '')}/"
                 page = self.client.get_url(jra.BASE + path)
                 rec = self._save(None, "notice", None, path, "", page)
-                for c in jra.parse_cancellations(page, int(ym[:4])):
+                for c in jra.parse_cancellations(page, int(ym[:4]), int(ym[5:7])):
+                    if c["race_date"] is None:   # 日付の無い形：回次・日次が同じ予定表のレースから日付を決める（無ければ次の回）
+                        days = {r["race_date"] for r in self.state["races"].values()
+                                if r.get("venue") == c["venue"] and r.get("kai") == c["kai"] and r.get("nichi") == c["nichi"]}
+                        if len(days) != 1:
+                            continue
+                        c = {**c, "race_date": days.pop()}
                     key = (c["race_date"], c["venue"], c["from_race"], c["to_race"])
                     if key in known:
                         continue
@@ -258,7 +266,7 @@ class Collector:
                 # 一覧の一部の欄だけ読めなかったとき（None）は、前に確かめた値（頭数・発走時刻など）を消さない
                 r = {**r, **{k: prev[k] for k in KEEP_FIELDS if r.get(k) is None and prev.get(k) is not None}}
                 self.state["races"][rk] = {**r, "race_date": meeting["race_date"], "venue": meeting["venue"],
-                                           "list_cname": cname,
+                                           "kai": meeting.get("kai"), "nichi": meeting.get("nichi"), "list_cname": cname,
                                            "known_at": prev.get("known_at", self.now().isoformat(timespec="seconds"))}
         self.state["refreshed_at"] = self.now().isoformat(timespec="seconds")
         self._write_state()
