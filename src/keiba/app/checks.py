@@ -116,7 +116,8 @@ def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: di
     at_pred = set(int(n) for n in inp.get("scratched_known") or [])
     later = set(int(n) for n in scratched_now or ()) - at_pred
     scratched = at_pred | later
-    field = field_numbers(p, names)
+    # 最新の出馬表を全頭読めたときは、その名簿で馬番を照合する（古い予想にしかいない馬を合格にしない）
+    field = {int(n) for n in names} if known and names else field_numbers(p, names)
     if not stakes:
         add(None, "買い目", "買い目が無いので、組のチェックはしない")
     else:

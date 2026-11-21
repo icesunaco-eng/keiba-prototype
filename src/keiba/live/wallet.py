@@ -29,7 +29,7 @@ from ..ledger import Ledger, canonical, code_hash, sha
 from ..models import rule_v1
 from ..models.trio import fit_calibration
 from ..integrate import pool
-from ..settle import result_problem, settle_trio
+from ..settle import missing_payouts, result_problem, settle_trio
 from . import jra
 from .collector import DEADLINE_MIN, deadline
 
@@ -265,7 +265,7 @@ def run_live(paths, log=print) -> dict:
         payouts = {p["combo"]: p["payout_yen"] for p in res["trio_payouts"]} or None
         finished = [(r["horse_number"], r["finish_position"]) for r in rows if r["status"] == "finished"]
         if not rows or result_problem(finished, finishers, scratched, payouts, len(rows),
-                                      (state["races"].get(rk) or {}).get("field_size")):
+                                      (state["races"].get(rk) or {}).get("field_size"), [r["horse_number"] for r in rows]):
             continue   # 結果を一部しか読めていない：不成立の返還などを書かず、次の回で完全な結果を待つ
         for (m, ver) in sorted({(k[2], k[3]) for k in preds if k[0] == rk}):
             p = preds.get((rk, "15m", m, ver)) or preds.get((rk, "1h", m, ver))
@@ -275,6 +275,8 @@ def run_live(paths, log=print) -> dict:
                 if (rk, m, ver, a) in settled:
                     continue
                 stakes = p["allocation"][a]["stakes"]
+                if stakes and missing_payouts(stakes, finished, scratched, payouts):
+                    continue   # 買った的中組の払戻が読めていない（同着の一部欠けなど）：0円で確定させず、次の回を待つ
                 st = settle_trio(stakes, finishers, scratched, payouts) if stakes else None
                 led.add_settlement(rk, p["time_point"], m, ver, a,
                                    {"status": st.status if st else p["allocation"][a]["status"],

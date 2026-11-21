@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-from itertools import combinations
 import sqlite3
 import threading
 import time
@@ -18,7 +17,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ..settle import result_problem
+from ..settle import result_problem, winning_combos  # noqa: F401（winning_combos は画面側からも使う）
 
 TIME_POINTS = ("24h", "1h", "15m")
 TP_LABEL = {"24h": "24時間前", "1h": "1時間前", "15m": "15分前"}
@@ -98,22 +97,8 @@ def ro_connect(path) -> sqlite3.Connection:
     return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
 
 
-def winning_combos(finished: list) -> set[str]:
-    """着順から、的中になる三連複の組（同着なら複数）。finished：（馬番, 着順）。"""
-    top = [(int(n), int(pos)) for n, pos in finished if pos and pos <= 3]
-    if len(top) < 3:
-        return set()
-    out = set()
-    for c in combinations(top, 3):
-        inside = max(pos for _, pos in c)
-        outside = [pos for n, pos in top if (n, pos) not in c]
-        if all(pos >= inside for pos in outside):
-            out.add("-".join(map(str, sorted(n for n, _ in c))))
-    return out
-
-
 def make_result(finished: list, finishers: int, scratched: set, payouts: dict, rows: int | None = None,
-                field_size=None) -> dict:
+                field_size=None, numbers: list | None = None) -> dict:
     """結果1レース分。finished：（馬番, 着順）。同着で3着内が4頭以上なら actual は無く、payouts に的中組が複数入る。
 
     winners は着順から出した的中組。払戻にその組が欠けていれば payouts_missing に入れる（その組は払戻待ち）。
@@ -128,7 +113,7 @@ def make_result(finished: list, finishers: int, scratched: set, payouts: dict, r
     if actual is None and len(payouts) == 1:
         actual = next(iter(payouts))
     label = actual or ("・".join(sorted(payouts)) if payouts else None)
-    incomplete = result_problem(finished, finishers, scratched, payouts, rows, field_size)
+    incomplete = result_problem(finished, finishers, scratched, payouts, rows, field_size, numbers)
     return {"actual": actual, "label": label, "payout": payouts.get(actual) if actual else None,
             "payouts": payouts, "finishers": int(finishers), "scratched": set(scratched), "has_result": True,
             "winners": winners, "payouts_missing": missing, "complete": incomplete is None, "incomplete": incomplete}
@@ -264,6 +249,12 @@ class Source:
             start = (today - timedelta(days=13)).isoformat()
             self.past_keys = {k for k in set(snaps["race_key"]) if isinstance(k, str) and k not in self.races
                               and start <= k[:10] <= today.isoformat()}
+            for rk in self.past_keys:   # 過去のレースとして、詳細・時点の変化・記録の画面でも開けるようにする（予定の一覧には出さない）
+                d, venue, num = (rk.split("|") + ["", "", "0"])[:3]
+                self.races[rk] = {"race_key": rk, "race_date": d, "venue": venue,
+                                  "race_number": int(num) if num.isdigit() else 0, "race_name": "", "post_time": None,
+                                  "surface": None, "distance_m": None, "field_size": None, "going": None,
+                                  "race_class": None, "archived": True}
             for rk in self.races:
                 s = snaps[(snaps["race_key"] == rk) & (snaps["kind"] == "card")]
                 if len(s):
@@ -278,9 +269,12 @@ class Source:
                         self.scratched_now[rk] = {int(c["horse_number"]) for c in card if c["scratch"]}
                         self.card_checked_at[rk] = str(s.iloc[-1]["fetched_at"])
             _, _, inputs = live_tables(root, state, snaps)
-            for (rk, tp), res in inputs.items():
-                if tp != "result":
-                    continue
+            results = {rk: res for (rk, tp), res in inputs.items() if tp == "result"}
+            for rk in self.past_keys:   # 予定表から外れたレースの結果は、原本から直接読む
+                s = snaps[(snaps["race_key"] == rk) & (snaps["kind"] == "result")]
+                if len(s):
+                    results[rk] = jra.parse_result(_read(root, s.iloc[-1]))
+            for rk, res in results.items():
                 rows = res["rows"]
                 if not rows:   # 結果のページはあるが読めた行が無い：不成立とは決めず「結果待ち」のまま
                     continue
@@ -291,7 +285,7 @@ class Source:
                     [(r["horse_number"], r["finish_position"]) for r in rows if r["status"] == "finished"],
                     sum(r["status"] == "finished" for r in rows), scr,
                     {p["combo"]: p["payout_yen"] for p in res.get("trio_payouts", [])},
-                    len(rows), self.races[rk].get("field_size"))
+                    len(rows), self.races[rk].get("field_size"), [r["horse_number"] for r in rows])
         except Exception as exc:  # 原本の読取の失敗で画面を止めない
             self.notes.append(f"原本の読取に失敗：{exc!r}"[:200])
 
@@ -335,11 +329,12 @@ class Source:
                 p = pd.read_parquet(t / "payouts.parquet")
                 for r in p[p["bet_type"] == "trio"].itertuples():
                     pay[r.race_key][r.combo] = int(r.payout_yen)
-            per: dict = defaultdict(lambda: {"fin": [], "n": 0, "scr": set(), "rows": 0})
+            per: dict = defaultdict(lambda: {"fin": [], "n": 0, "scr": set(), "rows": 0, "nums": []})
             for r in run.itertuples():
                 self.names[r.race_key][int(r.horse_number)] = r.horse_name or ""
                 x = per[r.race_key]
                 x["rows"] += 1
+                x["nums"].append(int(r.horse_number))
                 if r.status == "finished":
                     x["n"] += 1
                     if pd.notna(r.finish_position):
@@ -350,7 +345,7 @@ class Source:
                 self.scratched_now[rk] = x["scr"]
                 if x["n"] or pay.get(rk):
                     self.results[rk] = make_result(x["fin"], x["n"], x["scr"], pay.get(rk, {}), x["rows"],
-                                                   (self.races.get(rk) or {}).get("field_size"))
+                                                   (self.races.get(rk) or {}).get("field_size"), x["nums"])
         for rk in self.preds:
             self.races.setdefault(rk, {"race_key": rk, "race_date": rk.split("|")[0], "venue": rk.split("|")[1],
                                        "race_number": int(rk.split("|")[2]), "race_name": "", "post_time": None,
@@ -359,10 +354,10 @@ class Source:
 
     # ---- 画面から使う ----
     def days(self) -> list[str]:
-        return sorted({r["race_date"] for r in self.races.values() if r.get("race_date")})
+        return sorted({r["race_date"] for r in self.races.values() if r.get("race_date") and not r.get("archived")})
 
     def races_on(self, day: str) -> list[dict]:
-        return sorted((r for r in self.races.values() if r["race_date"] == day),
+        return sorted((r for r in self.races.values() if r["race_date"] == day and not r.get("archived")),
                       key=lambda r: (r.get("post_time") or "99:99", r["venue"], r["race_number"]))
 
     def pick(self, race_key: str, tab: str, tp: str) -> tuple[str | None, dict | None]:

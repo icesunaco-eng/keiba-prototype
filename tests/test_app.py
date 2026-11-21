@@ -947,3 +947,55 @@ def test_failed_plist_move_rolls_back_running_job(tmp_path):
     assert "置けなかった" in r.stderr and "前の設定で登録し直した" in r.stderr
     # 新しい登録のあとに外して、前の設定で登録し直している
     assert calls[-4:-1] == ["launchctl bootstrap", "launchctl bootout", "launchctl bootstrap"]
+
+
+# ---------------- 再検証（💚20261121-3）の反例 ----------------
+
+def test_duplicate_scratch_rows_are_held():
+    from keiba.app.data import make_result
+    # 予定4頭：1・2完走、3取消の行が2つ、4の行が無い
+    res = make_result([(1, 1), (2, 2)], 2, {3}, {}, rows=4, field_size=4, numbers=[1, 2, 3, 3])
+    assert res["complete"] is False and "重複" in res["incomplete"]
+    st = settle_purchase({"kind": "buy", "total": 100, "stakes": {"1-2-4": 100}}, res)
+    assert st["status"] == "partial_result" and not st["counted"]
+
+
+def test_missing_tie_payout_is_detected_for_wallet():
+    from keiba.settle import missing_payouts
+    fin = [(1, 1), (2, 2), (3, 3), (4, 3)]
+    assert missing_payouts({"1-2-4": 100}, fin, set(), {"1-2-3": 500}) == {"1-2-4"}
+    assert missing_payouts({"1-2-3": 100}, fin, set(), {"1-2-3": 500}) == set()
+    assert missing_payouts({"1-2-4": 100}, fin, {4}, {"1-2-3": 500}) == set()     # 取消の返還になる組は待たない
+
+
+def test_latest_roster_rejects_horse_only_in_old_prediction():
+    race = {"race_date": "2026-11-22", "post_time": "15:40"}
+    p = _pred([1, 2, 3, 4, 5, 6, 7])
+    names = {n: "" for n in range(1, 7)}
+    items = {i["label"]: i for i in checks.pre_publish_check(p, {"1-2-7": 100}, race, names, set())}
+    assert items["組の形（3頭・出走している馬番）"]["ok"] is False and "7" in items["組の形（3頭・出走している馬番）"]["detail"]
+    ok = {i["label"]: i for i in checks.pre_publish_check(p, {"1-2-3": 100}, race, names, set())}
+    assert ok["組の形（3頭・出走している馬番）"]["ok"] is True
+
+
+def test_archived_race_reads_result_and_opens_all_pages(live_paths, tmp_path):
+    from datetime import date as real_date
+    from tests.test_live_wallet import result_html
+    old = (real_date.today() - timedelta(days=10)).isoformat()
+    rk = f"{old}|東京|5"
+    live = live_paths.data_dir / "live"
+    (live / "snapshots").mkdir(exist_ok=True)
+    (live / "snapshots" / "r.html").write_text(result_html([3, 1, 2, 4]))
+    (live / "snapshots.jsonl").write_text(json.dumps({"race_key": rk, "kind": "result", "time_point": "result",
+                                                      "path": "snapshots/r.html", "fetched_at": f"{old}T16:00:00+09:00"},
+                                                     ensure_ascii=False) + "\n")
+    src = Source(live_paths, "live")
+    assert src.results[rk]["payouts"] == {"1-2-3": 4560} and old not in src.days()
+    store = Store(tmp_path / "p.sqlite")
+    store.add(rk, "buy", [("1-2-3", "100")], "", None, None, "live")
+    ctx = {"token": "t", "mode": "live"}
+    detail = pages.history_detail_page(ctx, src, store, {"rk": rk})
+    assert "4,560" in detail and "結果待ち" not in detail
+    for fn, q in ((pages.timeline_page, {"rk": rk}), (pages.buy_form, {"rk": rk, "kind": "buy"})):
+        assert "見つからない" not in fn(ctx, src, store, q)
+    assert "¥4,560" in pages.purchases_page(ctx, src, store, {})
