@@ -26,6 +26,9 @@ from . import jra
 JST = timezone(timedelta(hours=9))
 # 時点ごとの締切（発走の何分前か）。その時点の予想には、締切までに取ったページだけを使う（あいすとの取り決め）
 DEADLINE_MIN = {"24h": 24 * 60, "1h": 60, "15m": 15}
+# まむの予想の受付の締め：締切から何分後までに届いた予想を受け付けるか（作成は締切まで）。
+# 統合（まむ入り）も、この時刻まではまむを待つ。5分おきの見回りが最低2回まわる長さ。
+MAM_GRACE_MIN = 12
 CAPTURE_LEAD_MIN = 15  # 締切の15分前から締切までの間に取る（5分ごとの実行で3回の機会）
 WINDOWS = {  # 発走からの相対（分）：[開始, 終了)
     **{tp: (-d - CAPTURE_LEAD_MIN, -d) for tp, d in DEADLINE_MIN.items()},

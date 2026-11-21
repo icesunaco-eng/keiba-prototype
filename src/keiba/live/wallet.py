@@ -31,7 +31,7 @@ from ..models.trio import fit_calibration
 from ..integrate import pool
 from ..settle import settle_trio
 from . import jra
-from .collector import DEADLINE_MIN, deadline
+from .collector import DEADLINE_MIN, MAM_GRACE_MIN, deadline
 
 WALLET_METHODS = ("ml_lgbm", "ml_market")
 # あいす統合（別枠の参考予想）。重みは あいすの回答（2026-11-19）どおり固定。市場のみが比べる基準
@@ -315,9 +315,9 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) ->
         if "mam" in w:
             mp = mam_preds.get((rk, tp))
             if mp is None:
-                if now <= dl:
-                    continue  # 締切まではまむの予想を待つ
-                reasons.append("まむ：締切までに予想が無い")
+                if now <= dl + timedelta(minutes=MAM_GRACE_MIN):
+                    continue  # 受付の締め（締切の MAM_GRACE_MIN 分後）までは、まむの予想を待つ
+                reasons.append(f"まむ：受付の締め（締切の{MAM_GRACE_MIN}分後）までに予想が無い")
             else:
                 sources["mam"] = mp.get("trios_all") or {}
                 if not mp.get("complete"):

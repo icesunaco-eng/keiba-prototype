@@ -12,7 +12,7 @@
   keiba live wallets      仮想の財布（方式×配分）の成績
   keiba review [--month YYYY-MM]  月次の振り返り（data/review/<月>.html・.json）
   keiba mam export        まむ（文章AI方式）への入力の束を data/mam/outbox/ に書く
-  keiba mam import <file> まむの予想を検証して台帳に入れる（締切後は受け付けない）
+  keiba mam import [file] まむの予想を検証して台帳に入れる（締切後は受け付けない）。file を省くと data/mam/inbox/ の新しいファイルを読む
   keiba all        上を順に全部
 """
 from __future__ import annotations
@@ -109,12 +109,16 @@ def cmd_live(paths, args):
 
 
 def cmd_mam(paths, args):
-    from .live.mam import export_packets, import_predictions
+    from .live.mam import export_packets, import_inbox, import_predictions
     if args.action == "export":
         files = export_packets(paths)
         print(f"まむへの入力 {len(files)} 件 → {paths.data_dir / 'mam' / 'outbox'}")
-    else:
+    elif args.file:
         print(json.dumps(import_predictions(paths, args.file), ensure_ascii=False, indent=1))
+    else:
+        out = import_inbox(paths)
+        print(json.dumps(out, ensure_ascii=False))
+        print(f"結果 → {paths.data_dir / 'mam' / 'inbox_results'}")
 
 
 def cmd_review(paths, args):
@@ -132,7 +136,17 @@ def cmd_collect(paths, args):
     root = paths.data_dir / "live"
     if args.action == "tick":
         out = Collector(root).tick(notify=_notify)
-        if out["saved"]:
+        # まむの予想は、予想・統合より先に取り込む（統合の「まむ入り」に間に合わせるため）。失敗しても収集は止めない
+        got = {}
+        try:
+            from .live.mam import import_inbox
+            got = import_inbox(paths)
+            if got.get("files"):
+                out["mam_inbox"] = got
+        except Exception as exc:
+            out["mam_error"] = repr(exc)
+            _notify("まむの予想の取り込みに失敗", repr(exc)[:120])
+        if out["saved"] or got.get("accepted"):
             from .live.wallet import run_live
             try:
                 out["live"] = run_live(paths)

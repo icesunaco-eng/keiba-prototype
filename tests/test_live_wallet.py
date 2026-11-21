@@ -184,6 +184,14 @@ def test_monthly_review(tmp_path):
         jra.parse_card = orig
 
 
+def _arrive(f, when="2025-08-30T14:36:00+09:00"):
+    """届いた時刻（ファイルの更新時刻）を合成のレースの時刻にそろえる。"""
+    import os
+    t = datetime.fromisoformat(when).timestamp()
+    os.utime(f, (t, t))
+    return f
+
+
 def test_mam_export_and_import(tmp_path):
     from keiba.live.mam import export_packets, import_predictions
     from keiba.ledger import Ledger
@@ -203,7 +211,7 @@ def test_mam_export_and_import(tmp_path):
         bad = dict(base, generated_at="2025-08-30T14:35:00+09:00", ranking=[3, 99])
         f = tmp_path / "mam.json"
         f.write_text(json.dumps([good, late, bad]))
-        out = import_predictions(paths, f)
+        out = import_predictions(paths, _arrive(f))
         assert out["accepted"] == 1 and len(out["rejected"]) == 2
         assert "締切後" in out["rejected"][0]["reason"]
         led = Ledger(paths.ledger_path, read_only=True)
@@ -233,7 +241,7 @@ def test_integrated_versions(tmp_path):
         assert mk["formal_probability"] and abs(sum(mk["trio_probs_full"].values()) - 1) < 1e-4
         assert mm["weights"] == {"market": 1.0, "ml": 0.2} and mm["allocation"]["kelly"]["status"] != "not_allocated"
         # まむの予想が締切までに無い → 黙って外さず、理由つきで未配分
-        assert not mam["formal_probability"] and "まむ：締切までに予想が無い" in mam["reasons"]
+        assert not mam["formal_probability"] and any("まむ：受付の締め" in r for r in mam["reasons"])
         assert mam["allocation"]["ev_weighted"]["status"] == "not_allocated"
         col._save(RK, "result", "result", "/JRADB/x", "c", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
         run_live(paths)
@@ -254,7 +262,7 @@ def test_mam_partial_trios_are_reference_only(tmp_path):
         f = tmp_path / "mam.json"
         f.write_text(json.dumps({"schema": "keiba-mam-prediction-v1", "race_key": RK, "time_point": "1h",
                                  "generated_at": "2025-08-30T14:35:00+09:00", "trios": [{"combo": "1-2-3", "p": 0.3}]}))
-        assert import_predictions(paths, f)["accepted"] == 1
+        assert import_predictions(paths, _arrive(f))["accepted"] == 1
         run_live(paths)
         led = Ledger(paths.ledger_path, read_only=True)
         p = next(x for x in led.predictions() if x["method"] == "int_market_ml_mam")
@@ -263,3 +271,148 @@ def test_mam_partial_trios_are_reference_only(tmp_path):
         assert any("全組の確率がそろっていない" in r for r in p["reasons"])
     finally:
         jra.parse_card = orig
+
+
+def _inbox(tmp_path):
+    from keiba.live.mam import export_packets
+    paths, col = _setup(tmp_path)
+    export_packets(paths)
+    inbox = tmp_path / "mam" / "inbox"
+    inbox.mkdir(parents=True)
+    return paths, inbox, tmp_path / "mam" / "inbox_results"
+
+
+BASE = {"schema": "keiba-mam-prediction-v1", "race_key": RK, "time_point": "1h", "author": "mam",
+        "generated_at": "2025-08-30T14:35:00+09:00"}
+
+
+def _put(inbox, name, obj, when="2025-08-30T14:36:00+09:00"):
+    f = inbox / name
+    f.write_text(obj if isinstance(obj, str) else json.dumps(obj))
+    return _arrive(f, when)
+
+
+def test_mam_inbox(tmp_path):
+    """返し先 inbox：新しい中身だけ読む・書きかけは読み直す・決めた形にない項目や入力の束は断る。"""
+    from keiba.live.mam import import_inbox
+    paths, inbox, res = _inbox(tmp_path)
+    assert import_inbox(paths) == {"files": 0}
+    _put(inbox, "a.json", '{"schema": "keiba-mam-pred')  # 書きかけ
+    _put(inbox, "b.json", dict(BASE, ranking=[3, 1, 2], trio_odds=[{"combo": "1-2-3", "prob": 0.1}], win_prob={"1": 0.3}))
+    packet = json.loads(next((tmp_path / "mam" / "outbox").glob("*.json")).read_text())
+    _put(inbox, "c.json", packet)
+    out = import_inbox(paths)
+    assert out == {"files": 3, "accepted": 0, "already_accepted": 0, "rejected": 2, "unreadable": 1}
+    assert "trio_odds" in json.loads((res / "b.json").read_text())["rejected"][0]["reason"]
+    assert "入力の束" in json.loads((res / "c.json").read_text())["rejected"][0]["reason"]
+    assert import_inbox(paths) == {"files": 0}  # 同じ中身は読み直さない
+    _put(inbox, "a.json", dict(BASE, ranking=[3, 1, 2], trios=[{"combo": "1-2-3", "p": 0.2}]))
+    out = import_inbox(paths)
+    assert out["files"] == 1 and out["accepted"] == 1
+    _put(inbox, "a.json", dict(BASE, ranking=[1, 2, 3], trios=[{"combo": "1-2-4", "p": 0.3}]))
+    out = import_inbox(paths)  # 中身が変われば読み直すが、受け付け済みの予想は書き換えない
+    assert out["accepted"] == 0 and out["rejected"] == 1
+    assert "受け付け済み" in json.loads((res / "a.json").read_text())["rejected"][0]["reason"]
+    assert sorted(p.name for p in inbox.iterdir()) == ["a.json", "b.json", "c.json"]  # 消さない・動かさない
+
+
+def test_mam_inbox_bad_types_do_not_block_others(tmp_path):
+    """みに指摘（重大1）：型の違う予想は理由つきで断り、後ろの正しい予想は受け付ける。"""
+    from keiba.live.mam import import_inbox
+    paths, inbox, res = _inbox(tmp_path)
+    _put(inbox, "a.json", [dict(BASE, trios=None, ranking=None), dict(BASE, generated_at=None, ranking=[1]),
+                           dict(BASE, ranking="1,2"), dict(BASE, ranking=[True, 2]), "文字列"])
+    _put(inbox, "b.json", dict(BASE, ranking=[3, 1, 2], trios=[{"combo": "1-2-3", "p": 0.2}]))
+    out = import_inbox(paths)
+    assert out["accepted"] == 1 and out["rejected"] == 5
+    reasons = [r["reason"] for r in json.loads((res / "a.json").read_text())["rejected"]]
+    assert all(reasons) and "generated_at" in reasons[1]
+
+
+def test_mam_inbox_values_are_checked(tmp_path):
+    """みに指摘（要修正3）：4頭の組・同じ組の重複・自信度の範囲・確率の範囲。"""
+    from keiba.live.mam import import_inbox
+    paths, inbox, res = _inbox(tmp_path)
+    bad = [dict(BASE, trios=[{"combo": "1-1-3-5", "p": 0.1}]),
+           dict(BASE, trios=[{"combo": "1-2-3", "p": 0.1}, {"combo": "3-2-1", "p": 0.1}]),
+           dict(BASE, ranking=[1, 2, 3], confidence="Q"),
+           dict(BASE, trios=[{"combo": "1-2-3", "p": 1.5}]),
+           dict(BASE, trios=[{"combo": "1-2-3", "p": "0.1"}]),
+           dict(BASE, trios=[{"combo": "1-2-3", "p": 0}])]
+    _put(inbox, "a.json", bad)
+    out = import_inbox(paths)
+    assert out["accepted"] == 0 and out["rejected"] == len(bad)
+    reasons = [r["reason"] for r in json.loads((res / "a.json").read_text())["rejected"]]
+    assert "3頭" in reasons[0] and "2回" in reasons[1] and "confidence" in reasons[2]
+
+
+def test_mam_inbox_index_recovery_and_names(tmp_path):
+    """みに指摘（重大3・要修正1・2）：管理ファイルが壊れても読み直して先へ進む。受け付け済みは「受け付け済み」のまま。
+    管理ファイルと同じ名前の予想ファイルでも、結果がぶつからない。"""
+    from keiba.live.mam import INDEX_NAME, import_inbox
+    paths, inbox, res = _inbox(tmp_path)
+    good = dict(BASE, ranking=[3, 1, 2], trios=[{"combo": "1-2-3", "p": 0.2}])
+    _put(inbox, "processed.json", good)
+    _put(inbox, INDEX_NAME, dict(BASE, time_point="24h", ranking=[1]))
+    out = import_inbox(paths)
+    assert out["files"] == 2 and out["accepted"] == 1
+    index = tmp_path / "mam" / INDEX_NAME
+    assert json.loads((res / "processed.json").read_text())["accepted"] == 1
+    index.write_text('{"processed.json": {"sha')  # 書き込み途中で止まった管理ファイル
+    out = import_inbox(paths)
+    assert out["already_accepted"] == 1 and out["accepted"] == 0  # 重複拒否にならず、受け付けた結果を戻す
+    assert json.loads((res / "processed.json").read_text())["already_accepted"] == 1
+    assert not list((tmp_path / "mam").glob(".*.tmp"))
+
+
+def test_mam_late_arrival_is_rejected(tmp_path):
+    """作成が締切前でも、受付の締め（締切の12分後）より後に届いたものは断る。"""
+    from keiba.live.mam import import_inbox
+    paths, inbox, res = _inbox(tmp_path)
+    _put(inbox, "a.json", dict(BASE, ranking=[1, 2, 3]), when="2025-08-30T14:53:00+09:00")
+    out = import_inbox(paths)
+    assert out["rejected"] == 1 and "受付の締め" in json.loads((res / "a.json").read_text())["rejected"][0]["reason"]
+
+
+def test_integration_waits_for_mam_until_grace(tmp_path, monkeypatch):
+    """みに指摘（重大2）：受付の締めまでは「まむ入り」の統合を記録しない。間に合った予想は統合に入る。"""
+    from keiba.ledger import Ledger
+    from keiba.live import wallet
+    from keiba.live.mam import import_inbox
+    orig = jra.parse_card
+    jra.parse_card = lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)]
+
+    class Clock(datetime):
+        now_value = datetime(2025, 8, 30, 14, 45, tzinfo=JST)  # 締切 14:40 の5分後（受付の締めの前）
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.now_value.astimezone(tz) if tz else cls.now_value
+    try:
+        monkeypatch.setattr(wallet, "datetime", Clock)
+        paths, inbox, res = _inbox(tmp_path)
+        run_live(paths)
+        led = Ledger(paths.ledger_path, read_only=True)
+        methods = {x["method"] for x in led.predictions()}
+        led.close()
+        assert "int_market_ml_mam" not in methods and "int_market_ml" in methods
+        _put(inbox, "a.json", dict(BASE, trios=[{"combo": c, "p": 1 / 56} for c in
+                                                ("-".join(map(str, x)) for x in combinations(range(1, N + 1), 3))]),
+             when="2025-08-30T14:44:00+09:00")
+        assert import_inbox(paths)["accepted"] == 1
+        Clock.now_value = datetime(2025, 8, 30, 14, 55, tzinfo=JST)
+        run_live(paths)
+        led = Ledger(paths.ledger_path, read_only=True)
+        p = next(x for x in led.predictions() if x["method"] == "int_market_ml_mam")
+        led.close()
+        assert "mam" in p["inputs_used"] and p["formal_probability"]
+    finally:
+        jra.parse_card = orig
+
+
+def test_mam_example_file_is_accepted_shape():
+    from pathlib import Path
+    from keiba.live.mam import ALLOWED_KEYS, SCHEMA_OUT
+    ex = json.loads((Path(__file__).parent.parent / "docs" / "requests" / "mam-prediction-example.json").read_text())
+    assert ex["schema"] == SCHEMA_OUT and set(ex) <= ALLOWED_KEYS
+    assert all(set(t) <= {"combo", "p"} for t in ex["trios"])

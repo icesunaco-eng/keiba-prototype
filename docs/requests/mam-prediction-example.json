@@ -1,0 +1,16 @@
+{
+  "schema": "keiba-mam-prediction-v1",
+  "race_key": "2026-11-22|京都|11",
+  "time_point": "1h",
+  "generated_at": "2026-11-22T14:35:00+09:00",
+  "author": "mam",
+  "ranking": [3, 1, 12, 5, 8],
+  "trios": [
+    {"combo": "1-3-12", "p": 0.08},
+    {"combo": "1-3-5", "p": 0.05},
+    {"combo": "3-5-12", "p": 0.04},
+    {"combo": "1-3-8", "p": 0.03}
+  ],
+  "confidence": "B",
+  "comment": "3番は前走で不利。内枠の先行馬が有利な馬場"
+}
