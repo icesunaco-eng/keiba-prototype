@@ -52,7 +52,22 @@ def _snapshots(root: Path) -> pd.DataFrame:
     f = root / "snapshots.jsonl"
     if not f.exists():
         return pd.DataFrame(columns=["race_key", "kind", "time_point", "path", "sha256", "fetched_at"])
-    return pd.DataFrame([json.loads(x) for x in f.read_text(encoding="utf-8").splitlines() if x.strip()])
+    rows, bad = [], 0
+    for x in f.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not x.strip():
+            continue
+        try:
+            rec = json.loads(x)
+        except json.JSONDecodeError:
+            bad += 1  # 途中で切れた行など。その行だけ使わず、全体は止めない
+            continue
+        if isinstance(rec, dict):
+            rows.append(rec)  # ページの無い記録（odds_unavailable など）も今までどおり残す
+        else:
+            bad += 1
+    df = pd.DataFrame(rows, columns=None if rows else ["race_key", "kind", "time_point", "path", "sha256", "fetched_at"])
+    df.attrs["bad_lines"] = bad
+    return df
 
 
 def _read(root: Path, rec) -> str:
@@ -83,6 +98,24 @@ def _with_card_issue(gate: dict, issue: str | None) -> dict:
     return gate
 
 
+def time_reasons(odds_time, fetched_at: str, race: dict, tp: str, label: str = "") -> list[str]:
+    """オッズのページの時刻の検査（三連複・単勝で同じ）。取得が締切後・発表時刻が不明・締切後・古い（取得との差）なら理由を返す。"""
+    out = []
+    fetched = datetime.fromisoformat(fetched_at)
+    dl = deadline(race["race_date"], race["post_time"], tp)
+    if fetched > dl:
+        out.append(f"{label}締切後の取得（締切 {dl:%H:%M}・取得 {fetched:%H:%M}）")
+    if not odds_time:
+        out.append(f"{label}オッズの時刻が分からない")
+        return out
+    t = datetime.fromisoformat(f"{race['race_date']}T{odds_time}:00{JST}")
+    if t > dl:
+        out.append(f"{label}締切後のオッズ（発表 {odds_time}）")
+    if fetched - t > timedelta(minutes=STALE_MINUTES) or t - fetched > timedelta(minutes=1):
+        out.append(f"{label}古いオッズ（発表 {odds_time}・取得 {fetched:%H:%M}）")
+    return out
+
+
 def odds_gate(trio: dict, trio_rec, race: dict, tp: str) -> dict:
     """三連複オッズの合格判定（週末の確認の物差し）。"""
     g = {"trio_found": trio.get("found"), "trio_expected": trio.get("expected"), "duplicates": trio.get("duplicates"),
@@ -96,19 +129,9 @@ def odds_gate(trio: dict, trio_rec, race: dict, tp: str) -> dict:
         if not trio.get("ok"):
             reasons.append(f"組が出走馬の全組と合わない（{trio.get('found')}/{trio.get('expected')}・重複{trio.get('duplicates')}"
                            f"・余分{trio.get('extra', 0)}・不足{trio.get('missing', 0)}）")
-        fetched = datetime.fromisoformat(trio_rec["fetched_at"])
         dl = deadline(race["race_date"], race["post_time"], tp)
         g["deadline"] = dl.isoformat(timespec="minutes")
-        if fetched > dl:
-            reasons.append(f"締切後の取得（締切 {dl:%H:%M}・取得 {fetched:%H:%M}）")
-        if not g["odds_time"]:
-            reasons.append("オッズの時刻が分からない")
-        else:
-            t = datetime.fromisoformat(f"{race['race_date']}T{g['odds_time']}:00{JST}")
-            if t > dl:
-                reasons.append(f"締切後のオッズ（発表 {g['odds_time']}）")
-            if fetched - t > timedelta(minutes=STALE_MINUTES) or t - fetched > timedelta(minutes=1):
-                reasons.append(f"古いオッズ（発表 {g['odds_time']}・取得 {fetched:%H:%M}）")
+        reasons += time_reasons(g["odds_time"], trio_rec["fetched_at"], race, tp)
     g["pass"] = not reasons
     g["reasons"] = reasons
     return g
@@ -143,6 +166,9 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                 if not len(cards):
                     continue
                 card_all = jra.parse_card(_read(root, cards.iloc[-1]))
+                if getattr(card_all, "problems", None):
+                    held[f"{rk}|{tp}"] = "出馬表を使わない：" + "・".join(card_all.problems)
+                    continue
                 if not any(c["horse_number"] for c in card_all):
                     continue  # 枠順の確定前（馬番が空）。この時点の入力は作らない
                 scratched = sorted(c["horse_number"] for c in card_all if c.get("scratch") and c["horse_number"] is not None)
@@ -155,8 +181,16 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                 if tp == "15m" and not (len(win) or len(trio)):
                     continue  # 15分前は配分の見直しだけ。新しいオッズが無ければ作らない
                 active = [int(c["horse_number"]) for c in card]  # 出走馬（取消を除く）。オッズの組はこれとぴったり照らす
-                card_issue = card_problem([c["horse_number"] for c in card_all], r.get("field_size"))
-                w = jra.parse_win_odds(_read(root, win.iloc[-1]), active) if len(win) else {"ok": False, "odds": {}}
+                card_issue = ("・".join(getattr(card_all, "problems", [])) or
+                              card_problem([c["horse_number"] for c in card_all], r.get("field_size")))
+                w = {"ok": False, "odds": {}}
+                if len(win):
+                    win_page = _read(root, win.iloc[-1])
+                    w = jra.parse_win_odds(win_page, active)
+                    w["odds_time"] = jra.parse_odds_time(win_page)
+                    w_time = time_reasons(w["odds_time"], win.iloc[-1]["fetched_at"], r, tp, "単勝：")
+                    if w_time:  # 単勝も三連複と同じ時刻の検査。通らなければ使わない
+                        w = dict(w, ok=False, reason=" / ".join(w_time))
                 if card_issue:  # 名簿が信用できなければ単勝も使わない（学習＋単勝・統合へ誤った入力を渡さない）
                     w = {"ok": False, "odds": {}, "reason": card_issue}
                 t = {"ok": False, "odds": {}}
@@ -245,7 +279,7 @@ def run_live(paths, log=print) -> dict:
     root = paths.data_dir / "live"
     state = json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {"races": {}}
     snaps = _snapshots(root)
-    held = {}
+    held = {"_snapshots_bad_lines": snaps.attrs["bad_lines"]} if snaps.attrs.get("bad_lines") else {}
     lr, lrun, inputs = live_tables(root, state, snaps, held)
     _write_held(root, held)
     if lrun.empty:

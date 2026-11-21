@@ -26,17 +26,18 @@ def card_html(ids):
     return f"<table><tbody>{rows}</tbody></table>"
 
 
-def win_html(n=N, cell=None):
-    """実物と同じ形の単勝・複勝の表（class に tanpuku、td.num・td.odds_tan）。cell で1頭分のセルを差し替えられる。"""
+def win_html(n=N, cell=None, time="14時25分"):
+    """実物と同じ形の単勝・複勝の表（class に tanpuku、td.num・td.odds_tan）と発表時刻の欄。cell で1頭分のセルを差し替えられる。"""
     rows = "".join(f'<tr><td class="num">{k}</td><td class="horse"><a>x</a></td>'
                    f'<td class="odds_tan">{cell(k) if cell else 2.0 + k}</td><td class="odds_fuku">1.1-1.5</td></tr>'
                    for k in range(1, n + 1))
-    return f'<table class="basic narrow-xy tanpuku"><thead><tr><th class="num">馬番</th><th class="odds_tan">単勝</th></tr></thead><tbody>{rows}</tbody></table>'
+    head = f'<div class="cell time"><strong>{time}現在オッズ</strong></div>' if time else ""
+    return head + f'<table class="basic narrow-xy tanpuku"><thead><tr><th class="num">馬番</th><th class="odds_tan">単勝</th></tr></thead><tbody>{rows}</tbody></table>'
 
 
 def trio_html(time="14時25分", dup=False, drop=False, n=N):
     """実物と同じ形の三連複の表（class に fuku3、caption「a-b」、行は th・td）。"""
-    out = [f"<p>{time}現在のオッズ</p>"] if time else []
+    out = [f'<div class="cell time"><strong>{time}現在オッズ</strong></div>'] if time else []
     for a, b in combinations(range(1, n + 1), 2):
         rows = "".join(f'<tr><th scope="row">{c}</th><td>{10.0 + a + b + c}</td></tr>' for c in range(b + 1, n + 1))
         if rows:
@@ -164,7 +165,7 @@ def test_gate_rejects_capture_after_time_point_deadline(tmp_path):
 
 def test_known_scratch_reduces_field(tmp_path):
     ids = [f"H{h:04d}" for h in range(N)]
-    card = card_html(ids).replace('<td class="num">8</td>', '<td class="num">8</td><td class="cancel">取消</td>')
+    card = card_html(ids).replace('<td class="num">8</td>', '<td class="num"><span class="cap">取消</span></td>')  # 実物の取消の形
     r = _gate(tmp_path, card=card)
     assert r["scratched_known"] == "8" and r["trio"] == "56/35" and not r["pass"]  # 8頭の組は7頭の35組と合わない
 
@@ -279,7 +280,7 @@ def test_trio_odds_real_page_shape():
         rows = "".join(f'<tr>\n<th scope="row">{c}</th><td>{100.0 + a * 10 + b + c / 10}</td></tr>' for c in range(b + 1, n + 1))
         if rows:
             tables.append(f'<li><table class="basic narrow-xy fuku3">\n<caption>{a}-{b}</caption><tbody>{rows}</tbody></table></li>')
-    page = "<p>10時49分現在</p><ul>" + "".join(tables) + "</ul>"
+    page = '<div class="cell time"><strong>10時49分現在オッズ</strong></div><ul>' + "".join(tables) + "</ul>"
     t = jra.parse_trio_odds(page, n)
     assert t["ok"] and len(t["odds"]) == comb(n, 3) and t["odds"]["1-2-3"] == 112.3
     assert jra.parse_odds_time(page) == "10:49"
@@ -291,7 +292,7 @@ def _fuku3(pairs_rows, extra=""):
     tabs = "".join(f'<li><table class="basic narrow-xy fuku3"><caption>{a}-{b}</caption><tbody>'
                    + "".join(f'<tr><th scope="row">{c}</th><td>{v}</td></tr>' for c, v in rows) + "</tbody></table></li>"
                    for (a, b), rows in pairs_rows.items())
-    return f"<p>10時49分現在</p><ul>{tabs}</ul>{extra}"
+    return f'<div class="cell time"><strong>10時49分現在オッズ</strong></div><ul>{tabs}</ul>{extra}'
 
 
 def _all_rows(nums, skip=()):
@@ -467,10 +468,16 @@ def test_trio_odds_rejects_wrong_structure(page):
     assert not jra.parse_trio_odds(page, list(range(1, N + 1)))["ok"]
 
 
+def _tm(*texts):
+    return "".join(f'<div class="cell time"><strong>{t}</strong></div>' for t in texts) + '<div class="cell time">発走時刻：15時40分</div>'
+
+
 @pytest.mark.parametrize("text,expect", [
-    ("<p>10時99分現在</p>", None), ("<p>24時00分現在</p>", None), ("<p>なし</p>", None),
-    ("<p>10時49分現在</p><p>10時50分現在</p>", None),
-    ("<p>10時49分現在</p><p>10時49分現在</p>", "10:49"), ("<p>８時５０分現在オッズ</p>", "08:50"),
+    (_tm("10時99分現在オッズ"), None), (_tm("24時00分現在オッズ"), None), ("<p>なし</p>", None),
+    (_tm("10時49分現在オッズ", "10時50分現在オッズ"), None), (_tm("10時49分現在オッズ", "10時49分現在オッズ"), None),
+    (_tm("114時25分現在オッズ"), None), (_tm("前回 10時40分現在オッズ"), None),
+    ("<p>10時49分現在オッズ</p>", None),  # 決まった欄の外の時刻は読まない
+    (_tm("８時５０分現在オッズ"), "08:50"), (_tm("8時50分現在オッズ"), "08:50"), (_tm("14時25分現在オッズ"), "14:25"),
 ])
 def test_odds_time_is_checked(text, expect):
     assert jra.parse_odds_time(text) == expect
@@ -557,7 +564,7 @@ def test_unreadable_non_scratched_row_is_not_inferred():
 def test_scratch_race_end_to_end(tmp_path):
     """取消の馬（番号の欄が「取消」）がいるレース：出走馬の全組と単勝がそろえば合格し、取消の馬の組は使わない。"""
     active = [k for k in range(1, N + 1) if k != 5]
-    trio = "<p>14時25分現在</p>" + "".join(
+    trio = '<div class="cell time"><strong>14時25分現在オッズ</strong></div>' + "".join(
         f'<table class="basic narrow-xy fuku3"><caption>{a}-{b}</caption><tbody>'
         + "".join(f'<tr><th scope="row">{c}</th><td>{"取消" if 5 in (a, b, c) else 10.0 + a + b + c}</td></tr>'
                   for c in range(b + 1, N + 1)) + "</tbody></table>"
@@ -583,3 +590,90 @@ def test_unreadable_card_row_fails_gate_with_reason(tmp_path):
     root = tmp_path / "live"
     inp = live_tables(root, json.loads((root / "state.json").read_text()), _snapshots(root), held)[2][(RK, "1h")]
     assert not held and not inp["gate"]["pass"] and not inp["win"]["ok"] and "読めない" in inp["gate"]["card_issue"]
+
+
+# ---- みにの5回目の独立検証（💚20261121-19）の指摘 ----
+
+def test_nested_tables_reject_whole_odds_page():
+    """指摘1：補足の表に入れ子にした fuku3・tanpuku を読まない（実物のオッズのページに入れ子の表は無い）。"""
+    full = list(range(1, N + 1))
+    page = trio_html().replace('<th scope="row">3</th><td>16.0</td>', '', 1)
+    page += '<table class="note"><tr><td><table class="basic fuku3"><caption>1-2</caption><tbody><tr><th scope="row">3</th><td>16.0</td></tr></tbody></table></td></tr></table>'
+    t = jra.parse_trio_odds(page, full)
+    assert not t["ok"] and t["nested_table"]
+    win = '<table class="note"><tr><td>' + win_html() + '</td></tr></table>'
+    assert not jra.parse_win_odds(win, full)["ok"]
+
+
+def test_card_page_with_second_entry_table_is_not_used(tmp_path):
+    """指摘2：出馬表から5番の行を外して別の表に置いても、出馬表として使わない（理由を残す）。"""
+    ids = [f"H{h:04d}" for h in range(N)]
+    rows = card_html(ids).split("<tr>")
+    five = next(r for r in rows if '<td class="num">5</td>' in r)
+    card = "<tr>".join(r for r in rows if r is not five) + "<table><tbody><tr>" + five + "</tbody></table>"
+    parsed = jra.parse_card(card)
+    assert not list(parsed) and "2個" in parsed.problems[0]
+    nested = card_html(ids).replace("</tbody></table>", '<tr><td><table><tr><td>x</td></tr></table></td></tr></tbody></table>')
+    assert jra.parse_card(nested).problems
+    from keiba.live.wallet import _snapshots, live_tables
+    paths, col = _setup(tmp_path, card=card)
+    root = tmp_path / "live"
+    held = {}
+    inputs = live_tables(root, json.loads((root / "state.json").read_text()), _snapshots(root), held)[2]
+    assert (RK, "1h") not in inputs and "出馬表を使わない" in held[f"{RK}|1h"]
+
+
+def test_scratch_needs_exact_marker_in_number_or_odds_cell():
+    """指摘2：馬名の注記に「取消」の字があっても取消にしない。馬番の欄・人気の欄がちょうど「取消」のときだけ。"""
+    from keiba.live.wallet import card_problem
+    ids = [f"H{h:04d}" for h in range(N)]
+    html = card_html(ids).replace('<td class="num">3</td>', '<td class="num">―</td>', 1)
+    html = html.replace(">ウマ2<", ">ウマ2（出走取消前の所属）<", 1)
+    rows = jra.parse_card(html)
+    assert not any(r["scratch"] for r in rows) and "読めない" in card_problem([r["horse_number"] for r in rows], N)
+    ok = card_html(ids).replace('<td class="num">3</td>', '<td class="num"><span class="cap">取消</span></td>', 1)
+    assert [r["horse_number"] for r in jra.parse_card(ok) if r["scratch"]] == [3]
+
+
+def test_duplicate_rows_count_even_when_not_numeric():
+    """指摘4：有効な行と同じ馬番・同じ組の「取消」の行が並んだら、重複として不合格。"""
+    full = list(range(1, N + 1))
+    page = trio_html().replace('<th scope="row">3</th><td>16.0</td>', '<th scope="row">3</th><td>16.0</td></tr><tr><th scope="row">3</th><td>取消</td>', 1)
+    t = jra.parse_trio_odds(page, full)
+    assert not t["ok"] and t["duplicates"] == 1
+    win = win_html().replace("</tbody>", '<tr><td class="num">3</td><td class="odds_tan">取消</td></tr></tbody>')
+    assert not jra.parse_win_odds(win, full)["ok"]
+
+
+def test_broken_index_line_does_not_stop_everything(tmp_path):
+    """指摘6：snapshots.jsonl に途中で切れた行があっても、その行だけ使わずに続ける。"""
+    from keiba.live.wallet import _snapshots, live_tables
+    paths, col = _setup(tmp_path)
+    root = tmp_path / "live"
+    with open(root / "snapshots.jsonl", "a", encoding="utf-8") as f:
+        f.write('{"race_key": "2025-08-30|東京|11", "kind": "odds_tr\n')
+    snaps = _snapshots(root)
+    assert snaps.attrs["bad_lines"] == 1
+    inp = live_tables(root, json.loads((root / "state.json").read_text()), snaps)[2][(RK, "1h")]
+    assert inp["gate"]["pass"]
+
+
+@pytest.mark.parametrize("time", ["14時99分", "114時25分", None, "14時00分", "14時45分"])
+def test_win_odds_time_is_checked_like_trio(tmp_path, time):
+    """単勝のページにも三連複と同じ時刻の検査（不明・ありえない・古い・締切後）。通らなければ単勝は使わない。"""
+    from keiba.live.wallet import _snapshots, live_tables
+    paths, col = _setup(tmp_path)
+    col._save(RK, "odds_win", "1h", "/JRADB/x", "c", win_html(time=time))
+    col._write_state()
+    root = tmp_path / "live"
+    inp = live_tables(root, json.loads((root / "state.json").read_text()), _snapshots(root))[2][(RK, "1h")]
+    assert not inp["win"]["ok"] and "単勝：" in inp["win"]["reason"]
+    assert inp["gate"]["pass"]  # 三連複の判定は別
+
+
+def test_win_odds_with_good_time_is_used(tmp_path):
+    from keiba.live.wallet import _snapshots, live_tables
+    paths, col = _setup(tmp_path)
+    root = tmp_path / "live"
+    inp = live_tables(root, json.loads((root / "state.json").read_text()), _snapshots(root))[2][(RK, "1h")]
+    assert inp["win"]["ok"] and inp["win"]["odds_time"] == "14:25"
