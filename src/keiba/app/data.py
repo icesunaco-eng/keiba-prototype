@@ -48,6 +48,7 @@ ALLOC_STATUS = {
 MAIN_WALLET = {"live": "ev_weighted", "check": "ref_top10_equal"}
 WALLET_LABEL = {**ALLOC_LABEL, "ref_top10_equal": "参考：上位10組を100円ずつ", "ref_top5_equal": "参考：上位5組を100円ずつ"}
 MARKS = ("◎", "○", "★")
+LEDGER_TIMEOUT = 15   # 収集が台帳を書いている間、読むのを待つ秒数
 SCRATCH_VALUES = (None, "取消", "除外")   # 出馬表の取消の欄（jra.parse_card）がとりうる値
 
 
@@ -96,7 +97,7 @@ def is_skip(p: dict, alloc: str) -> bool:
 def ro_connect(path) -> sqlite3.Connection:
     """読取専用で開く。ファイル名に ? や # があっても別のファイルを作らないように、正しい file: URI にする。"""
     # 収集が台帳に書いている間は少し待つ（すぐ「database is locked」にしない）
-    return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=15)
+    return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=LEDGER_TIMEOUT)
 
 
 def make_result(finished: list, finishers: int, scratched: set, payouts: dict, rows: int | None = None,
@@ -204,6 +205,7 @@ class Source:
         self.version = None
         self.loaded_at = time.time()
         self.notes: list[str] = []
+        self.stale: str | None = None   # 前に読んだデータを表示しているとき、その理由
         (self._load_live if mode == "live" else self._load_check)()
 
     # ---- 共通 ----
@@ -484,6 +486,10 @@ class Source:
         return self.names.get(race_key, {}).get(int(n), "")
 
 
+class LedgerBusy(Exception):
+    """収集が台帳を書いている最中で、まだ一度も読めていない（少し待てば読める）。"""
+
+
 class Cache:
     """見方ごとに Source を持ち、元のファイルが変わったら作り直す。"""
 
@@ -507,7 +513,14 @@ class Cache:
             stamp = self._stamp(mode)
             item = self._items.get(mode)
             if item is None or item[0] != stamp:
-                item = (stamp, Source(self.paths, mode))
+                try:
+                    item = (stamp, Source(self.paths, mode))
+                except sqlite3.OperationalError as exc:
+                    # 収集が台帳を書いている間は読めないことがある。前に読んだデータで表示を続け、次の表示で読み直す
+                    if item is None:
+                        raise LedgerBusy(str(exc)) from exc
+                    item[1].stale = f"台帳の書込み中だったので、{time.strftime('%H:%M:%S', time.localtime(item[1].loaded_at))} に読んだデータを表示中"
+                    return item[1]
                 self._items[mode] = item
             return item[1]
 

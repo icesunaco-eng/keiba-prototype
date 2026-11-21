@@ -198,6 +198,8 @@ def layout(ctx, title: str, body: str, tab: str | None = None, back: str | None 
     left = f'<a class="ib" href="{h(back)}" aria-label="戻る">{icon("back")}</a>' if back else ""
     mode = (f'<div class="mode">{h(MODES["check"])}を表示中。発走前の予想ではなく、画面の確認用だよ。'
             f'<a href="/settings"><u>切り替え</u></a></div>' if ctx.get("mode") == "check" else "")
+    if ctx.get("stale"):   # 収集が台帳を書いている最中で、前に読んだデータを表示している
+        mode += f'<div class="mode">{h(ctx["stale"])}（次の表示で読み直すよ）</div>'
     tabs = "".join(f'<a href="/{k}" class="{"on" if k == tab else ""}"{" aria-current=page" if k == tab else ""}>{icon(ic)}{lab}</a>'
                    for k, lab, ic in TABS)
     return (f'<!doctype html><html lang="ja"{attrs}><head><meta charset="utf-8">'

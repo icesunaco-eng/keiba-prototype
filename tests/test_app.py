@@ -1235,3 +1235,39 @@ def test_interrupted_snapshot_index_keeps_other_rows(live_paths, tmp_path):
     assert src.results[RK]["complete"] is True                          # ほかの行は読める
     from keiba.live.wallet import _snapshots
     assert len(_snapshots(live)) == len(lines) - 1
+
+
+def test_ledger_lock_keeps_previous_data(live_paths, tmp_path, monkeypatch):
+    from keiba.app import data as d
+    monkeypatch.setattr(d, "LEDGER_TIMEOUT", 0.1)
+    cache = Cache(live_paths)
+    first = cache.get("live")
+    lock = sqlite3.connect(live_paths.ledger_path)
+    lock.execute("BEGIN EXCLUSIVE")                         # 収集が書いている最中
+    try:
+        (live_paths.data_dir / "live" / "state.json").touch()
+        import os
+        os.utime(live_paths.data_dir / "live" / "state.json", (1, 1))   # 元のファイルが変わった（読み直しが要る）
+        again = cache.get("live")
+        assert again is first and again.stale and "書込み中" in again.stale   # 前に読んだデータで表示を続ける
+        empty = Cache(live_paths)
+        with pytest.raises(d.LedgerBusy):                     # 一度も読めていなければ「読み込み中」
+            empty.get("live")
+    finally:
+        lock.rollback()
+        lock.close()
+    assert cache.get("live") is not first                    # 書込みが終われば読み直す
+
+
+def test_ledger_busy_page(server, monkeypatch):
+    app, port = server
+    from keiba.app import data as d
+
+    def busy(mode):
+        raise d.LedgerBusy("locked")
+    monkeypatch.setattr(app.cache, "get", busy)
+    code, body, _ = _req(port, "/races")
+    assert code == 503 and "台帳を書いている" in body and 'http-equiv="refresh"' in body
+    data = {"token": app.token, "rk": RK, "kind": "buy", "combo": ["1-2-3"], "yen": ["100"]}
+    code, body, _ = _req(port, "/buy", data, origin=f"http://127.0.0.1:{port}")
+    assert code == 503 and "保存していない" in body and app.store.entries() == []

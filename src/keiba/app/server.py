@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import pages
-from .data import ALLOC_LABEL, METHOD_TABS, MODES, TIME_POINTS, Cache
+from .data import ALLOC_LABEL, METHOD_TABS, MODES, TIME_POINTS, Cache, LedgerBusy
 from .store import InputError, Store
 
 HOST = "127.0.0.1"
@@ -222,6 +222,8 @@ def make_handler(app: App, port: int, extra_hosts=()):
                 if u.path == "/app-id":   # 起動スクリプトが「このアプリが動いているか」を見分ける印
                     return self._send(200, APP_ID, "text/plain; charset=utf-8")
                 src = app.cache.get(ctx["mode"])
+                if src.stale:
+                    ctx["stale"] = src.stale
                 if u.path == "/purchases.csv":
                     return self._send(200, "﻿" + pages.purchases_csv(src, app.store), "text/csv; charset=utf-8",
                                       {"Content-Disposition": 'attachment; filename="keiba-purchases.csv"'})
@@ -239,6 +241,11 @@ def make_handler(app: App, port: int, extra_hosts=()):
                 if not fn:
                     return self._send(404, pages.layout(ctx, "見つからない", pages.empty("ページが見つからないよ", ""), None, "/races"))
                 self._send(200, fn(ctx, src, app.store, q))
+            except LedgerBusy:
+                # 起動直後で、収集が台帳を書いている最中：少し待ってから自動で読み直す
+                body = pages.layout(ctx, "読み込み中", pages.empty("いま収集が台帳を書いているところだよ", "数秒〜1分ほどで自動で読み直すね。"),
+                                    None, "/races").replace("<head>", '<head><meta http-equiv="refresh" content="10">', 1)
+                self._send(HTTPStatus.SERVICE_UNAVAILABLE, body)
             except Exception:
                 traceback.print_exc()
                 self._send(500, pages.layout(ctx, "エラー", pages.empty("表示できなかったよ", "端末にくわしい内容を出したよ。"), None, "/races"))
@@ -292,6 +299,9 @@ def make_handler(app: App, port: int, extra_hosts=()):
                     app.store.set_note(pages.decision_key(va, vb), text)
                     return self._redirect(pages.url("/improve/versions", a=va, b=vb))
                 return self._send(404, "not found", "text/plain")
+            except LedgerBusy:
+                self._send(HTTPStatus.SERVICE_UNAVAILABLE, pages.layout(ctx, "保存していないよ", pages.empty(
+                    "いま収集が台帳を書いているところだよ", "記録はまだ保存していないよ。少し待ってから、もう一度送ってね。"), None, "/races"))
             except Exception:
                 traceback.print_exc()
                 self._send(500, pages.layout(ctx, "エラー", pages.empty("保存できなかったよ", "端末にくわしい内容を出したよ。"), None, "/races"))
