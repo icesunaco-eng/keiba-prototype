@@ -57,6 +57,9 @@ def lan_address() -> str | None:
 
 APP_ID = "keiba-confirm-app"
 
+CMP_CACHE_PAIRS = 20   # 覚えておく新旧比較の組の数
+
+
 class App:
     def __init__(self, paths, store_path=None, default_mode="live", passphrase: str | None = None):
         self.paths = paths
@@ -85,7 +88,11 @@ class App:
                 if old is None:
                     raise LedgerBusy(str(exc)) from exc
                 return {**old, "stale": "台帳の書込み中だったので、前に計算した比較を表示中"}
-            self._cmp_cache = {key: out}
+            # 版の組ごとに最新の1つを残す（複数のタブで別の組を開いていても、書込み中に前の比較を出せるように）
+            self._cmp_cache = {k: v for k, v in self._cmp_cache.items() if k[:2] != (va, vb)}
+            self._cmp_cache[key] = out
+            while len(self._cmp_cache) > CMP_CACHE_PAIRS:
+                self._cmp_cache.pop(next(iter(self._cmp_cache)))
         return self._cmp_cache[key]
 
     def locked(self, ip: str) -> bool:
@@ -401,6 +408,8 @@ def notify_loop(app: App, stop: threading.Event, interval: int = 60, lead_min: i
             for rk, r in src.races.items():
                 post = post_datetime(r)
                 if not post or not (0 < (post - now).total_seconds() <= lead_min * 60):
+                    continue
+                if (src.results.get(rk) or {}).get("cancelled"):   # JRAが取りやめを発表したレースは知らせない
                     continue
                 tp = src.latest_tp(rk)
                 p = src.pick(rk, "ml", tp)[1] if tp else None

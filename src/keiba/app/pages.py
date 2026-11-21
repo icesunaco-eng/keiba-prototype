@@ -180,7 +180,7 @@ def money_text(st: dict) -> str:
     if s_ == "settled":
         return f"払戻 {yen(st['returned'])}" + (f"（うち返還 {yen(st['refund'])}）" if st.get("refund") else "")
     if s_ == "refunded_void":
-        return f"返還 {yen(st['returned'])}（レース不成立）"
+        return f"返還 {yen(st['returned'])}（" + ("レース取りやめ" if st.get("cancelled") else "レース不成立") + "）"
     text = SETTLE_LABEL.get(s_, "")
     if st.get("refund") and s_ in ("partial_result", "unsettled_no_payout"):
         text += f"・取消の返還 {yen(st['refund'])} は確定"
@@ -483,7 +483,8 @@ def race_page(ctx, src, store, q) -> str:
         wins = set(res.get("payouts") or {}) or {res["actual"]}
         hit = bool(wins & set(stakes)) if stakes else any(t["combo"] in wins for t in p.get("trios", [])[:10])
         pay = "・".join(yen(v) for v in (res.get("payouts") or {}).values())
-        items.append((f"結果 {res['label']}", ("当たり" if hit else "はずれ") + (f"・払戻 {pay}" if pay else "・払戻はまだ分からない"),
+        items.append((f"結果 {res['label']}", "全額返還" if res.get("cancelled") else
+                      ("当たり" if hit else "はずれ") + (f"・払戻 {pay}" if pay else "・払戻はまだ分からない"),
                       url("/history/detail", rk=rk)))
     body.append(link_list(items))
     skip = (f'<form method="post" action="/buy" class="inline" style="flex:1"><input type="hidden" name="token" value="{h(ctx["token"])}">'
@@ -858,8 +859,9 @@ def history_detail_page(ctx, src, store, q) -> str:
         pays = res.get("payouts") or {}
         result = (f'<p class="small" style="margin:8px 0 0"><span class="tag f">結果</span>三連複 {h(res.get("label") or "—")}'
                   + ("・払戻 " + "・".join(f"{h(c)} {yen(v)}" if len(pays) > 1 else yen(v) for c, v in pays.items()) if pays
-                     else "・払戻はまだ分からない") + (f"・取消 {'、'.join(map(str, sorted(res['scratched'])))}番" if res.get("scratched") else "")
-                  + (f"・完走 {res['finishers']}頭（不成立）" if res.get("finishers", 3) < 3 and res.get("complete", True) else "")
+                     else "" if res.get("cancelled") else "・払戻はまだ分からない") + (f"・取消 {'、'.join(map(str, sorted(res['scratched'])))}番" if res.get("scratched") else "")
+                  + (f"・{h(res['cancelled'])}・全額返還" if res.get("cancelled") else
+                     f"・完走 {res['finishers']}頭（不成立）" if res.get("finishers", 3) < 3 and res.get("complete", True) else "")
                   + (f"・{h(res['incomplete'])}ので精算は保留" if res.get("incomplete") else "") + '</p>')
     body.append(f'<div class="card"><h2>予想の変化（学習）</h2>{"".join(rows)}{result}'
                 f'<a class="muted small" style="display:block;margin-top:6px" href="{h(url("/race/timeline", rk=rk))}">変化の理由を見る ›</a></div>')

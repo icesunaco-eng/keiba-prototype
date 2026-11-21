@@ -1,4 +1,5 @@
 """これからのレースの予想・配分・精算（合成のページで端から端まで。ネットにはつながない）。"""
+import re
 import json
 from datetime import datetime
 from itertools import combinations
@@ -47,8 +48,9 @@ def result_html(order):
     rows = "".join(f'<tr><td class="place">{p}</td><td class="num">{n}</td><td class="horse"><a href="#">x</a></td>'
                    f'<td class="time">1:35.{p}</td><td class="f_time">34.{p}</td><td class="pop">{p}</td></tr>' for p, n in enumerate(order, 1))
     combo = "-".join(map(str, sorted(order[:3])))
-    return (f'<table class="basic narrow-xy striped"><tbody>{rows}</tbody></table>'
-            f'<li class="trio"><dl><dd><div class="line"><div class="num">{combo}</div><div class="yen">4,560円</div></div></dd></dl></li>')
+    return (f'<html><body><table class="basic narrow-xy striped"><tbody>{rows}</tbody></table>'
+            f'<li class="trio"><dl><dd><div class="line"><div class="num">{combo}</div><div class="yen">4,560円</div></div></dd></dl></li>'
+            '</body></html>')
 
 
 def test_parsers_self_check():
@@ -130,7 +132,7 @@ def test_missing_payouts_wait_until_they_arrive(tmp_path):
     try:
         paths, col = _setup(tmp_path)
         run_live(paths)
-        page = result_html([3, 1, 2, 4, 5, 6, 7, 8]).split('<li class="trio"')[0]
+        page = re.sub(r'<li class=\"trio\">.*?</li>', '', result_html([3, 1, 2, 4, 5, 6, 7, 8]))
         col._save(RK, "result", "result", "/JRADB/x", "c", page)
         first = run_live(paths)["settled"]          # 買い目の無い配分（払戻に関係しない）だけが先に書かれる
         from keiba.ledger import Ledger
@@ -202,7 +204,8 @@ def test_gate_rejects_capture_after_time_point_deadline(tmp_path):
 
 def test_known_scratch_reduces_field(tmp_path):
     ids = [f"H{h:04d}" for h in range(N)]
-    card = card_html(ids).replace('<td class="num">8</td>', '<td class="num">8</td><td class="cancel">取消</td>')
+    # 実物と同じく、取消の印は馬名の横のオッズ欄に出る
+    card = card_html(ids).replace('ウマ7</a></div>', 'ウマ7</a></div><div class="odds"><div class="odds_line"><span class="num"><strong>取消</strong></span></div></div>')
     r = _gate(tmp_path, card=card)
     assert r["scratched_known"] == "8" and r["trio"] == "56/35" and not r["pass"]  # 8頭の組は7頭の35組と合わない
 

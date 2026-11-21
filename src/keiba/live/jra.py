@@ -57,6 +57,23 @@ class Client:
         return body.decode("cp932", errors="replace")
 
 
+    def get_url(self, url: str) -> str:
+        """JRAの普通のページ（ニュースの一覧など）を GET で取る。数の上限と間隔は get と同じ。"""
+        if not url.startswith("https://www.jra.go.jp/"):
+            raise ValueError("JRAのページだけ取る")
+        if self.count >= self.max_requests:
+            raise RuntimeError("この実行で取るページ数の上限に達した")
+        wait = self.interval - (time.monotonic() - self._last)
+        if wait > 0:
+            time.sleep(wait)
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with self._opener(req, timeout=30) as res:
+            body = res.read()
+        self._last = time.monotonic()
+        self.count += 1
+        return body.decode("cp932", errors="replace")
+
+
 def links(page: str) -> list[tuple[str, str]]:
     """ページ内のリンク（パス, cname）を全部。onclick の doAction と href の ?CNAME= の両方。"""
     out = [(p, c) for p, c in _ACTION.findall(page)]
@@ -141,8 +158,9 @@ def parse_card(page: str) -> list[dict]:
                          "f3": _t(td.xpath('.//div[@class="f3"]')[0]).replace("3F", "").strip() if td.xpath('.//div[@class="f3"]') else None,
                          "corners": [_t(li) for li in td.xpath('.//div[@class="corner_list"]//li')]})
         num = _t(tr.xpath('./td[contains(@class,"num")]')[0]) if tr.xpath('./td[contains(@class,"num")]') else ""
-        row_text = " ".join(_t(td) for td in tr.xpath('./td[not(contains(@class,"past"))]'))  # 過去走の欄は見ない
-        scratch = next((w for w in ("取消", "除外") if w in row_text), None)
+        # 取消・除外の印は、実物では馬番の欄（番号の代わり）と馬名の横のオッズ欄に出る。ほかの欄の文字（注記など）は見ない
+        marks = " ".join([num, *(_t(x) for x in tr.xpath('./td[contains(@class,"horse")]//div[contains(@class,"odds")]'))])
+        scratch = next((w for w in ("取消", "除外") if w in marks), None)
         waku = tr.xpath('./td[contains(@class,"waku")]//img/@alt')
         rows.append({
             "horse_number": int(num) if num.isdigit() else None,
@@ -171,8 +189,16 @@ _JOCKEY = re.compile(r"pw04kmk0(\d{5})")
 _TRAINER = re.compile(r"pw05cmk0(\d{5})")
 
 
+def page_complete(page: str) -> bool:
+    """ページが最後（</html>）まで届いているか。途中で切れたページは、払戻の数字が欠けても読めてしまうので使わない。"""
+    return bool(re.search(r"</html>\s*$", page or "", re.I))
+
+
 def parse_result(page: str) -> dict:
-    """レース結果ページ。着順の表と三連複の払戻（同着なら複数）。"""
+    """レース結果ページ。着順の表と三連複の払戻（同着なら複数）。
+    ページが最後まで届いていなければ、何も読まずに page_incomplete=True を返す（結果待ちのまま）。"""
+    if not page_complete(page):
+        return {"rows": [], "trio_payouts": [], "page_incomplete": True}
     doc = lxml_html.fromstring(page)
     rows = []
     for tr in doc.xpath('//table[contains(@class,"striped")]/tbody/tr'):
@@ -204,6 +230,36 @@ def parse_result(page: str) -> dict:
         if len(nums) == 3 and yen:
             trio.append({"combo": "-".join(map(str, sorted(nums))), "payout_yen": int(yen)})
     return {"rows": rows, "trio_payouts": trio}
+
+
+VENUES = ("札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉")
+# 例：「本日【2月7日（土曜）】の東京競馬は第8レース以降を取りやめといたします」
+#     「本日【2月8日（日曜）】の東京競馬および京都競馬は開催を中止します」
+_V = "(?:" + "|".join(VENUES) + ")"
+_CANCEL = re.compile(r"^(?:本日)?【(\d{1,2})月(\d{1,2})日[（(][^）)]*[）)]】の"
+                     r"(" + _V + r"競馬(?:(?:および|及び|・|、|と)" + _V + r"競馬)*)は"
+                     r"(?:第(\d{1,2})レース以降を|第(\d{1,2})レースを|全レースを|開催を)?(?:取りやめ|取り止め|中止)")
+
+
+def parse_cancellations(page: str, year: int) -> list[dict]:
+    """JRAのニュースの月別一覧から、レースの取りやめのお知らせを読む。見出しが決まった形のものだけ。
+    返す行：race_date・venue・from_race（この番号から）・to_race（この番号まで。None なら最後まで）・title・href。
+    「〜の開催中止に伴う指定席の取扱い」「前日発売を取りやめ」のような関連のお知らせは、形が違うので拾わない。"""
+    doc = lxml_html.fromstring(page)
+    out = []
+    for a in doc.xpath('//li//div[contains(@class,"news_line")]//a'):
+        txt = a.xpath('.//div[contains(@class,"txt")]')
+        title = _t(txt[0]) if txt else _t(a)
+        m = _CANCEL.match(title)
+        if not m:
+            continue
+        mon, day, venues, after, only = m.groups()
+        start = int(after or only or 1)
+        for venue in re.findall(_V, venues):
+            out.append({"race_date": f"{year}-{int(mon):02d}-{int(day):02d}", "venue": venue,
+                        "from_race": start, "to_race": int(only) if only else None,
+                        "title": title, "href": a.get("href")})
+    return out
 
 
 def _clock(text: str):

@@ -123,6 +123,27 @@ def make_result(finished: list, finishers: int, scratched: set, payouts: dict, r
             "finished": [(int(n), int(pos) if pos else None) for n, pos in finished]}
 
 
+def race_class_of(name) -> str | None:
+    """レース名（例：「3歳以上1勝クラス(混合)[指定]」「秋明菊賞 2歳1勝クラス」）からクラスを読む。読めなければ None。"""
+    import re
+    if not isinstance(name, str):
+        return None
+    for word in ("新馬", "未勝利"):
+        if word in name:
+            return word
+    m = re.search(r"([123])勝クラス", name)
+    if m:
+        return f"{m.group(1)}勝クラス"
+    return "オープン" if "オープン" in name else None
+
+
+def cancelled_res(notice: dict) -> dict:
+    """JRAが取りやめを発表したレースの結果（全額返還）。"""
+    return {"actual": None, "label": "取りやめ（JRA発表）", "payout": None, "payouts": {}, "finishers": 0,
+            "scratched": set(), "has_result": True, "winners": set(), "payouts_missing": [], "complete": True,
+            "incomplete": None, "finished": [], "cancelled": notice.get("title") or "JRAが取りやめを発表"}
+
+
 def card_post_time(page: str) -> str | None:
     """出馬表の原本から発走時刻（"発走時刻： 9時45分"）を読む。読めなければ None。"""
     import re
@@ -249,7 +270,7 @@ class Source:
                               "race_number": r.get("race_number"), "race_name": r.get("race_name") or "",
                               "post_time": r.get("post_time"), "surface": r.get("surface"),
                               "distance_m": r.get("distance_m"), "field_size": r.get("field_size"),
-                              "going": None, "race_class": None}
+                              "going": None, "race_class": race_class_of(r.get("race_name"))}
         conn = self._ledger()
         if conn is not None:
             self._version_list(conn)
@@ -294,7 +315,8 @@ class Source:
                                   "race_number": int(num) if num.isdigit() else 0, "race_name": m.get("race_name") or "",
                                   "post_time": m.get("post_time"), "surface": m.get("surface"),
                                   "distance_m": m.get("distance_m"),
-                                  "field_size": m.get("field_size"), "going": None, "race_class": None, "archived": True}
+                                  "field_size": m.get("field_size"), "going": None,
+                                  "race_class": race_class_of(m.get("race_name")), "archived": True}
             for rk in self.races:
                 s = snaps[(snaps["race_key"] == rk) & (snaps["kind"] == "card")]
                 if not len(s):
@@ -344,6 +366,13 @@ class Source:
                     # 予定の頭数を確かめられないレースは、行の欠けを見分けられないので保留
                     res_.update(complete=False, incomplete="予定の頭数を確かめられない（過去の原本）ので結果がそろっているか分からない")
                 self.results[rk] = res_
+            # JRAが取りやめを発表し、結果の行が無いレースは全額返還（行があれば本当の結果を使う）
+            from ..live.collector import CANCEL_FILE, cancelled_result, load_cancellations
+            cancels = load_cancellations(root / CANCEL_FILE)
+            for rk in self.races:
+                notice = cancelled_result(rk, cancels, results.get(rk))
+                if notice:
+                    self.results[rk] = cancelled_res(notice)
             self._resettle_unsettled()
         except Exception as exc:  # 原本の読取の失敗で画面を止めない
             self.notes.append(f"原本の読取に失敗：{exc!r}"[:200])
@@ -526,7 +555,8 @@ class Cache:
         files = [self.paths.ledger_path]
         if mode == "live":
             root = self.paths.data_dir / "live"
-            files += [root / "state.json", root / "snapshots.jsonl", root / "races_archive.jsonl"]
+            files += [root / "state.json", root / "snapshots.jsonl", root / "races_archive.jsonl",
+                      root / "cancellations.jsonl"]
         else:
             files += [self.paths.tables_dir / f for f in ("races.parquet", "runners.parquet", "payouts.parquet")]
         return tuple(os.stat(f).st_mtime_ns if f.exists() else 0 for f in files)

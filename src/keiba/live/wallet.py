@@ -138,12 +138,14 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame) -> tuple[pd.DataFr
             res = s[s["kind"] == "result"] if len(s) else s
             if len(res):  # 結果が出たレースは確定行（過去走として使う）。発走前の入力（判定・予想用）はそのまま残す
                 parsed = jra.parse_result(_read(root, res.iloc[-1]))
-                cards = s[s["kind"] == "card"]
-                card = {c["horse_number"]: c for c in jra.parse_card(_read(root, cards.iloc[-1]))} if len(cards) else {}
-                for row in parsed["rows"]:
-                    runners.append(_runner(rk, r, {**card.get(row["horse_number"], {}), **{k: v for k, v in row.items() if v is not None}}, row["status"]))
                 inputs[(rk, "result")] = parsed
-                continue
+                if parsed["rows"]:
+                    cards = s[s["kind"] == "card"]
+                    card = {c["horse_number"]: c for c in jra.parse_card(_read(root, cards.iloc[-1]))} if len(cards) else {}
+                    for row in parsed["rows"]:
+                        runners.append(_runner(rk, r, {**card.get(row["horse_number"], {}), **{k: v for k, v in row.items() if v is not None}}, row["status"]))
+                    continue
+                # 結果の行が無い（途中のページ・取りやめなど）：発走前の馬のまま（結果待ち）
             last = max((tp for tp in ("24h", "1h", "15m") if (rk, tp) in inputs), key=TP_ORDER.get, default=None)
             if last:
                 for c in inputs[(rk, last)]["card"]:
@@ -210,8 +212,12 @@ def run_live(paths, log=print) -> dict:
     state = json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {"races": {}}
     snaps = _snapshots(root)
     lr, lrun, inputs = live_tables(root, state, snaps)
-    if lrun.empty:
-        return {"predicted": 0, "settled": 0}
+    if lrun.empty:   # 予想を作る馬がいない回も、精算（取りやめの返還など）は行う
+        led = Ledger(paths.ledger_path)
+        n_set = _settle(led, inputs, state, root)
+        led.commit()
+        led.close()
+        return {"predicted": 0, "settled": n_set}
     feat, hist = _features(paths, lr, lrun)
     version = f"live-{code_hash()[:8]}"
     led = Ledger(paths.ledger_path)
@@ -263,14 +269,42 @@ def run_live(paths, log=print) -> dict:
         # ---- あいす統合（別枠の参考予想）----
         if tp in INT_TIME_POINTS:
             n_pred += _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state)
+    n_set = _settle(led, inputs, state, root)
+    led.commit()
+    led.close()
+    return {"predicted": n_pred, "settled": n_set, "version": version}
+
+
+def _settle(led, inputs: dict, state: dict, root: Path) -> int:
+    """精算を書く（予想を作らない回でも行う）。書いた行の数を返す。"""
+    n_set = 0
     # 精算（財布を持つ方式だけ。まむ（text_ai）など、ほかの live 版の予想もまとめて精算する）
     preds = {}
     for p in led.predictions():
         if p["version"].startswith("live-") and isinstance(p.get("allocation"), dict) and "kelly" in p["allocation"]:
             preds[(p["race_key"], p["time_point"], p["method"], p["version"])] = p
     settled = {(s["race_key"], s["method"], s["version"], s["wallet"]) for s in led.settlements()}
+    # JRAが取りやめを発表し、結果の行が無いレース：全額返還（不成立）として精算する
+    from .collector import CANCEL_FILE, cancelled_result, load_cancellations
+    cancels = load_cancellations(root / CANCEL_FILE)
+    void = {rk for rk in {k[0] for k in preds} if cancelled_result(rk, cancels, inputs.get((rk, "result")))}
+    for rk in sorted(void):
+        for (m, ver) in sorted({(k[2], k[3]) for k in preds if k[0] == rk}):
+            p = preds.get((rk, "15m", m, ver)) or preds.get((rk, "1h", m, ver))
+            if not p:
+                continue
+            for a in ALLOC_METHODS:
+                if (rk, m, ver, a) in settled:
+                    continue
+                stakes = p["allocation"][a]["stakes"]
+                st = settle_trio(stakes, 0, set(), None) if stakes else None
+                led.add_settlement(rk, p["time_point"], m, ver, a,
+                                   {"status": st.status if st else p["allocation"][a]["status"],
+                                    "stake": st.stake if st else 0, "returned": st.returned if st else 0,
+                                    "hits": [], "cancelled": True})
+                n_set += 1
     for (rk, tp), res in inputs.items():
-        if tp != "result":
+        if tp != "result" or rk in void:
             continue
         rows = res["rows"]
         finishers = sum(r["status"] == "finished" for r in rows)
@@ -298,9 +332,7 @@ def run_live(paths, log=print) -> dict:
                                     "stake": st.stake if st else 0, "returned": st.returned if st else 0,
                                     "hits": st.hits if st else []})
                 n_set += 1
-    led.commit()
-    led.close()
-    return {"predicted": n_pred, "settled": n_set, "version": version}
+    return n_set
 
 
 def market_probs(trio_odds: dict) -> dict:

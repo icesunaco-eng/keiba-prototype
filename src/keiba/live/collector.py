@@ -43,6 +43,8 @@ REFRESH_MINUTES = 30
 ARCHIVE_FILE = "races_archive.jsonl"   # 予定表から外したレースの記録（追記だけ）
 KEEP_FIELDS = ("post_time", "field_size", "race_name", "surface", "distance_m")   # 一覧の再取得で欠けても前の値を残す欄
 ARCHIVE_FIELDS = ("race_date", "venue", "race_number", "race_name", "post_time", "field_size", "surface", "distance_m")
+CANCEL_FILE = "cancellations.jsonl"   # JRAが発表したレースの取りやめ（追記だけ）
+NOTICE_MINUTES = 30   # 取りやめのお知らせ（ニュースの月別一覧）を見に行く間隔
 ODDS_TABS = {"win": ("単勝",), "trio": ("3連複", "３連複")}
 
 
@@ -102,6 +104,8 @@ def result_issue(page: str, field_size) -> str | None:
         parsed = jra.parse_result(page)
     except Exception as exc:
         return f"結果のページを読めない：{exc!r}"
+    if parsed.get("page_incomplete"):
+        return "結果のページが最後まで届いていない"
     rows = parsed["rows"]
     if not rows:
         return "結果の行が無い"
@@ -116,6 +120,41 @@ def result_issue(page: str, field_size) -> str | None:
     if winners and not winners <= set(payouts):
         return "三連複の払戻がまだそろっていない"
     return None
+
+
+def load_cancellations(path: Path) -> list[dict]:
+    """取りやめの記録（cancellations.jsonl）。形のおかしい行は使わない。"""
+    out = []
+    for x in read_jsonl(path)[0]:
+        if (isinstance(x.get("race_date"), str) and isinstance(x.get("venue"), str)
+                and isinstance(x.get("from_race"), int) and not isinstance(x.get("from_race"), bool)
+                and (x.get("to_race") is None or (isinstance(x["to_race"], int) and not isinstance(x["to_race"], bool)))):
+            out.append(x)
+    return out
+
+
+def cancel_notice(rk: str, cancels: list[dict]) -> dict | None:
+    """このレースを取りやめると発表したお知らせ（無ければ None）。rk は「日付|場|番号」。"""
+    parts = rk.split("|")
+    if len(parts) != 3 or not parts[2].isdigit():
+        return None
+    d, venue, num = parts[0], parts[1], int(parts[2])
+    for c in cancels:
+        if c["race_date"] == d and c["venue"] == venue and c["from_race"] <= num and (c["to_race"] is None or num <= c["to_race"]):
+            return c
+    return None
+
+
+def cancelled_result(rk: str, cancels: list[dict], parsed: dict | None) -> dict | None:
+    """取りやめとして全額返還にしてよいなら、そのお知らせ。条件は2つとも：
+    1. JRAのお知らせがこのレースの取りやめを発表している
+    2. 結果のページが無いか、最後まで届いたページに結果の行が1つも無い（行があれば、本当の結果を使う）"""
+    notice = cancel_notice(rk, cancels)
+    if not notice:
+        return None
+    if parsed is not None and (parsed.get("page_incomplete") or parsed.get("rows")):
+        return None
+    return notice
 
 
 def archived_keys(path: Path) -> set[str]:
@@ -164,6 +203,41 @@ class Collector:
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.state, ensure_ascii=False, indent=1))
         tmp.replace(self.state_path)
+
+    # ---- 取りやめのお知らせ ----
+    def check_notices(self, log=print):
+        """結果を待っているレースの月のニュース一覧を見て、取りやめのお知らせを cancellations.jsonl に足す。
+        失敗しても収集は止めない（次の回にもう一度）。"""
+        last = self.state.get("notices_at")
+        now = self.now()
+        if last and now - datetime.fromisoformat(last) < timedelta(minutes=NOTICE_MINUTES):
+            return
+        today = now.date().isoformat()
+        yesterday = (now - timedelta(days=1)).date().isoformat()
+        months = sorted({r["race_date"][:7] for rk, r in self.state["races"].items()
+                         if yesterday <= r.get("race_date", "") <= today and f"{rk}|result" not in self.state["taken"]})
+        if not months:
+            return
+        known = {(c["race_date"], c["venue"], c["from_race"], c["to_race"]) for c in load_cancellations(self.root / CANCEL_FILE)}
+        new = []
+        try:
+            for ym in months:
+                path = f"/news/{ym.replace('-', '')}/"
+                page = self.client.get_url(jra.BASE + path)
+                rec = self._save(None, "notice", None, path, "", page)
+                for c in jra.parse_cancellations(page, int(ym[:4])):
+                    key = (c["race_date"], c["venue"], c["from_race"], c["to_race"])
+                    if key in known:
+                        continue
+                    known.add(key)
+                    new.append(json.dumps({**c, "found_at": now.isoformat(timespec="seconds"), "source": jra.BASE + path,
+                                           "sha256": rec["sha256"]}, ensure_ascii=False))
+            if new:
+                append_lines(self.root / CANCEL_FILE, new)
+        except Exception as exc:
+            log(f"取りやめのお知らせを見られなかった（次の回にもう一度）：{exc!r}")
+            return
+        self.state["notices_at"] = now.isoformat(timespec="seconds")
 
     # ---- 開催とレースの更新 ----
     def refresh(self, force: bool = False):
@@ -216,6 +290,8 @@ class Collector:
                 page = self.client.get(path, cname)
                 saved.append(self._save(rk, "result", tp, path, cname, page))
                 issue = result_issue(page, r.get("field_size"))
+                if issue and cancelled_result(rk, load_cancellations(self.root / CANCEL_FILE), jra.parse_result(page)):
+                    issue = None   # JRAが取りやめを発表し、結果の行も無い：取り直しをやめる（返還は精算の側で行う）
                 if issue:
                     # 途中までの結果（着順の空欄・払戻の欠けなど）：保存はするが「取得済み」にせず、窓の間は次の回に取り直す
                     saved[-1]["incomplete"] = issue
@@ -248,8 +324,9 @@ class Collector:
         """窓が過ぎたのに取れていない（Macが寝ていた・失敗したなど）。結果は6時間の窓が過ぎたら。"""
         out = []
         now = self.now()
+        cancels = load_cancellations(self.root / CANCEL_FILE)
         for rk, r in self.state["races"].items():
-            if not r.get("post_time"):
+            if not r.get("post_time") or cancel_notice(rk, cancels):   # 取りやめのレースは「取れなかった」にしない
                 continue
             post = datetime.fromisoformat(f"{r['race_date']}T{r['post_time']}:00+09:00")
             known = datetime.fromisoformat(r.get("known_at", self.state.get("refreshed_at") or now.isoformat()))
@@ -268,6 +345,7 @@ class Collector:
             except Exception as exc:  # 1レースの失敗で全体を止めない
                 errors.append(f"{rk} {tp}: {exc!r}")
                 log(errors[-1])
+        self.check_notices(log)
         missed = self.missed()
         notified = self.state.setdefault("missed_notified", [])
         new_missed = [k for k in missed if k not in notified]

@@ -1,4 +1,5 @@
 """確認アプリ：購入記録（追記専用）・精算・画面・サーバーの守り（合成データ。ネットにはつながない）。"""
+import re
 import json
 from pathlib import Path
 import sqlite3
@@ -1034,7 +1035,7 @@ def _archive_result(live, rk, day, order, name=None, payout=True):
     name = name or f"res-{rk.replace('|', '-')}.html"
     html = result_html(order)
     if not payout:
-        html = html.split('<li class="trio"')[0]
+        html = re.sub(r'<li class=\"trio\">.*?</li>', '', html)
     if name != "missing.html":
         (live / "snapshots" / name).write_text(html)
     with open(live / "snapshots.jsonl", "a") as f:
@@ -1343,3 +1344,44 @@ def test_real_card_with_scratch_and_trailing_rows():
     assert card_problem(normalize_card(two), 4)
     # 枠順が決まる前（馬番なし・名前順）は判定できない
     assert card_problem(normalize_card([{"horse_number": None, "scratch": None, "horse_name": "x"}]), 1)
+
+
+# ---------------- 受け入れ再検証（💚20261121-24）：取りやめのレースの画面 ----------------
+
+def test_cancelled_race_opens_every_page(server):
+    app, port = server
+    live = app.paths.data_dir / "live"
+    (live / "snapshots.jsonl").write_text("")
+    (live / "cancellations.jsonl").write_text(json.dumps(
+        {"race_date": "2026-11-22", "venue": "京都", "from_race": 11, "to_race": None,
+         "title": "本日【11月22日（日曜）】の京都競馬は第11レース以降を取りやめといたします"}, ensure_ascii=False) + "\n")
+    data = {"token": app.token, "rk": RK, "kind": "buy", "combo": ["1-2-3"], "yen": ["100"], "fm": "live"}
+    assert _req(port, "/buy", data)[0] in (200, 303)
+    q = urllib.parse.quote(RK)
+    for path in ("/races", f"/race?rk={q}", f"/history/detail?rk={q}", f"/race/timeline?rk={q}", "/history", "/results",
+                 "/results/conditions?d=class", "/purchases", "/purchases.csv", f"/race/compare?rk={q}"):
+        code, body, _ = _req(port, path)
+        assert code == 200, path
+    detail = _req(port, f"/history/detail?rk={q}")[1]
+    assert "取りやめ" in detail and "払戻はまだ分からない" not in detail
+    assert "返還" in _req(port, "/purchases")[1]
+
+
+def test_notify_skips_cancelled_race(live_paths, tmp_path, monkeypatch):
+    live = live_paths.data_dir / "live"
+    (live / "snapshots.jsonl").write_text("")
+    (live / "cancellations.jsonl").write_text(json.dumps(
+        {"race_date": "2026-11-22", "venue": "京都", "from_race": 1, "to_race": None, "title": "開催を中止"},
+        ensure_ascii=False) + "\n")
+    app = App(live_paths, tmp_path / "p.sqlite")
+    post = checks.post_datetime(app.cache.get("live").races[RK])
+    monkeypatch.setattr(checks, "now_jst", lambda: post - timedelta(minutes=10))
+    sent, stop, rounds = [], threading.Event(), {"n": 0}
+
+    def wait(_):
+        rounds["n"] += 1
+        if rounds["n"] >= 2:
+            stop.set()
+    monkeypatch.setattr(stop, "wait", wait)
+    notify_loop(app, stop, interval=0, sender=lambda t, x: sent.append((t, x)))
+    assert rounds["n"] >= 2 and not sent

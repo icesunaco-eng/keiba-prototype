@@ -184,7 +184,7 @@ class Store:
 
 SETTLE_LABEL = {"pending": "結果待ち", "partial_result": "保留（結果を一部しか読めていない）",
                 "unsettled_no_payout": "払戻待ち（払戻がまだ分からない）",
-                "refunded_void": "返還（レース不成立）", "settled": "精算ずみ"}
+                "refunded_void": "返還（レース不成立・取りやめ）", "settled": "精算ずみ"}
 
 
 def settle_purchase(entry: dict, res: dict | None) -> dict:
@@ -216,4 +216,4 @@ def settle_purchase(entry: dict, res: dict | None) -> dict:
     st = settle_trio(entry["stakes"], int(res.get("finishers") or 0), scratched, payouts)
     refund = sum(entry["stakes"][c] for c in st.refunds) if st.status != "refunded_void" else stake
     return {"status": st.status, "stake": stake, "returned": st.returned, "hit": "・".join(st.hits) or None,
-            "refund": refund, "counted": st.status in ("settled", "refunded_void")}
+            "refund": refund, "counted": st.status in ("settled", "refunded_void"), "cancelled": bool(res.get("cancelled"))}

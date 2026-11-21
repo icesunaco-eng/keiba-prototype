@@ -1,4 +1,5 @@
 """JRA公式からの収集（ネットにはつながず、合成した小さなHTMLで試す）。"""
+import re
 import json
 from datetime import datetime
 
@@ -230,6 +231,6 @@ def test_result_issue_rules():
     from keiba.live.collector import result_issue
     from tests.test_live_wallet import result_html
     assert result_issue(result_html([3, 1, 2, 4]), 4) is None
-    assert result_issue(result_html([3, 1, 2, 4]).split('<li class="trio"')[0], 4)          # 払戻がまだ無い
+    assert result_issue(re.sub(r'<li class=\"trio\">.*?</li>', '', result_html([3, 1, 2, 4])), 4)          # 払戻がまだ無い
     assert result_issue(result_html([3, 1, 2, 4]), None)                                     # 頭数が分からない
     assert result_issue(result_html([3, 1]), 4)                                              # 行が欠けている
