@@ -116,7 +116,9 @@ def parse_card(page: str) -> list[dict]:
     """出馬表（1レース）。馬番・枠・馬ID・性齢・斤量・騎手・調教師・父・母・母の父・近走。"""
     doc = lxml_html.fromstring(page)
     rows = []
-    for tr in doc.xpath('//td[contains(concat(" ", normalize-space(@class), " "), " horse ")]/..'):
+    # 出馬表の行だけ（馬番の欄 td.num を持つ行）。同じページの別の表（過去の勝ち馬など）の行は読まない
+    for tr in doc.xpath('//tr[td[contains(concat(" ", normalize-space(@class), " "), " horse ")]'
+                        ' and td[contains(concat(" ", normalize-space(@class), " "), " num ")]]'):
         horse = tr.xpath('./td[contains(concat(" ", normalize-space(@class), " "), " horse ")]')[0]
         a = horse.xpath('.//div[@class="name"]/a')
         hid = re.search(r"pw01dud\d{2}(\d{10})", a[0].get("href", "")) if a else None
@@ -163,6 +165,29 @@ def parse_card(page: str) -> list[dict]:
             "past_runs": past,
             "scratch": scratch,
         })
+    return _infer_scratched_numbers(rows)
+
+
+def _infer_scratched_numbers(rows: list[dict]) -> list[dict]:
+    """取消の馬は、実物（2026-11-21 福島11R で確認）だと馬番の欄が「取消」になり、番号が書かれない。
+    表は馬番の順なので、番号の無い取消の行が続く区間の前後の番号が、区間の行数ぶんちょうど飛んでいるときだけ
+    番号を当てる（horse_number_inferred）。末尾の区間は前の番号から順に当て、頭数の検査（レース一覧）で確かめる。
+    当てられないとき（取消でない行の番号が無い・飛びが合わない）は None のまま残し、名簿の検査で不合格にする。"""
+    i = 0
+    while i < len(rows):
+        if rows[i]["horse_number"] is not None or not rows[i].get("scratch"):
+            i += 1
+            continue
+        j = i
+        while j < len(rows) and rows[j]["horse_number"] is None and rows[j].get("scratch"):
+            j += 1
+        prev = rows[i - 1]["horse_number"] if i > 0 else 0
+        nxt = rows[j]["horse_number"] if j < len(rows) else None
+        k = j - i
+        if prev is not None and (nxt == prev + k + 1 or (j == len(rows) and nxt is None)):
+            for off, r in enumerate(rows[i:j], start=1):
+                r["horse_number"], r["horse_number_inferred"] = prev + off, True
+        i = j
     return rows
 
 
@@ -212,41 +237,66 @@ def _clock(text: str):
     return int(m.group(1) or 0) * 60 + int(m.group(2)) + int(m.group(3)) / 10 if m else None
 
 
+_ODDS_TEXT = re.compile(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
+ODDS_MAX = 999999.9
+
+
 def _num(text: str):
-    t = text.replace(",", "").strip()
-    return float(t) if re.fullmatch(r"\d+(\.\d+)?", t) else None
+    """倍率の文字列 → 数。桁区切りは3桁ごとの正しい形だけ（「2,3,4.5」は読まない）。有限の正の数で、上限以下だけ。"""
+    t = text.strip()
+    if not _ODDS_TEXT.fullmatch(t):
+        return None
+    v = float(t.replace(",", ""))
+    return v if math.isfinite(v) and 0 < v <= ODDS_MAX else None
+
+
+def _has_class(name: str) -> str:
+    return f'contains(concat(" ", normalize-space(@class), " "), " {name} ")'
+
+
+def _rows(table):
+    """表そのものの行だけ（入れ子の表の行は含めない）。"""
+    return table.xpath("./tr | ./thead/tr | ./tbody/tr | ./tfoot/tr")
 
 
 def parse_win_odds(page: str, field=None) -> dict:
-    """単勝オッズ（馬番 → 倍）。表の「馬番」と、単勝の列（class に tan を含むセル、無ければ行の最初の小数）を読む。
-    field に出走馬（取消を除く）の馬番の並びを渡すと、読めた馬番がそれとぴったり同じときだけ ok=True。
-    頭数（int）を渡した場合は数だけで照らす（古い呼び方）。"""
+    """単勝オッズ（馬番 → 倍）。実物（2026-11-21 確認）の単勝・複勝の表（class に tanpuku）だけを読む。
+    行は「馬番の td.num が1つ・単勝の td.odds_tan が1つ」の形だけ使う。表がちょうど1つでない・馬番が重なるときは不合格。
+    field に出走馬（取消を除く）の馬番の並びを渡すと、読めた馬番がそれとぴったり同じときだけ ok=True。"""
     doc = lxml_html.fromstring(page)
-    odds = {}
-    for tr in doc.xpath("//table//tr"):
-        num = tr.xpath('./*[contains(@class,"num")]')
-        if not num or not _t(num[0]).isdigit():
-            continue
-        tan = tr.xpath('./td[contains(@class,"tan")]') or tr.xpath('./td[contains(@class,"odds")]')
-        vals = [_num(_t(x)) for x in tan] if tan else [_num(x) for x in re.findall(r"\d+\.\d", _t(tr))]
-        vals = [v for v in vals if v]
-        if vals:
-            odds.setdefault(int(_t(num[0])), vals[0])
+    tables = doc.xpath(f"//table[{_has_class('tanpuku')}]")
+    odds, dups, bad, problems = {}, 0, 0, []
+    if len(tables) != 1:
+        problems.append(f"単勝の表が{len(tables)}個")
+    for table in tables[:1]:
+        for tr in _rows(table):
+            nums, tans = tr.xpath(f"./td[{_has_class('num')}]"), tr.xpath(f"./td[{_has_class('odds_tan')}]")
+            if not nums and not tans:
+                continue  # 見出しの行など
+            if len(nums) != 1 or len(tans) != 1 or not _t(nums[0]).isdigit() or tans[0].xpath(".//table"):
+                bad += 1
+                continue
+            n, v = int(_t(nums[0])), _num(_t(tans[0]))
+            if v is None:
+                bad += 1  # 「取消」など
+                continue
+            if n in odds:
+                dups += 1
+            odds[n] = v
+    if dups:
+        problems.append(f"馬番の重複{dups}")
     if field is None:
-        ok = bool(odds)
+        ok = bool(odds) and not problems
     elif isinstance(field, int):
-        ok = bool(odds) and len(odds) == field
+        ok = bool(odds) and not problems and len(odds) == field
     else:
-        nums = [int(x) for x in field]
-        ok = bool(odds) and len(nums) == len(set(nums)) and set(odds) == set(nums)  # 名簿の重複も不合格
-    return {"odds": odds, "ok": ok}
-
-
-_ODDS_TEXT = re.compile(r"\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?")
+        roster = [int(x) for x in field]
+        ok = bool(odds) and not problems and len(roster) == len(set(roster)) and set(odds) == set(roster)
+    return {"odds": odds, "ok": ok, "unreadable": bad, "problems": problems}
 
 
 def _expected_set(horses) -> tuple[set[str] | None, int | None]:
-    """horses：出走馬（取消を除く）の馬番の並び。古い呼び方の頭数（int）も受けるが、そのときは組の数でしか照らせない。"""
+    """horses：出走馬（取消を除く）の馬番の並び。頭数（int）も受けるが、そのときは組の数でしか照らせない。"""
     if horses is None:
         return None, None
     if isinstance(horses, int):
@@ -254,50 +304,36 @@ def _expected_set(horses) -> tuple[set[str] | None, int | None]:
     raw = [int(h) for h in horses]
     if len(raw) != len(set(raw)):
         return set(), None  # 名簿に同じ馬番が2回ある：照らす相手が信用できないので不合格にする
-    nums = sorted(raw)
-    combos = {"-".join(map(str, c)) for c in itertools.combinations(nums, 3)}
+    combos = {"-".join(map(str, c)) for c in itertools.combinations(sorted(raw), 3)}
     return combos, (len(combos) or None)
 
 
 def parse_trio_odds(page: str, horses) -> dict:
-    """三連複オッズ（"a-b-c" → 倍）。三連複の表（class に fuku3）の見出し「a-b」の2頭と、行の馬番（th）・オッズ（td）で組を作る。
-    読めた組が「出走馬（取消を除く）の全組」とぴったり同じとき（多くも少なくもなく、重複なし）だけ ok=True。
-    実物（2026-11-21 確認）は <table class="... fuku3"><caption>1-2</caption> … <th scope="row">3</th><td>1662.9</td>。
-    fuku3 の表が1つも無いページだけ、古い形（class="num"・class="odds" のセル）を読む。"""
+    """三連複オッズ（"a-b-c" → 倍）。実物（2026-11-21 確認）の三連複の表（class に fuku3）だけを読む。
+    表の見出し（caption）がちょうど「a-b」の形、行は「馬番の th が1つ・倍率の td が1つ」の形だけ使う。
+    読めた組が「出走馬（取消を除く）の全組」とぴったり同じとき（多くも少なくもなく、重複なし）だけ ok=True。"""
     doc = lxml_html.fromstring(page)
-    tables = doc.xpath('//table[contains(concat(" ", normalize-space(@class), " "), " fuku3 ")]')
-    legacy = not tables
-    if legacy:
-        tables = [t for t in doc.xpath("//table") if t.xpath('.//td[contains(@class,"odds")]')]
     odds, dups, bad = {}, 0, 0
-    for table in tables:
-        cap = table.xpath("./caption") or ([] if not legacy else table.xpath("preceding-sibling::*[1]"))
-        m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", _t(cap[0])) if cap else None
-        if not m:
+    for table in doc.xpath(f"//table[{_has_class('fuku3')}]"):
+        cap = table.xpath("./caption")
+        m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", _t(cap[0])) if len(cap) == 1 else None
+        if not m or m.group(1) == m.group(2):
+            bad += 1
             continue
         head = [int(m.group(1)), int(m.group(2))]
-        # 表そのものの行だけ読む（入れ子の表の行は読まない）
-        for tr in table.xpath("./tr | ./thead/tr | ./tbody/tr | ./tfoot/tr"):
-            if legacy:
-                num, val = tr.xpath('./*[contains(@class,"num")]'), tr.xpath('./td[contains(@class,"odds")]')
-            else:
-                ths, tds = tr.xpath("./th"), tr.xpath("./td")
-                if any(_t(x).isdigit() for x in ths) and (len(ths) != 1 or len(tds) != 1 or tds[0].xpath(".//table")):
-                    bad += 1  # 実物は「馬番の th 1つ・オッズの td 1つ」。形が違う行は使わない
-                    continue
-                num, val = ths[:1], tds[:1]
-            if not (num and val and _t(num[0]).isdigit()):
+        for tr in _rows(table):
+            ths, tds = tr.xpath("./th"), tr.xpath("./td")
+            if not ths and not tds:
                 continue
-            if not _ODDS_TEXT.fullmatch(_t(val[0])):
-                if int(_t(num[0])) not in head:
-                    bad += 1  # 「取消」「---」など、倍率の形でないもの
+            if len(ths) != 1 or len(tds) != 1 or not _t(ths[0]).isdigit() or tds[0].xpath(".//table"):
+                bad += 1  # 形が違う行は使わない
                 continue
-            v = _num(_t(val[0]))
-            third = int(_t(num[0]))
+            third, v = int(_t(ths[0])), _num(_t(tds[0]))
             if third in head:
-                continue
-            if not v or not math.isfinite(v) or v <= 0:
                 bad += 1
+                continue
+            if v is None:
+                bad += 1  # 「取消」「---」など
                 continue
             key = "-".join(map(str, sorted(head + [third])))
             if key in odds:
@@ -318,6 +354,9 @@ _ODDS_TIME = re.compile(r"(\d{1,2})時(\d{2})分\s*(?:現在|時点)")
 
 
 def parse_odds_time(page: str) -> str | None:
-    """オッズの発表時刻（例「11時30分現在」）。見つからなければ None（時刻不明）。"""
-    m = _ODDS_TIME.search(unicodedata.normalize("NFKC", lxml_html.fromstring(page).text_content()))
-    return f"{int(m.group(1)):02d}:{m.group(2)}" if m else None
+    """オッズの発表時刻（例「11時30分現在」）。見つからない・ありえない時刻（10時99分など）・2つ以上違う時刻なら None（時刻不明）。"""
+    found = {(int(h), int(mi)) for h, mi in _ODDS_TIME.findall(unicodedata.normalize("NFKC", lxml_html.fromstring(page).text_content()))}
+    if len(found) != 1:
+        return None
+    h, mi = found.pop()
+    return f"{h:02d}:{mi:02d}" if 0 <= h <= 23 and 0 <= mi <= 59 else None

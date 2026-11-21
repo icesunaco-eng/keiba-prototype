@@ -26,18 +26,23 @@ def card_html(ids):
     return f"<table><tbody>{rows}</tbody></table>"
 
 
-def win_html():
-    return "<table>" + "".join(f'<tr><td class="num">{n}</td><td class="odds_tan">{2.0 + n}</td></tr>' for n in range(1, N + 1)) + "</table>"
+def win_html(n=N, cell=None):
+    """実物と同じ形の単勝・複勝の表（class に tanpuku、td.num・td.odds_tan）。cell で1頭分のセルを差し替えられる。"""
+    rows = "".join(f'<tr><td class="num">{k}</td><td class="horse"><a>x</a></td>'
+                   f'<td class="odds_tan">{cell(k) if cell else 2.0 + k}</td><td class="odds_fuku">1.1-1.5</td></tr>'
+                   for k in range(1, n + 1))
+    return f'<table class="basic narrow-xy tanpuku"><thead><tr><th class="num">馬番</th><th class="odds_tan">単勝</th></tr></thead><tbody>{rows}</tbody></table>'
 
 
-def trio_html(time="14時25分", dup=False, drop=False):
+def trio_html(time="14時25分", dup=False, drop=False, n=N):
+    """実物と同じ形の三連複の表（class に fuku3、caption「a-b」、行は th・td）。"""
     out = [f"<p>{time}現在のオッズ</p>"] if time else []
-    for a, b in combinations(range(1, N + 1), 2):
-        rows = "".join(f'<tr><th class="num">{c}</th><td class="odds">{10.0 + a + b + c}</td></tr>' for c in range(b + 1, N + 1))
+    for a, b in combinations(range(1, n + 1), 2):
+        rows = "".join(f'<tr><th scope="row">{c}</th><td>{10.0 + a + b + c}</td></tr>' for c in range(b + 1, n + 1))
         if rows:
-            out.append(f"<table><caption>{a}-{b}</caption>{rows}</table>")
+            out.append(f'<table class="basic narrow-xy fuku3"><caption>{a}-{b}</caption><tbody>{rows}</tbody></table>')
     if dup:
-        out.append('<table><caption>1-2</caption><tr><th class="num">3</th><td class="odds">99.9</td></tr></table>')
+        out.append('<table class="basic narrow-xy fuku3"><caption>1-2</caption><tbody><tr><th scope="row">3</th><td>99.9</td></tr></tbody></table>')
     if drop:
         out = out[:-1]
     return "".join(out)
@@ -397,3 +402,172 @@ def test_trio_odds_rows_need_exactly_one_th_and_td():
     page = _fuku3(rows).replace('<td>16.0</td>', "<td>" + "9" * 400 + "</td>", 1)
     t = jra.parse_trio_odds(page, [1, 2, 3, 4])
     assert not t["ok"] and "1-2-3" not in t["odds"]
+
+
+# ---- 読み取りの検査（みにの4回の独立検証の指摘を、種類ごとにまとめて確かめる） ----
+import pytest
+
+BAD_NUMBERS = ["9" * 400, "2,3,4.5", "1,23.4", "0", "0.0", "-1.0", "1e5", "inf", "NaN", "12.3倍", "", "取消", "1000000.0"]
+
+
+@pytest.mark.parametrize("text", BAD_NUMBERS)
+def test_win_odds_rejects_bad_numbers(text):
+    w = jra.parse_win_odds(win_html(cell=lambda k: text if k == 3 else 2.0 + k), list(range(1, N + 1)))
+    assert not w["ok"] and 3 not in w["odds"]
+
+
+@pytest.mark.parametrize("text", BAD_NUMBERS)
+def test_trio_odds_rejects_bad_numbers(text):
+    page = trio_html().replace('<th scope="row">3</th><td>16.0</td>', f'<th scope="row">3</th><td>{text}</td>', 1)
+    t = jra.parse_trio_odds(page, list(range(1, N + 1)))
+    assert not t["ok"] and "1-2-3" not in t["odds"]
+
+
+def test_good_number_forms_are_read():
+    assert jra._num("1,234.5") == 1234.5 and jra._num("12.3") == 12.3 and jra._num("7") == 7.0
+    w = jra.parse_win_odds(win_html(cell=lambda k: "1,234.5" if k == 1 else 2.0 + k), list(range(1, N + 1)))
+    assert w["ok"] and w["odds"][1] == 1234.5
+
+
+def _win_rows(n=N):
+    return "".join(f'<tr><td class="num">{k}</td><td class="odds_tan">{2.0 + k}</td></tr>' for k in range(1, n + 1))
+
+
+@pytest.mark.parametrize("page", [
+    # 単勝の表の外（注記の表）に1頭分を置く
+    win_html(n=N - 1) + f'<table class="note"><tr><td class="num">{N}</td><td class="odds_tan">9.9</td></tr></table>',
+    # 単勝の表が2つ
+    win_html() + win_html(),
+    # 入れ子の表の中の行
+    win_html(n=N - 1).replace("</tbody>", f'<tr><td><table><tr><td class="num">{N}</td><td class="odds_tan">9.9</td></tr></table></td></tr></tbody>'),
+    # 馬番の欄が2つある行
+    win_html().replace('<td class="num">3</td>', '<td class="num">3</td><td class="num">4</td>', 1),
+    # 単勝の欄が2つある行
+    win_html().replace('<td class="odds_tan">5.0</td>', '<td class="odds_tan">1.0</td><td class="odds_tan">5.0</td>', 1),
+    # 同じ馬番が2回
+    win_html().replace('<td class="num">3</td>', '<td class="num">2</td>', 1),
+    # 単勝の欄の中に表
+    win_html().replace('<td class="odds_tan">5.0</td>', '<td class="odds_tan"><table><tr><td>5.0</td></tr></table></td>', 1),
+])
+def test_win_odds_rejects_wrong_structure(page):
+    assert not jra.parse_win_odds(page, list(range(1, N + 1)))["ok"]
+
+
+@pytest.mark.parametrize("page", [
+    trio_html().replace('<th scope="row">3</th><td>16.0</td>', '<th scope="row">3</th><th>x</th><td>16.0</td>', 1),
+    trio_html().replace('<th scope="row">3</th><td>16.0</td>', '<th scope="row">3</th><td>1</td><td>16.0</td>', 1),
+    trio_html().replace('<caption>1-2</caption>', '<caption>1-2 参考</caption>', 1),
+    trio_html().replace('<caption>1-2</caption>', '<caption>1-1</caption>', 1),
+    trio_html().replace('<caption>1-2</caption>', '', 1),
+    trio_html().replace('<caption>1-2</caption>', '<caption>1-2</caption><caption>1-2</caption>', 1),
+    trio_html().replace('<th scope="row">3</th><td>16.0</td>', '<th scope="row">3</th><td><table><tr><td>16.0</td></tr></table></td>', 1),
+    trio_html().replace('<th scope="row">3</th><td>16.0</td>', '<th scope="row">x3</th><td>16.0</td>', 1),
+])
+def test_trio_odds_rejects_wrong_structure(page):
+    assert not jra.parse_trio_odds(page, list(range(1, N + 1)))["ok"]
+
+
+@pytest.mark.parametrize("text,expect", [
+    ("<p>10時99分現在</p>", None), ("<p>24時00分現在</p>", None), ("<p>なし</p>", None),
+    ("<p>10時49分現在</p><p>10時50分現在</p>", None),
+    ("<p>10時49分現在</p><p>10時49分現在</p>", "10:49"), ("<p>８時５０分現在オッズ</p>", "08:50"),
+])
+def test_odds_time_is_checked(text, expect):
+    assert jra.parse_odds_time(text) == expect
+
+
+def test_card_reads_only_entry_rows_and_flags_unreadable_numbers():
+    from keiba.live.wallet import card_problem
+    ids = [f"H{h:04d}" for h in range(N)]
+    other = '<table><tr><td class="date">2025</td><td class="horse"><div class="name"><a>過去の勝ち馬</a></div></td></tr></table>'
+    rows = jra.parse_card(card_html(ids) + other)
+    assert [r["horse_number"] for r in rows] == list(range(1, N + 1))  # 別の表の行は読まない
+    bad = card_html(ids).replace('<td class="num">3</td>', '<td class="num">3a</td>', 1)
+    nums = [r["horse_number"] for r in jra.parse_card(bad)]
+    assert None in nums and "読めない" in card_problem(nums, N)
+
+
+def test_pre_draw_card_makes_no_inputs(tmp_path):
+    """枠順の確定前（馬番が空）の出馬表では、その時点の入力を作らない。"""
+    ids = [f"H{h:04d}" for h in range(N)]
+    empty = card_html(ids)
+    for k in range(1, N + 1):
+        empty = empty.replace(f'<td class="num">{k}</td>', '<td class="num"></td>', 1)
+    from keiba.live.wallet import _snapshots, live_tables
+    paths, col = _setup(tmp_path, card=empty)
+    root = tmp_path / "live"
+    state = json.loads((root / "state.json").read_text())
+    assert (RK, "1h") not in live_tables(root, state, _snapshots(root))[2]
+
+
+def test_one_bad_race_does_not_stop_others(tmp_path, monkeypatch):
+    """1レースの読み取りで例外が起きても、そのレースだけ保留にして、ほかのレースは読む。"""
+    from keiba.live import wallet
+    paths, col = _setup(tmp_path)
+    rk2 = "2025-08-30|東京|12"
+    col.state["races"][rk2] = dict(col.state["races"][RK], race_number=12)
+    ids = [f"H{h:04d}" for h in range(N)]
+    for kind, page in (("card", card_html(ids)), ("odds_win", win_html()), ("odds_trio", trio_html() + "<!--boom-->")):
+        col._save(rk2, kind, "1h", "/JRADB/x", "c", page)
+    col._write_state()
+    orig = jra.parse_trio_odds
+
+    def boom(page, horses):
+        if "boom" in page:
+            raise ValueError("こわれたページ")
+        return orig(page, horses)
+    monkeypatch.setattr(jra, "parse_trio_odds", boom)
+    root = tmp_path / "live"
+    state = json.loads((root / "state.json").read_text())
+    held = {}
+    _, runners, inputs = wallet.live_tables(root, state, wallet._snapshots(root), held)
+    assert (RK, "1h") in inputs and inputs[(RK, "1h")]["gate"]["pass"]
+    assert not any(k[0] == rk2 for k in inputs) and "こわれたページ" in held[rk2]
+    assert rk2 not in set(runners["race_key"])
+
+
+def _scratch_card(scratched, n=N, other_none=()):
+    """実物と同じく、取消の馬は馬番の欄が「取消」になる出馬表。"""
+    ids = [f"H{h:04d}" for h in range(n)]
+    html = card_html(ids)
+    for k in scratched:
+        html = html.replace(f'<td class="num">{k}</td>', '<td class="num"><span class="cap">取消</span></td>', 1)
+    for k in other_none:
+        html = html.replace(f'<td class="num">{k}</td>', '<td class="num"></td>', 1)
+    return html
+
+
+@pytest.mark.parametrize("scratched", [[5], [1], [N], [4, 5], [1, 2], [N - 1, N]])
+def test_scratched_rows_get_their_numbers(scratched):
+    from keiba.live.wallet import card_problem
+    rows = jra.parse_card(_scratch_card(scratched))
+    assert [r["horse_number"] for r in rows] == list(range(1, N + 1))
+    assert sorted(r["horse_number"] for r in rows if r["scratch"]) == scratched
+    assert all(r.get("horse_number_inferred") for r in rows if r["scratch"])
+    assert card_problem([r["horse_number"] for r in rows], N) is None
+
+
+def test_unreadable_non_scratched_row_is_not_inferred():
+    from keiba.live.wallet import card_problem
+    rows = jra.parse_card(_scratch_card([5], other_none=[6]))  # 取消の隣に、取消でないのに番号の無い行
+    nums = [r["horse_number"] for r in rows]
+    assert nums.count(None) == 2 and "読めない" in card_problem(nums, N)
+
+
+def test_scratch_race_end_to_end(tmp_path):
+    """取消の馬（番号の欄が「取消」）がいるレース：出走馬の全組と単勝がそろえば合格し、取消の馬の組は使わない。"""
+    active = [k for k in range(1, N + 1) if k != 5]
+    trio = "<p>14時25分現在</p>" + "".join(
+        f'<table class="basic narrow-xy fuku3"><caption>{a}-{b}</caption><tbody>'
+        + "".join(f'<tr><th scope="row">{c}</th><td>{"取消" if 5 in (a, b, c) else 10.0 + a + b + c}</td></tr>'
+                  for c in range(b + 1, N + 1)) + "</tbody></table>"
+        for a, b in combinations(range(1, N + 1), 2) if b < N)
+    win = win_html(cell=lambda k: "取消" if k == 5 else 2.0 + k)
+    paths, col = _setup(tmp_path, card=_scratch_card([5]), trio=trio)
+    col._save(RK, "odds_win", "1h", "/JRADB/x", "c", win)
+    col._write_state()
+    from keiba.live.wallet import _snapshots, live_tables
+    root = tmp_path / "live"
+    inp = live_tables(root, json.loads((root / "state.json").read_text()), _snapshots(root))[2][(RK, "1h")]
+    assert inp["scratched"] == [5] and inp["gate"]["pass"] and inp["win"]["ok"]
+    assert len(inp["trio"]["odds"]) == 35 and not any("5" in k.split("-") for k in inp["trio"]["odds"])
