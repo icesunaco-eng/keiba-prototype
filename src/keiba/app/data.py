@@ -135,6 +135,25 @@ def card_post_time(page: str) -> str | None:
     return f"{int(m.group(1)):02d}:{int(m.group(2)):02d}" if m else None
 
 
+def normalize_card(card: list) -> list:
+    """実物の出馬表の読取結果を、照合に使える形にそろえる（読取そのもの＝jra.parse_card は変えない）。
+
+    - 馬番も馬名も取消も無い行（ページ下の別の表など）は除く
+    - 取消の馬は馬番の欄が「取消」だけで番号が無い。出馬表は馬番の順なので、前後の番号のあいだがちょうど1つ空いて
+      いれば（例：4番と6番のあいだ）その番号とみなす。決められなければ None のまま（照合は「判定できない」になる）
+    """
+    rows = [dict(c) for c in card if c.get("horse_number") or c.get("horse_name") or c.get("horse_id") or c.get("scratch")]
+    for i, c in enumerate(rows):
+        if c.get("horse_number") is None and c.get("scratch"):
+            prev = rows[i - 1].get("horse_number") if i > 0 else 0
+            nxt = rows[i + 1].get("horse_number") if i + 1 < len(rows) else None
+            if isinstance(prev, int) and isinstance(nxt, int) and nxt - prev == 2:
+                c["horse_number"] = prev + 1
+            elif isinstance(prev, int) and nxt is None and i == len(rows) - 1:
+                c["horse_number"] = prev + 1   # 最後の馬が取消（頭数の照合で確かめる）
+    return rows
+
+
 def card_problem(card: list, field_size=None) -> str | None:
     """出馬表（jra.parse_card）を取消・馬番の照合に使えない理由。使えれば None。
 
@@ -282,7 +301,7 @@ class Source:
                     continue
                 try:   # 原本ごとに読む。1件読めなくても、ほかのレースは止めない
                     page = _read(root, s.iloc[-1])
-                    card = jra.parse_card(page)
+                    card = normalize_card(jra.parse_card(page))
                 except Exception as exc:
                     self.card_problem[rk] = "出馬表の原本を読めない"
                     self.notes.append(f"{rk} の出馬表を読めない：{exc!r}"[:200])

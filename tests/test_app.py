@@ -1323,3 +1323,23 @@ def test_csv_is_not_served_from_stale_data(server, monkeypatch):
     src.stale = "台帳の書込み中"
     code, body, _ = _req(port, "/purchases.csv")
     assert code == 503 and "台帳を書いている" in body
+
+
+# ---------------- 自分で探した反例（本物の出馬表の形） ----------------
+
+def test_real_card_with_scratch_and_trailing_rows():
+    from keiba.app.data import card_problem, normalize_card
+    # 実物（11/21 福島11R）：取消の馬は馬番の欄が「取消」だけ。ページ下に馬名も馬番も無い行が5つ
+    card = [{"horse_number": n, "scratch": None, "horse_name": f"馬{n}"} for n in range(1, 5)]
+    card += [{"horse_number": None, "scratch": "取消", "horse_name": "フィーリウス"}]
+    card += [{"horse_number": n, "scratch": None, "horse_name": f"馬{n}"} for n in range(6, 17)]
+    card += [{"horse_number": None, "scratch": None, "horse_name": ""} for _ in range(5)]
+    rows = normalize_card(card)
+    assert len(rows) == 16 and [r["horse_number"] for r in rows if r["scratch"]] == [5]
+    assert card_problem(rows, 16) is None
+    # 前後から決められない取消（2頭続けて取消）は決めない
+    two = [{"horse_number": 1, "scratch": None, "horse_name": "a"}, {"horse_number": None, "scratch": "取消", "horse_name": "b"},
+           {"horse_number": None, "scratch": "取消", "horse_name": "c"}, {"horse_number": 4, "scratch": None, "horse_name": "d"}]
+    assert card_problem(normalize_card(two), 4)
+    # 枠順が決まる前（馬番なし・名前順）は判定できない
+    assert card_problem(normalize_card([{"horse_number": None, "scratch": None, "horse_name": "x"}]), 1)
