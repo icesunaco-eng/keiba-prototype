@@ -987,6 +987,7 @@ def test_archived_race_reads_result_and_opens_all_pages(live_paths, tmp_path):
     (live / "snapshots").mkdir(exist_ok=True)
     (live / "snapshots" / "r.html").write_text(result_html([3, 1, 2, 4]))
     _archive_card(live, rk, old, 4)
+    _meta(live, rk, 4)
     with open(live / "snapshots.jsonl", "a") as f:
         f.write(json.dumps({"race_key": rk, "kind": "result", "time_point": "result",
                             "path": "snapshots/r.html", "fetched_at": f"{old}T16:00:00+09:00"}, ensure_ascii=False) + "\n")
@@ -1004,11 +1005,25 @@ def test_archived_race_reads_result_and_opens_all_pages(live_paths, tmp_path):
 
 # ---------------- 再検証（💚20261121-7）の反例 ----------------
 
-def _archive_card(live, rk, day, n, post="9時45分"):
+def _meta(live, rk, field_size, post_time="09:45"):
+    """予定表にあったときの控え（確認アプリが書く data/app/race_meta.json）を作る。"""
+    f = live.parent / "app" / "race_meta.json"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    meta = json.loads(f.read_text()) if f.exists() else {}
+    meta[rk] = {"field_size": field_size, "post_time": post_time}
+    f.write_text(json.dumps(meta, ensure_ascii=False))
+
+
+def _archive_card(live, rk, day, n, post="9時45分", numbers=None):
     from tests.test_live_wallet import card_html
     (live / "snapshots").mkdir(exist_ok=True)
     name = f"card-{rk.replace('|', '-')}.html"
-    (live / "snapshots" / name).write_text(f"<p>発走時刻： {post}</p>" + card_html([f"{i:010d}" for i in range(n)]))
+    html = card_html([f"{i:010d}" for i in range(n)])
+    if numbers is not None:   # 読めた馬番だけの出馬表（行が欠けた原本）
+        rows = html.split("<tr>")[1:]
+        html = "<table><tbody>" + "".join("<tr>" + r for i, r in enumerate(rows) if i + 1 in numbers).replace("</tbody></table>", "") + "</tbody></table>"
+    # 実物と同じく、発走時刻はタグをまたぐ
+    (live / "snapshots" / name).write_text(f'<div class="cell time">発走時刻：<strong>{post}</strong></div>' + html)
     with open(live / "snapshots.jsonl", "a") as f:
         f.write(json.dumps({"race_key": rk, "kind": "card", "time_point": "24h", "path": f"snapshots/{name}",
                             "fetched_at": f"{day}T09:00:00+09:00"}, ensure_ascii=False) + "\n")
@@ -1034,6 +1049,7 @@ def test_archived_partial_result_is_held(live_paths, tmp_path):
         d = (real_date.today() - timedelta(days=days)).isoformat()
         rk = f"{d}|東京|{days}"
         _archive_card(live, rk, d, 4)
+        _meta(live, rk, 4, None)                                  # 控えには頭数だけ（発走時刻は原本から読む）
         _archive_result(live, rk, d, [1, 2], payout=False)       # 4頭のうち2行だけ
     nocard = (real_date.today() - timedelta(days=9)).isoformat() + "|東京|9"
     _archive_result(live, nocard, nocard[:10], [1, 2], payout=False)
@@ -1055,8 +1071,69 @@ def test_one_missing_archive_does_not_hide_other_results(live_paths):
     b = (real_date.today() - timedelta(days=9)).isoformat()
     _archive_result(live, f"{a}|東京|1", a, [1, 2, 3, 4], name="missing.html")   # 原本のファイルが無い
     _archive_card(live, f"{b}|東京|2", b, 4)
+    _meta(live, f"{b}|東京|2", 4)
     _archive_result(live, f"{b}|東京|2", b, [3, 1, 2, 4])
     src = Source(live_paths, "live")
     assert f"{a}|東京|1" not in src.results
     assert src.results[f"{b}|東京|2"]["complete"] is True and src.results[f"{b}|東京|2"]["payouts"]
     assert any("結果を読めない" in n for n in src.notes)
+
+
+# ---------------- 再検証（💚20261121-10）の反例 ----------------
+
+def test_partial_card_and_result_do_not_guess_field_size(live_paths):
+    from datetime import date as real_date
+    live = live_paths.data_dir / "live"
+    d = (real_date.today() - timedelta(days=8)).isoformat()
+    rk = f"{d}|東京|3"
+    _archive_card(live, rk, d, 4, numbers=[1, 2])      # 出馬表も2行だけ
+    _archive_result(live, rk, d, [1, 2], payout=False)  # 結果も同じ2行
+    src = Source(live_paths, "live")
+    assert src.results[rk]["complete"] is False         # 読めた行の数から頭数を決めない
+    st = settle_purchase({"kind": "buy", "total": 100, "stakes": {"1-2-3": 100}}, src.results[rk])
+    assert st["status"] == "partial_result" and not st["counted"]
+
+
+def test_meta_is_kept_while_race_is_scheduled(live_paths):
+    Source(live_paths, "live")
+    meta = json.loads((live_paths.data_dir / "app" / "race_meta.json").read_text())
+    assert meta[RK]["field_size"] == 8 and meta[RK]["post_time"] == "15:40"
+
+
+def test_real_card_post_time_across_tags():
+    from keiba.app.data import card_post_time
+    page = '<div class="cell time">\n        発走時刻：<strong>9時45分</strong>\n      </div>'
+    assert card_post_time(page) == "09:45"
+
+
+def test_missing_active_snapshot_keeps_other_results(live_paths, tmp_path):
+    from datetime import date as real_date
+    live = live_paths.data_dir / "live"
+    state = json.loads((live / "state.json").read_text())
+    other = "2026-11-22|東京|1"
+    state["races"][other] = {"race_date": "2026-11-22", "venue": "東京", "race_number": 1, "post_time": "10:00", "field_size": 4}
+    (live / "state.json").write_text(json.dumps(state, ensure_ascii=False))
+    (live / "snapshots").mkdir(exist_ok=True)
+    _archive_result(live, RK, "2026-11-22", [1, 2, 3, 4, 5, 6, 7, 8], name="missing.html")   # 予定中のレースの原本が無い
+    _archive_result(live, other, "2026-11-22", [3, 1, 2, 4])
+    src = Source(live_paths, "live")
+    assert RK not in src.results and src.results[other]["complete"] is True
+    from keiba.live.wallet import _snapshots, live_tables
+    _, _, inputs = live_tables(live, state, _snapshots(live))      # 仮想財布の読取も、そのレースだけ飛ばす
+    assert (other, "result") in inputs and (RK, "result") not in inputs
+
+
+def test_legacy_unsettled_rows_are_recomputed_for_display(live_paths, tmp_path):
+    live = live_paths.data_dir / "live"
+    led = Ledger(live_paths.ledger_path)
+    led.add_settlement(RK, "15m", "ml_lgbm", "live-test0001", "kelly",
+                       {"status": "unsettled_no_payout", "stake": 2000, "returned": 0, "hits": []})
+    led.commit()
+    led.close()
+    (live / "snapshots").mkdir(exist_ok=True)
+    _archive_result(live, RK, "2026-11-22", [3, 7, 11, 1, 2, 4, 5, 6])
+    src = Source(live_paths, "live")
+    row = next(s for s in src.settlements if s["wallet"] == "kelly")
+    assert row["status"] == "settled" and row["recomputed"] and row["returned"] == 1200 * 4560 // 100
+    tbl = {x["method"]: x for x in pages.wallet_table(src, "kelly")}
+    assert tbl["ml_lgbm"]["pending"] == 0 and tbl["ml_lgbm"]["returned"] == 1200 * 4560 // 100

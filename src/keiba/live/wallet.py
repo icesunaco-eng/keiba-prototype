@@ -93,53 +93,60 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame) -> tuple[pd.DataFr
     """集めたページから、正規の表と同じ形の races / runners と、時点ごとの入力を作る。"""
     races, runners, inputs = [], [], {}
     for rk, r in state.get("races", {}).items():
-        s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
-        races.append({"race_key": rk, "race_date": r["race_date"], "venue": r["venue"], "race_number": r["race_number"],
-                      "surface": r.get("surface"), "distance_m": r.get("distance_m"), "going": None, "race_class": None,
-                      "field_size": r.get("field_size"), "attr_source": "jra_live",
-                      "race_type": "障害候補" if r.get("surface") == "障害" else "平地候補"})
-        for tp in ("24h", "1h", "15m"):
-            if not r.get("post_time"):
+        n_races, n_runners = len(races), len(runners)
+        try:   # 原本はレースごとに読む。1件読めなくても（ファイルが無い等）、ほかのレースの予想・精算は止めない
+            s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
+            races.append({"race_key": rk, "race_date": r["race_date"], "venue": r["venue"], "race_number": r["race_number"],
+                          "surface": r.get("surface"), "distance_m": r.get("distance_m"), "going": None, "race_class": None,
+                          "field_size": r.get("field_size"), "attr_source": "jra_live",
+                          "race_type": "障害候補" if r.get("surface") == "障害" else "平地候補"})
+            for tp in ("24h", "1h", "15m"):
+                if not r.get("post_time"):
+                    continue
+                dl = deadline(r["race_date"], r["post_time"], tp)
+                before = s["fetched_at"].map(lambda x: datetime.fromisoformat(x) <= dl) if len(s) else s
+                cards = s[(s["kind"] == "card") & before] if len(s) else s
+                if not len(cards):
+                    continue
+                card_all = [c for c in jra.parse_card(_read(root, cards.iloc[-1])) if c["horse_number"]]
+                scratched = sorted(c["horse_number"] for c in card_all if c.get("scratch"))
+                card = [c for c in card_all if not c.get("scratch")]
+                if len(card) < 3:
+                    continue
+                win = s[(s["kind"].isin(["odds_win", "odds_first"])) & (s["time_point"] == tp) & before]
+                trio = s[(s["kind"] == "odds_trio") & (s["time_point"] == tp)]  # 締切後のものも判定に出して不合格にする
+                if tp == "15m" and not (len(win) or len(trio)):
+                    continue  # 15分前は配分の見直しだけ。新しいオッズが無ければ作らない
+                w = jra.parse_win_odds(_read(root, win.iloc[-1]), len(card)) if len(win) else {"ok": False, "odds": {}}
+                t = {"ok": False, "odds": {}}
+                trio_rec = trio.iloc[-1] if len(trio) else None
+                if trio_rec is not None:
+                    page = _read(root, trio_rec)
+                    t = jra.parse_trio_odds(page, len(card))
+                    t["odds_time"] = jra.parse_odds_time(page)
+                inputs[(rk, tp)] = {"card": card, "scratched": scratched, "win": w, "trio": t,
+                                    "gate": odds_gate(t, trio_rec, r, tp) if tp != "24h" or trio_rec is not None else
+                                    {"pass": False, "reasons": ["前日はオッズを使わない（未発売のことが多い）"]},
+                                    "card_fetched_at": cards.iloc[-1]["fetched_at"],
+                                    "snapshots": [cards.iloc[-1]["sha256"], *win["sha256"].tolist()[-1:], *trio["sha256"].tolist()[-1:]]}
+            res = s[s["kind"] == "result"] if len(s) else s
+            if len(res):  # 結果が出たレースは確定行（過去走として使う）。発走前の入力（判定・予想用）はそのまま残す
+                parsed = jra.parse_result(_read(root, res.iloc[-1]))
+                cards = s[s["kind"] == "card"]
+                card = {c["horse_number"]: c for c in jra.parse_card(_read(root, cards.iloc[-1]))} if len(cards) else {}
+                for row in parsed["rows"]:
+                    runners.append(_runner(rk, r, {**card.get(row["horse_number"], {}), **{k: v for k, v in row.items() if v is not None}}, row["status"]))
+                inputs[(rk, "result")] = parsed
                 continue
-            dl = deadline(r["race_date"], r["post_time"], tp)
-            before = s["fetched_at"].map(lambda x: datetime.fromisoformat(x) <= dl) if len(s) else s
-            cards = s[(s["kind"] == "card") & before] if len(s) else s
-            if not len(cards):
-                continue
-            card_all = [c for c in jra.parse_card(_read(root, cards.iloc[-1])) if c["horse_number"]]
-            scratched = sorted(c["horse_number"] for c in card_all if c.get("scratch"))
-            card = [c for c in card_all if not c.get("scratch")]
-            if len(card) < 3:
-                continue
-            win = s[(s["kind"].isin(["odds_win", "odds_first"])) & (s["time_point"] == tp) & before]
-            trio = s[(s["kind"] == "odds_trio") & (s["time_point"] == tp)]  # 締切後のものも判定に出して不合格にする
-            if tp == "15m" and not (len(win) or len(trio)):
-                continue  # 15分前は配分の見直しだけ。新しいオッズが無ければ作らない
-            w = jra.parse_win_odds(_read(root, win.iloc[-1]), len(card)) if len(win) else {"ok": False, "odds": {}}
-            t = {"ok": False, "odds": {}}
-            trio_rec = trio.iloc[-1] if len(trio) else None
-            if trio_rec is not None:
-                page = _read(root, trio_rec)
-                t = jra.parse_trio_odds(page, len(card))
-                t["odds_time"] = jra.parse_odds_time(page)
-            inputs[(rk, tp)] = {"card": card, "scratched": scratched, "win": w, "trio": t,
-                                "gate": odds_gate(t, trio_rec, r, tp) if tp != "24h" or trio_rec is not None else
-                                {"pass": False, "reasons": ["前日はオッズを使わない（未発売のことが多い）"]},
-                                "card_fetched_at": cards.iloc[-1]["fetched_at"],
-                                "snapshots": [cards.iloc[-1]["sha256"], *win["sha256"].tolist()[-1:], *trio["sha256"].tolist()[-1:]]}
-        res = s[s["kind"] == "result"] if len(s) else s
-        if len(res):  # 結果が出たレースは確定行（過去走として使う）。発走前の入力（判定・予想用）はそのまま残す
-            parsed = jra.parse_result(_read(root, res.iloc[-1]))
-            cards = s[s["kind"] == "card"]
-            card = {c["horse_number"]: c for c in jra.parse_card(_read(root, cards.iloc[-1]))} if len(cards) else {}
-            for row in parsed["rows"]:
-                runners.append(_runner(rk, r, {**card.get(row["horse_number"], {}), **{k: v for k, v in row.items() if v is not None}}, row["status"]))
-            inputs[(rk, "result")] = parsed
-            continue
-        last = max((tp for tp in ("24h", "1h", "15m") if (rk, tp) in inputs), key=TP_ORDER.get, default=None)
-        if last:
-            for c in inputs[(rk, last)]["card"]:
-                runners.append(_runner(rk, r, c, "pending"))
+            last = max((tp for tp in ("24h", "1h", "15m") if (rk, tp) in inputs), key=TP_ORDER.get, default=None)
+            if last:
+                for c in inputs[(rk, last)]["card"]:
+                    runners.append(_runner(rk, r, c, "pending"))
+        except (OSError, ValueError, KeyError, IndexError) as exc:
+            del races[n_races:], runners[n_runners:]
+            for k in [k for k in inputs if k[0] == rk]:
+                inputs.pop(k)
+            print(f"{rk} の原本を読めないので、このレースだけ飛ばした：{exc!r}"[:300])
     return pd.DataFrame(races), pd.DataFrame(runners), inputs
 
 

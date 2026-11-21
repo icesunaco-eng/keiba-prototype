@@ -116,13 +116,19 @@ def make_result(finished: list, finishers: int, scratched: set, payouts: dict, r
     incomplete = result_problem(finished, finishers, scratched, payouts, rows, field_size, numbers)
     return {"actual": actual, "label": label, "payout": payouts.get(actual) if actual else None,
             "payouts": payouts, "finishers": int(finishers), "scratched": set(scratched), "has_result": True,
-            "winners": winners, "payouts_missing": missing, "complete": incomplete is None, "incomplete": incomplete}
+            "winners": winners, "payouts_missing": missing, "complete": incomplete is None, "incomplete": incomplete,
+            "finished": [(int(n), int(pos) if pos else None) for n, pos in finished]}
 
 
 def card_post_time(page: str) -> str | None:
     """出馬表の原本から発走時刻（"発走時刻： 9時45分"）を読む。読めなければ None。"""
     import re
-    m = re.search(r"発走時刻[：:]\s*(\d{1,2})時(\d{1,2})分", page or "")
+    try:   # 実物は「発走時刻：<strong>9時45分</strong>」のようにタグをまたぐので、表示の文字で読む
+        from lxml import html as lxml_html
+        text = lxml_html.fromstring(page).text_content() if page else ""
+    except Exception:
+        text = re.sub(r"<[^>]+>", "", page or "")
+    m = re.search(r"発走時刻[：:]\s*(\d{1,2})時(\d{1,2})分", text)
     return f"{int(m.group(1)):02d}:{int(m.group(2)):02d}" if m else None
 
 
@@ -189,6 +195,7 @@ class Source:
         self.scratched_now: dict[str, set] = {}             # race_key → 今わかっている取消・除外（予想を保存した後の分も）。読めなければ入れない
         self.card_checked_at: dict[str, str] = {}           # race_key → 取消を照合した出馬表の取得時刻
         self.card_problem: dict[str, str] = {}              # race_key → 出馬表を照合に使えなかった理由
+        self.race_meta: dict = {}
         self.past_keys: set[str] = set()                    # 収集の予定表（7日で整理）から外れた、過去14日のレース（原本の記録から）
         self.settlements: list[dict] = []
         self.versions: list[dict] = []
@@ -240,6 +247,7 @@ class Source:
             conn.close()
             live_versions = [v["version"] for v in self.versions if v["version"].startswith("live-")]
             self.version = live_versions[-1] if live_versions else None
+        self.race_meta = self._race_meta(state)
         self._live_pages(root, state)
 
     def _live_pages(self, root: Path, state: dict):
@@ -248,19 +256,21 @@ class Source:
             return
         try:
             from ..live import jra
-            from ..live.wallet import _read, _snapshots, live_tables
+            from ..live.wallet import _read, _snapshots
             snaps = _snapshots(root)
             # 収集は終わった開催を7日で予定表から外す。履歴と結果のために、原本の記録に残っているレースを拾う
             from datetime import date
             today = date.today().isoformat()
             self.past_keys = {k for k in set(snaps["race_key"]) if isinstance(k, str) and k not in self.races
                               and k[:10] <= today}
+            meta = self.race_meta
             for rk in self.past_keys:   # 過去のレースとして、詳細・時点の変化・記録の画面でも開けるようにする（予定の一覧には出さない）
                 d, venue, num = (rk.split("|") + ["", "", "0"])[:3]
+                m = meta.get(rk) or {}   # 予定表にあったときの控え（頭数・発走時刻）。読めた行の数から頭数を推測しない
                 self.races[rk] = {"race_key": rk, "race_date": d, "venue": venue,
-                                  "race_number": int(num) if num.isdigit() else 0, "race_name": "", "post_time": None,
-                                  "surface": None, "distance_m": None, "field_size": None, "going": None,
-                                  "race_class": None, "archived": True}
+                                  "race_number": int(num) if num.isdigit() else 0, "race_name": m.get("race_name") or "",
+                                  "post_time": m.get("post_time"), "surface": None, "distance_m": None,
+                                  "field_size": m.get("field_size"), "going": None, "race_class": None, "archived": True}
             for rk in self.races:
                 s = snaps[(snaps["race_key"] == rk) & (snaps["kind"] == "card")]
                 if not len(s):
@@ -277,18 +287,15 @@ class Source:
                         self.names[rk][int(c["horse_number"])] = c.get("horse_name") or ""
                 race = self.races[rk]
                 problem = card_problem(card, race.get("field_size"))
-                if race.get("archived"):   # 予定表から外れたレースは、出馬表の原本から発走時刻と頭数を取り直す
+                if race.get("archived"):   # 予定表から外れたレース：発走時刻は控え、無ければ出馬表の原本から読む
                     race["post_time"] = race["post_time"] or card_post_time(page)
-                    if not problem:
-                        race["field_size"] = len(card)
                 if problem:
                     self.card_problem[rk] = problem
                 else:
                     self.scratched_now[rk] = {int(c["horse_number"]) for c in card if c["scratch"]}
                     self.card_checked_at[rk] = str(s.iloc[-1]["fetched_at"])
-            _, _, inputs = live_tables(root, state, snaps)
-            results = {rk: res for (rk, tp), res in inputs.items() if tp == "result"}
-            for rk in self.past_keys:   # 予定表から外れたレースの結果は、原本から直接読む
+            results = {}
+            for rk in self.races:   # 結果の原本はレースごとに読む。1件読めなくても、ほかのレースは止めない
                 s = snaps[(snaps["race_key"] == rk) & (snaps["kind"] == "result")]
                 if not len(s):
                     continue
@@ -309,12 +316,66 @@ class Source:
                     sum(r["status"] == "finished" for r in rows), scr,
                     {p["combo"]: p["payout_yen"] for p in res.get("trio_payouts", [])},
                     len(rows), race.get("field_size"), [r["horse_number"] for r in rows])
-                if race.get("archived") and not race.get("field_size") and res_["complete"]:
-                    # 予定の頭数を確かめられない過去のレースは、行の欠けを見分けられないので保留
+                if not race.get("field_size") and res_["complete"]:
+                    # 予定の頭数を確かめられないレースは、行の欠けを見分けられないので保留
                     res_.update(complete=False, incomplete="予定の頭数を確かめられない（過去の原本）ので結果がそろっているか分からない")
                 self.results[rk] = res_
+            self._resettle_unsettled()
         except Exception as exc:  # 原本の読取の失敗で画面を止めない
             self.notes.append(f"原本の読取に失敗：{exc!r}"[:200])
+
+    def _race_meta(self, state: dict) -> dict:
+        """予定表にあるレースの頭数・発走時刻を控えておき、予定表から外れた後も使う（確認アプリ専用の控え。台帳は書かない）。"""
+        f = self.paths.data_dir / "app" / "race_meta.json"
+        try:
+            meta = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+        except (OSError, ValueError):
+            meta = {}
+        changed = False
+        for rk, r in (state.get("races") or {}).items():
+            row = {k: r.get(k) for k in ("field_size", "post_time", "race_name") if r.get(k)}
+            if row and meta.get(rk) != {**meta.get(rk, {}), **row}:
+                meta[rk] = {**meta.get(rk, {}), **row}
+                changed = True
+        if changed:
+            try:
+                f.parent.mkdir(parents=True, exist_ok=True)
+                tmp = f.with_name(f".race_meta.{os.getpid()}.{threading.get_ident()}.tmp")
+                tmp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+                os.replace(tmp, f)
+            except OSError as exc:   # 控えを書けなくても画面は止めない（過去のレースは保留になる）
+                self.notes.append(f"レースの控えを書けない：{exc!r}"[:200])
+        return meta
+
+    def _resettle_unsettled(self):
+        """前の版が台帳に書いた「払戻待ち」の精算を、いま読めている完全な結果で計算し直して表示する（台帳は書き直さない）。"""
+        from ..settle import missing_payouts, settle_trio
+        todo = [i for i, s in enumerate(self.settlements) if s.get("status") == "unsettled_no_payout"]
+        if not todo or not self.paths.ledger_path.exists():
+            return
+        conn = ro_connect(self.paths.ledger_path)
+        try:
+            for i in todo:
+                s = self.settlements[i]
+                res = self.results.get(s["race_key"])
+                if not res or not res.get("complete") or not res.get("payouts"):
+                    continue
+                row = conn.execute("SELECT payload FROM predictions WHERE race_key=? AND time_point=? AND method=? AND version=? "
+                                   "ORDER BY created_at DESC LIMIT 1",
+                                   (s["race_key"], s["time_point"], s["method"], s["version"])).fetchone()
+                if not row:
+                    continue
+                stakes = (allocation_of(json.loads(row[0]), s["wallet"]).get("stakes")) or {}
+                fin = [(n, pos) for n, pos in res.get("finished", [])]
+                if not stakes or missing_payouts(stakes, fin, res["scratched"], res["payouts"]):
+                    continue
+                st = settle_trio(stakes, res["finishers"], res["scratched"], res["payouts"])
+                if st.status == "unsettled_no_payout":
+                    continue
+                self.settlements[i] = {**s, "status": st.status, "stake": st.stake, "returned": st.returned,
+                                       "hits": st.hits, "recomputed": True}
+        finally:
+            conn.close()
 
     # ---- 検証データ ----
     def _load_check(self):
