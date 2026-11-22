@@ -241,6 +241,22 @@ def test_reference_prediction_is_not_called_hit_or_miss(live_paths, tmp_path):
     assert "参考の予想（成績に数えない）" in page and "当たり・払戻" not in page and "はずれ・払戻" not in page
 
 
+def test_conditions_do_not_count_reference_predictions(live_paths, tmp_path):
+    src = Source(live_paths, "live")
+    store = Store(tmp_path / "p.sqlite")
+    ctx = {"mode": "live", "theme": "auto", "size": "normal", "token": "t"}
+    rk2 = RK[:-2] + "12"
+    src.races[rk2] = {**src.races[RK], "race_key": rk2, "race_number": 12}
+    src.preds[rk2][("int_market_ml", "15m")] = {**src.preds[RK][("int_market_ml", "15m")], "formal_probability": False}
+    for rk, hits, stake, back, status in ((RK, ["3-7-11"], 100, 500, "settled"), (rk2, [], 0, 0, "not_allocated")):
+        src.settlements.append({"race_key": rk, "time_point": "15m", "method": "int_market_ml", "version": "live-test0001",
+                                "wallet": "ev_weighted", "status": status, "stake": stake, "returned": back, "hits": hits})
+    for dim in ("month", "class", "dist", "surface"):
+        page = pages.results_conditions_page(ctx, src, store, {"m": "int_market_ml", "d": dim})
+        assert "<td>1</td><td>100%</td><td>500%</td>" in page, dim
+        assert "参考表示の予想 1件は入れていない" in page
+
+
 def test_empty_data_shows_zero_not_numbers(tmp_path):
     paths = Paths(data_dir=tmp_path / "data")
     src = Source(paths, "live")

@@ -1051,8 +1051,13 @@ def results_conditions_page(ctx, src, store, q) -> str:
         body.append(chips([(x, METHOD_LABEL[x]) for x in methods], m, lambda x: url("/results/conditions", n=n, m=x, d=dim)))
     keys = _recent_keys(src, {s["race_key"] for s in src.settlements if s["wallet"] == wallet and s["method"] == m}, n)
     agg = defaultdict(lambda: [0, 0, 0, 0])
+    reference = 0
     for s in one_per_race(src, wallet):
         if s["method"] != m or s["race_key"] not in keys or s.get("status") == "unsettled_no_payout":
+            continue
+        pred = src.preds.get(s["race_key"], {}).get((m, s["time_point"])) or {}
+        if pred.get("formal_probability") is False:   # 正式な確率にならなかった統合（参考表示）は的中率に入れない
+            reference += 1
             continue
         r = src.races.get(s["race_key"], {})
         key = {"dist": distance_band(r.get("distance_m")), "surface": r.get("surface") or "不明",
@@ -1067,6 +1072,8 @@ def results_conditions_page(ctx, src, store, q) -> str:
     body.append(f'<div class="card"><table><tr><th>{ {"dist": "距離", "surface": "芝・ダート", "class": "クラス", "month": "月"}[dim]}</th>'
                 f'<th>R</th><th>的中率</th><th>回収率</th></tr>{rows or "<tr><td colspan=4 class=muted>—</td></tr>"}</table></div>'
                 f'<p class="muted small">件数が少ない条件は、たまたまの差が大きいよ（20R未満は参考）</p>')
+    if reference:
+        body.append(f'<p class="muted small">参考表示の予想 {reference:,}件は入れていない</p>')
     body.append(counting_note(src))
     return layout(ctx, "条件別", "".join(body), "results", url("/results", n=n), "条件別")
 
