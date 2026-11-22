@@ -1242,3 +1242,57 @@ def test_money_check_needs_no_display_fields_but_still_checks_values():
     for change in ({"allocation": {"kelly": {"stakes": {"1-2-3": -100}}}}, {"trios_all": {"1-2-3": NAN}},
                    {"trios": [{"combo": "1-2-3", "p": INF}]}, {"horses": None}, {"race_date": None}):
         assert bad({**ok, **change}, for_money=True)
+
+
+def test_conflicting_mam_item_does_not_lose_the_batch(tmp_path, monkeypatch):
+    """同じ穴：同じレースに違う予想が2件来ても、取り込みが止まって全件消えない。"""
+    from keiba.ledger import Ledger
+    from keiba.live.mam import import_predictions
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    base = {"schema": "keiba-mam-prediction-v1", "time_point": "1h", "generated_at": "2025-08-30T14:35:00+09:00"}
+    f = tmp_path / "p.json"
+    f.write_text(json.dumps([dict(base, race_key=RK, ranking=[1, 2, 3]), dict(base, race_key=RK, ranking=[3, 2, 1]),
+                             dict(base, race_key=RK2, ranking=[1, 2, 3])]))
+    out = import_predictions(paths, f)
+    assert out["accepted"] == 2 and "もう受け付けている" in out["rejected"][0]["reason"]
+    led = Ledger(paths.ledger_path, read_only=True)
+    assert sorted(p["race_key"] for p in led.predictions()) == [RK, RK2]
+    led.close()
+
+
+def test_one_failed_packet_does_not_stop_the_others(tmp_path, monkeypatch):
+    """同じ穴：まむへの入力が1レース書けなくても、ほかは書く。書きかけは残さず、次の回に書き直す。"""
+    from pathlib import Path
+    from keiba.live.mam import export_packets
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    real = Path.write_text
+
+    def broken(self, *a, **k):
+        if "_11_" in self.name:
+            real(self, "{", encoding="utf-8")
+            raise OSError("書きかけ")
+        return real(self, *a, **k)
+    with monkeypatch.context() as mp:
+        mp.setattr(Path, "write_text", broken)
+        got = export_packets(paths)
+    assert [p.name for p in got] == ["2025-08-30_東京_12_1h.json"] and got.failed == [f"{RK}|1h|まむへの入力"]
+    assert len(list((paths.data_dir / "mam" / "outbox").glob("*.json"))) == 1
+    again = export_packets(paths)
+    assert [p.name for p in again] == ["2025-08-30_東京_11_1h.json"] and not again.failed
+    assert json.loads(again[0].read_text())["race_key"] == RK
+
+
+def test_failed_packet_is_notified(tmp_path, monkeypatch):
+    import types
+    from keiba import cli
+    from keiba.live import collector, mam, wallet
+    told = []
+    packets = mam.Packets()
+    packets.failed.append(f"{RK}|1h|まむへの入力")
+    monkeypatch.setattr(collector.Collector, "tick", lambda self, **k: (self.state.update(live_pending=True), {"saved": 1})[1])
+    monkeypatch.setattr(wallet, "run_live", lambda p: {"predicted": 11, "settled": 0})
+    monkeypatch.setattr(mam, "export_packets", lambda p: packets)
+    monkeypatch.setattr(cli, "_notify", lambda title, detail: told.append(detail))
+    (tmp_path / "live").mkdir()
+    cli.cmd_collect(Paths(data_dir=tmp_path), types.SimpleNamespace(action="tick"))
+    assert told and "まむへの入力" in told[0]

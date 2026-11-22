@@ -17,7 +17,7 @@ from itertools import combinations
 from pathlib import Path
 
 from ..allocate import allocate
-from ..ledger import Ledger, canonical, code_hash, sha
+from ..ledger import Ledger, LedgerConflict, canonical, code_hash, sha
 from .collector import deadline
 from .wallet import ALLOC_METHODS, _snapshots, live_tables
 
@@ -36,7 +36,7 @@ def export_packets(paths) -> list[Path]:
     _, _, inputs = live_tables(root, state, _snapshots(root))
     out_dir = paths.data_dir / "mam" / "outbox"
     out_dir.mkdir(parents=True, exist_ok=True)
-    written = []
+    written = Packets()
     for (rk, tp), inp in sorted(inputs.items()):
         if tp == "result":
             continue
@@ -59,9 +59,23 @@ def export_packets(paths) -> list[Path]:
             "source_snapshots": inp["snapshots"],
             "note": "締切までに分かっていた情報だけ。予想は締切までに返すこと（形は mam-format.md）",
         }
-        f.write_text(json.dumps(packet, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp = f.with_name(f.name + ".tmp")
+        try:  # 1レースの失敗で、ほかのレースの入力を止めない。書きかけを本物の名前で残さない（一度書いた入力は書き直さないため）
+            tmp.write_text(json.dumps(packet, ensure_ascii=False, indent=1), encoding="utf-8")
+            tmp.replace(f)
+        except Exception as exc:
+            written.failed.append(f"{rk}|{tp}|まむへの入力")
+            print(f"{rk} {tp} のまむへの入力を書けなかったので、そこだけ飛ばした：{exc!r}"[:300])
+            continue
         written.append(f)
     return written
+
+
+class Packets(list):
+    """書けた入力の一覧。failed：書けなかったレース。"""
+    def __init__(self, *a):
+        super().__init__(*a)
+        self.failed = []
 
 
 PROB_MAX = 1e6  # p は合計1でなくてよいが、足して桁あふれしない範囲（百分率や点数でも足りる）
@@ -125,7 +139,7 @@ def import_predictions(paths, file: Path) -> dict:
         except Rejected as exc:
             rejected.append({"race_key": pred.get("race_key"), "time_point": pred.get("time_point"), "reason": str(exc)})
             continue
-        except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as exc:  # 1件の形の崩れで、ほかの予想の取り込みを止めない
+        except Exception as exc:  # 1件の形の崩れで、ほかの予想の取り込みを止めない
             get = pred.get if isinstance(pred, dict) else (lambda k: None)
             rejected.append({"race_key": get("race_key"), "time_point": get("time_point"), "reason": f"形が読めない：{exc!r}"[:160]})
             continue
@@ -155,7 +169,12 @@ def import_predictions(paths, file: Path) -> dict:
             "odds_gate": gate, "notes": [pred.get("comment", "")][:1], "generated_at": pred["generated_at"],
             "period": "live", "submitted_by": pred.get("author", "mam"),
         }
-        added = led.add_prediction(rk, tp, "text_ai", MAM_VERSION, payload, sha(canonical(pred))[:16], "mam", code_hash())
+        try:
+            added = led.add_prediction(rk, tp, "text_ai", MAM_VERSION, payload, sha(canonical(pred))[:16], "mam", code_hash())
+        except Exception as exc:  # 1件の保存の失敗で、ほかの予想を巻き込まない
+            why = "同じレース・時点の予想をもう受け付けている（書き換えない）" if isinstance(exc, LedgerConflict) else f"保存できない：{exc!r}"[:160]
+            rejected.append({"race_key": rk, "time_point": tp, "reason": why})
+            continue
         ok += int(added)
     led.commit()
     led.close()

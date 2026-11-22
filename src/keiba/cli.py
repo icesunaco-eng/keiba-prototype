@@ -113,6 +113,8 @@ def cmd_mam(paths, args):
     if args.action == "export":
         files = export_packets(paths)
         print(f"まむへの入力 {len(files)} 件 → {paths.data_dir / 'mam' / 'outbox'}")
+        if files.failed:
+            print("書けなかった：" + "、".join(files.failed))
     else:
         print(json.dumps(import_predictions(paths, args.file), ensure_ascii=False, indent=1))
 
@@ -137,13 +139,15 @@ def cmd_collect(paths, args):
             try:
                 out["live"] = run_live(paths)
                 from .live.mam import export_packets
-                out["mam_packets"] = len(export_packets(paths))
+                packets = export_packets(paths)
+                out["mam_packets"] = len(packets)
                 if out["live"].get("settled"):
                     from datetime import date
                     from .review import write_review
                     write_review(paths, date.today().strftime("%Y-%m"))
-                if out["live"].get("failed"):  # 読めたレースは保存済み。飛ばしたレースは黙って捨てずに知らせる
-                    raise RuntimeError("一部のレースだけ失敗：" + "、".join(out["live"]["failed"][:5]))
+                failed = out["live"].get("failed", []) + getattr(packets, "failed", [])
+                if failed:  # 読めたレースは保存済み。飛ばしたレースは黙って捨てずに知らせる
+                    raise RuntimeError("一部のレースだけ失敗：" + "、".join(failed[:5]))
             except Exception as exc:  # 予想の失敗で収集を止めない
                 out["live_error"] = repr(exc)
                 _notify("予想・精算に失敗", repr(exc)[:120])
