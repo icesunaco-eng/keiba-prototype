@@ -132,31 +132,40 @@ def cmd_collect(paths, args):
     from .live.collector import Collector
     root = paths.data_dir / "live"
     if args.action == "tick":
-        col = Collector(root)
-        out = col.tick(notify=_notify)
-        if col.live_pending():   # 新しいページ・取りやめ・前の回の失敗のどれかがある
-            from .live.wallet import run_live
-            interrupted = col.live_started()   # 前の回が最後まで終わっていない（途中で止まった・失敗した）
+        import fcntl
+        root.mkdir(parents=True, exist_ok=True)
+        # 見回りは1つずつ（重なると状態の書込みで落ち、取得ずみの記録も消える）。鍵はプロセスが終われば外れる
+        with open(root / "tick.lock", "a") as lock:
             try:
-                out["live"] = run_live(paths)
-                from .live.mam import export_packets
-                out["mam_packets"] = len(export_packets(paths))
-                if out["live"].get("settled") or interrupted:
-                    # 前の回が精算を書いた後に止まっていると、この回の精算は0件でも月次は古いまま
-                    from datetime import date, timedelta
-                    from .review import write_review
-                    days = [date.today(), *([date.today() - timedelta(days=1)] if interrupted else [])]
-                    for month in sorted({x.strftime("%Y-%m") for x in days}):
-                        write_review(paths, month)
-                failed = out["live"].get("failed")   # 一部のレース・方式だけの失敗：ほかは書けている。次の回にやり直す
-                new = col.live_finished(failed or [], out["live"].get("retry_now", True))
-                if new:
-                    _notify("予想・精算の一部に失敗", "; ".join(new)[:120])
-            except Exception as exc:  # 予想の失敗で収集を止めない（次の回にやり直す）
-                out["live_error"] = repr(exc)
-                if col.live_finished([repr(exc)[:200]]):
-                    _notify("予想・精算に失敗", repr(exc)[:120])
-        print(json.dumps(out, ensure_ascii=False))
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print(json.dumps({"skipped": "前の見回りがまだ動いている"}, ensure_ascii=False))
+                return
+            col = Collector(root)
+            out = col.tick(notify=_notify)
+            if col.live_pending():   # 新しいページ・取りやめ・前の回の失敗のどれかがある
+                from .live.wallet import run_live
+                interrupted = col.live_started()   # 前の回が最後まで終わっていない（途中で止まった・失敗した）
+                try:
+                    out["live"] = run_live(paths)
+                    from .live.mam import export_packets
+                    out["mam_packets"] = len(export_packets(paths))
+                    if out["live"].get("settled") or interrupted:
+                        # 前の回が精算を書いた後に止まっていると、この回の精算は0件でも月次は古いまま
+                        from datetime import date, timedelta
+                        from .review import write_review
+                        days = [date.today(), *([date.today() - timedelta(days=1)] if interrupted else [])]
+                        for month in sorted({x.strftime("%Y-%m") for x in days}):
+                            write_review(paths, month)
+                    failed = out["live"].get("failed")   # 一部のレース・方式だけの失敗：ほかは書けている。次の回にやり直す
+                    new = col.live_finished(failed or [], out["live"].get("retry_now", True))
+                    if new:
+                        _notify("予想・精算の一部に失敗", "; ".join(new)[:120])
+                except Exception as exc:  # 予想の失敗で収集を止めない（次の回にやり直す）
+                    out["live_error"] = repr(exc)
+                    if col.live_finished([repr(exc)[:200]]):
+                        _notify("予想・精算に失敗", repr(exc)[:120])
+            print(json.dumps(out, ensure_ascii=False))
     elif args.action == "install":
         import os
         from pathlib import Path
