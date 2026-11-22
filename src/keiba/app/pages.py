@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 
 from .data import (ALLOC_LABEL, ALLOC_STATUS, MAIN_WALLET, METHOD_LABEL, METHOD_TABS, MODES, TIME_POINTS, TP_LABEL,
                    WALLET_LABEL, allocation_of, distance_band, horse_probs, is_skip, marks_of, probs_complete,
-                   race_sort_key)
+                   race_sort_key, valid_race_key)
 from .checks import (bias_check, card_flags, change_conditions, check_summary, horse_comment, material_timing, now_jst,
                      post_datetime, pre_publish_check, unknown_required)
 from .store import SETTLE_LABEL, settle_purchase
@@ -708,7 +708,7 @@ def buy_form(ctx, src, store, q, error: str = "", form: dict | None = None) -> s
     rk = q.get("rk", "")
     r = src.races.get(rk)
     entry = store.entry(q["entry"]) if q.get("entry") else None
-    if entry:
+    if entry and valid_race_key(entry["race_key"]):
         rk = entry["race_key"]
         r = src.races.get(rk) or {"race_key": rk, "venue": rk.split("|")[1], "race_number": rk.split("|")[2], "race_date": rk.split("|")[0]}
     if not r:
@@ -789,7 +789,8 @@ def _history_keys(src, store, f: str) -> list[str]:
         keys = set(src.preds) | buy | skip_user | store.noted_races()
         if src.mode == "live":
             keys = {k for k in keys if k.split("|")[0] <= today}
-    return sorted(keys, key=lambda k: race_sort_key(src, k), reverse=True)
+    # 形のおかしい鍵の記録（前に入った分）は並べない。購入記録の一覧には残る
+    return sorted((k for k in keys if valid_race_key(k)), key=lambda k: race_sort_key(src, k), reverse=True)
 
 
 def history_page(ctx, src, store, q) -> str:
@@ -844,7 +845,7 @@ def history_page(ctx, src, store, q) -> str:
 def history_detail_page(ctx, src, store, q) -> str:
     rk = q.get("rk", "")
     r = src.races.get(rk)
-    if not r and not store.entries(race_key=rk) and rk not in src.past_keys and not store.note(rk):
+    if not r and (not valid_race_key(rk) or (not store.entries(race_key=rk) and rk not in src.past_keys and not store.note(rk))):
         return layout(ctx, "履歴の詳細", empty("レースが見つからないよ", ""), "history", "/history")
     r = r or {"race_key": rk, "venue": rk.split("|")[1], "race_number": rk.split("|")[2], "race_date": rk.split("|")[0]}
     body = [f'<p class="muted" style="margin:0">{h(race_title(r))}・{day_label(r["race_date"])}</p>'

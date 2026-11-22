@@ -123,6 +123,11 @@ def make_result(finished: list, finishers: int, scratched: set, payouts: dict, r
             "finished": [(int(n), int(pos) if pos else None) for n, pos in finished]}
 
 
+def valid_race_key(rk) -> bool:
+    """レースの鍵の形（日付|場|番号）か。"""
+    return isinstance(rk, str) and bool(re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\|[^|]+\|[0-9]{1,2}", rk))
+
+
 def race_class_of(name) -> str | None:
     """レース名（例：「3歳以上1勝クラス(混合)[指定]」「秋明菊賞 2歳1勝クラス」）からクラスを読む。読めなければ None。"""
     import re

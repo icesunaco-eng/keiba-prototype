@@ -1438,3 +1438,16 @@ def test_notify_skips_cancelled_race(live_paths, tmp_path, monkeypatch):
     monkeypatch.setattr(stop, "wait", wait)
     notify_loop(app, stop, interval=0, sender=lambda t, x: sent.append((t, x)))
     assert rounds["n"] >= 2 and not sent
+
+
+def test_bad_race_key_is_refused_and_does_not_break_pages(server):
+    app, port = server
+    for bad in ("x", "a|b|c", "||", "2026-11-22|京都|x"):
+        assert _req(port, "/note", {"token": app.token, "rk": bad, "text": "メモ"})[0] == 400
+        assert _req(port, "/buy", {"token": app.token, "rk": bad, "kind": "skip", "fm": "live"})[0] == 400
+        app.store.set_note(bad, "前に入ったおかしな鍵")            # すでに保存されていても画面は落ちない
+        app.store.add(bad, "skip", {}, data_mode="live")
+        assert _req(port, "/history/detail?rk=" + urllib.parse.quote(bad))[0] == 200
+    edit = "/buy/new?entry=" + app.store.entries(race_key="x")[0]["entry_id"]
+    for path in ("/history", "/history?f=skip", "/history?f=2w", "/purchases", "/purchases.csv", "/results/skips", edit):
+        assert _req(port, path)[0] == 200, path

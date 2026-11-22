@@ -26,7 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import pages
-from .data import ALLOC_LABEL, METHOD_TABS, MODES, TIME_POINTS, Cache, LedgerBusy
+from .data import ALLOC_LABEL, METHOD_TABS, MODES, TIME_POINTS, Cache, LedgerBusy, valid_race_key
 from .store import InputError, Store
 
 HOST = "127.0.0.1"
@@ -296,7 +296,7 @@ def make_handler(app: App, port: int, extra_hosts=()):
                     return self._redirect(pages.url("/history/detail", rk=e["race_key"]))
                 if u.path == "/note":
                     rk = one.get("rk", "")
-                    if not rk:
+                    if not valid_race_key(rk):
                         return self._send(400, "rk", "text/plain")
                     app.store.set_note(rk, one.get("text", ""))
                     return self._redirect(pages.url("/history/detail", rk=rk))
@@ -356,7 +356,7 @@ def make_handler(app: App, port: int, extra_hosts=()):
                                       {"kind": kind, "rows": rows, "memo": one.get("memo", ""), "fm": fm, "confirm": True})
                 return self._send(HTTPStatus.CONFLICT, body)
             try:
-                if not rk:
+                if not valid_race_key(rk):
                     raise InputError("レースが分からない")
                 for c, y in rows:
                     if not c.strip() and not y.strip():
