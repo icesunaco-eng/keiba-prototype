@@ -1215,3 +1215,11 @@ def test_tie_order_does_not_depend_on_process():
                            env={**os.environ, "PYTHONHASHSEED": str(seed), "PYTHONPATH": os.pathsep.join(sys.path)}).stdout
             for seed in range(4)}
     assert len(runs) == 1
+
+
+def test_pool_survives_smallest_probability():
+    """同じ穴：極小の確率の半分が0に潰れても、統合の計算が止まらない（壊し試験で見つけた）。"""
+    import math
+    from keiba.integrate import pool
+    out = pool({"a": {"1-2-3": math.ulp(0.0), "1-2-4": 0.0, "1-2-5": 1.0}}, {"a": 0.2})
+    assert len(out) == 3 and all(math.isfinite(v) and v > 0 for v in out.values())
