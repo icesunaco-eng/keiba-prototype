@@ -77,9 +77,20 @@ class Collector:
         rec = {"race_key": race_key, "kind": kind, "time_point": tp, "fetched_at": ts.isoformat(timespec="seconds"),
                "path": str((d / name).relative_to(self.root)), "sha256": hashlib.sha256(body).hexdigest(),
                "source": jra.BASE + path, "cname": cname}
-        with open(self.root / "snapshots.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        self._append_index(rec)
         return rec
+
+    def _append_index(self, rec: dict):
+        """snapshots.jsonl に1行足す。前の書き込みが改行の前で切れていたら、先に改行を入れて次の行とつながらないようにする。"""
+        f = self.root / "snapshots.jsonl"
+        line = json.dumps(rec, ensure_ascii=False) + "\n"
+        with open(f, "a+b") as fh:
+            fh.seek(0, 2)
+            if fh.tell() > 0:
+                fh.seek(-1, 2)
+                if fh.read(1) != b"\n":
+                    fh.write(b"\n")
+            fh.write(line.encode("utf-8"))
 
     def _write_state(self):
         tmp = self.state_path.with_suffix(".tmp")
@@ -141,8 +152,7 @@ class Collector:
             if not odds_links:
                 saved.append({"race_key": rk, "kind": "odds_unavailable", "time_point": tp,
                               "fetched_at": self.now().isoformat(timespec="seconds"), "odds_status": r.get("odds_status")})
-                with open(self.root / "snapshots.jsonl", "a", encoding="utf-8") as f:
-                    f.write(json.dumps(saved[-1], ensure_ascii=False) + "\n")
+                self._append_index(saved[-1])
             else:
                 path, cname = odds_links[0]
                 first = self.client.get(path, cname)
