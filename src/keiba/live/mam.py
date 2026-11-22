@@ -125,6 +125,10 @@ def import_predictions(paths, file: Path) -> dict:
         except Rejected as exc:
             rejected.append({"race_key": pred.get("race_key"), "time_point": pred.get("time_point"), "reason": str(exc)})
             continue
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as exc:  # 1件の形の崩れで、ほかの予想の取り込みを止めない
+            get = pred.get if isinstance(pred, dict) else (lambda k: None)
+            rejected.append({"race_key": get("race_key"), "time_point": get("time_point"), "reason": f"形が読めない：{exc!r}"[:160]})
+            continue
         rk, tp = pred["race_key"], pred["time_point"]
         probs = {c: p for c, p in v["trios"] if p is not None}
         calibrated = bool(probs)

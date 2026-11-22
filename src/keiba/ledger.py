@@ -105,12 +105,14 @@ class Ledger:
     def commit(self):
         self.conn.commit()
 
-    def predictions(self, version: str | None = None):
+    def predictions(self, version: str | None = None, live: bool = False):
         q = "SELECT race_key,time_point,method,version,payload FROM predictions"
         args = ()
         if version:
             q += " WHERE version=?"
             args = (version,)
+        elif live:
+            q += " WHERE version LIKE 'live-%'"
         for rk, tp, m, v, p in self.conn.execute(q, args):
             yield {"race_key": rk, "time_point": tp, "method": m, "version": v, **json.loads(p)}
 

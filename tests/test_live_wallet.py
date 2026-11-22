@@ -990,3 +990,191 @@ def test_mam_probability_must_be_finite(tmp_path, monkeypatch, ps, ok):
     assert (import_predictions(paths, f)["accepted"] == 1) == ok
     if ok:
         run_live(paths)
+
+
+# ---- みに💚20261122-3（PR #18）の指摘 ----
+RK2 = "2025-08-30|東京|12"
+
+
+def _two_races(tmp_path, monkeypatch, trio=None):
+    orig = jra.parse_card
+    monkeypatch.setattr(jra, "parse_card",
+                        lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)])
+    paths, col = _setup(tmp_path, trio=trio)
+    col.state["races"][RK2] = dict(col.state["races"][RK], race_number=12, post_time="15:42")
+    for kind, page in (("card", card_html([f"H{h:04d}" for h in range(N)])), ("odds_win", win_html()), ("odds_trio", trio_html())):
+        col._save(RK2, kind, "1h", "/JRADB/x", "c", page)
+    col._write_state()
+    return paths, col
+
+
+def _stored_mam(paths, **change):
+    """検査のゆるかった版が台帳に入れた、まむの予想。"""
+    from keiba.ledger import Ledger
+    payload = {"race_date": "2025-08-30", "method_kind": "text_ai", "horses": [{"n": n, "rank": None} for n in range(1, N + 1)],
+               "trios": [{"combo": "1-2-3", "p": 1.0}], "trios_all": {"1-2-3": 1.0}, "complete": False, "confidence": "Z",
+               "allocation": {a: {"status": "allocated", "stakes": {"1-2-3": 100}, "total": 100}
+                              for a in ("equal_payout", "ev_weighted", "kelly")},
+               "period": "live", **change}
+    led = Ledger(paths.ledger_path)
+    led.add_prediction(RK, "1h", "text_ai", "live-mam-v1", payload, "i", "mam", "old")
+    led.commit()
+    led.close()
+
+
+NAN, INF = float("nan"), float("inf")
+
+
+@pytest.mark.parametrize("change", [
+    {"trios_all": {"1-2-3": NAN}}, {"trios_all": {"1-2-3": INF}}, {"trios_all": {"1-2-3": -INF}},
+    {"trios_all": {"1-2-3": -0.2, "1-2-4": 1.2}}, {"trios_all": {"1-2-3": 7.0}}, {"trios_all": {"1-2-3": 0.0}},
+    {"trios_all": {"1-2-3": "0.5"}}, {"trios_all": {"1-2-3": None}}, {"trios_all": {"1-2-3": True}}, {"trios_all": {"1-2-3": [1]}},
+    {"trios_all": {"1-2-99": 1.0}}, {"trios_all": {"3-2-1": 1.0}}, {"trios_all": {"x": 1.0}}, {"trios_all": [["1-2-3", 1.0]]},
+    {"trios_all": "NaN"}, {"trios": [{"combo": "1-2-3", "p": NAN}]}, {"trios": [{"p": 1.0}]}, {"trios": None},
+    {"horses": None}, {"horses": [{"rank": 1}]}, {"race_date": None}, {"trio_probs_full": {"1-2-3": NAN}},
+    {"allocation": {"kelly": {"stakes": {"1-2-3": -100}}}}, {"allocation": {"kelly": {"stakes": {"1-2-3": NAN}}}},
+    {"allocation": {"kelly": {"stakes": {"1-2-3": "100"}}}}, {"allocation": {"kelly": {"stakes": {"1-2-3": 20000}}}},
+    {"allocation": {"kelly": {"stakes": {"1-2-3": 150}}}}, {"allocation": {"kelly": {"stakes": ["1-2-3"]}}},
+])
+def test_broken_saved_prediction_is_not_used(tmp_path, monkeypatch, change):
+    """重大1：台帳に残った壊れた予想は、統合・精算・仮想財布・月次のどこにも使わず、ほかのレースは続く。"""
+    from keiba.ledger import Ledger
+    from keiba.review import build_review
+    paths, col = _two_races(tmp_path, monkeypatch, trio=_no_vote_page())
+    _stored_mam(paths, **change)
+    led = Ledger(paths.ledger_path)  # 壊れた予想を、前の版がもう精算していた場合
+    led.add_settlement(RK, "1h", "text_ai", "live-mam-v1", "kelly", {"status": "settled", "stake": 100, "returned": 9999, "hits": []})
+    led.commit()
+    led.close()
+    out = run_live(paths)
+    assert out["predicted"] == 22 and not out.get("failed")
+    led = Ledger(paths.ledger_path, read_only=True)
+    got = {(p["race_key"], p["method"]): p for p in led.predictions()}
+    led.close()
+    it = got[(RK, "int_market_ml_mam")]
+    assert "mam" not in it["inputs_used"] and not it["formal_probability"] and any("使えない" in r for r in it["reasons"])
+    assert all(not a["stakes"] for a in it["allocation"].values())
+    assert got[(RK2, "ml_lgbm")]["odds_gate"]["pass"]
+    for rk in (RK, RK2):
+        col._save(rk, "result", "result", "/JRADB/x", "c", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
+    out = run_live(paths)
+    assert out["settled"] == 2 * 3 * 5 and not out.get("failed")
+    assert "保存済み" in (tmp_path / "live" / "held.json").read_text()
+    assert "text_ai" not in set(wallet_summary(paths)["method"])
+    rev = build_review(paths, "2025-08")
+    assert "text_ai" not in {a["method"] for a in rev["accuracy"]} | {w["method"] for w in rev["wallets"]}
+
+
+def test_good_saved_prediction_is_still_used(tmp_path, monkeypatch):
+    from keiba.ledger import Ledger
+    paths, col = _two_races(tmp_path, monkeypatch, trio=_no_vote_page())
+    _stored_mam(paths)
+    assert run_live(paths)["predicted"] == 22
+    led = Ledger(paths.ledger_path, read_only=True)
+    it = next(p for p in led.predictions() if p["race_key"] == RK and p["method"] == "int_market_ml_mam")
+    led.close()
+    assert "mam" in it["inputs_used"]
+    col._save(RK, "result", "result", "/JRADB/x", "c", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
+    run_live(paths)
+    assert "text_ai" in set(wallet_summary(paths)["method"])
+
+
+def test_broken_saved_settlement_is_not_counted(tmp_path, monkeypatch):
+    from keiba.ledger import Ledger
+    from keiba.review import build_review
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    _stored_mam(paths)
+    led = Ledger(paths.ledger_path)
+    for i, bad in enumerate(({"stake": NAN, "returned": 0}, {"stake": 100, "returned": -5}, {"stake": "100", "returned": 0})):
+        led.add_settlement(RK, "1h", "text_ai", "live-mam-v1", f"w{i}", {"status": "settled", "hits": [], **bad})
+    led.commit()
+    led.close()
+    assert not len(wallet_summary(paths)) and not build_review(paths, "2025-08")["wallets"]
+
+
+@pytest.mark.parametrize("where", ["pool", "model", "allocate", "ledger", "settle"])
+def test_unexpected_error_skips_only_that_race(tmp_path, monkeypatch, where):
+    """根本：どの段で想定外の例外が出ても、その1レースだけ飛ばし、失敗として返す。次の回にやり直せる。"""
+    from keiba.ledger import Ledger
+    from keiba.live import wallet
+    paths, col = _two_races(tmp_path, monkeypatch)
+    if where == "settle":
+        run_live(paths)
+        for rk in (RK, RK2):
+            col._save(rk, "result", "result", "/JRADB/x", "c", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
+    orig_add, orig_settle = Ledger.add_prediction, Ledger.add_settlement
+    current = {}
+    with monkeypatch.context() as mp:
+        def boom(*a, **k):
+            raise RuntimeError("想定外")
+        if where == "ledger":
+            mp.setattr(Ledger, "add_prediction", lambda self, rk, *a: boom() if rk == RK else orig_add(self, rk, *a))
+        elif where == "settle":
+            mp.setattr(Ledger, "add_settlement", lambda self, rk, *a: boom() if rk == RK else orig_settle(self, rk, *a))
+        else:
+            orig_models = wallet._models
+            calls = iter(range(100))
+            mp.setattr(wallet, "_models", lambda *a: (current.update(i=next(calls)), orig_models(*a))[1])
+            name = {"pool": "pool", "allocate": "allocate", "model": None}[where]
+            if name:
+                real = getattr(wallet, name)
+                mp.setattr(wallet, name, lambda *a, **k: boom() if current["i"] == 0 else real(*a, **k))
+            else:
+                real = wallet.ev.predict_race
+                mp.setattr(wallet.ev, "predict_race", lambda *a, **k: boom() if current["i"] == 0 else real(*a, **k))
+        out = run_live(paths)
+    tag = f"{RK}|result" if where == "settle" else f"{RK}|1h"
+    assert out["failed"] == [tag] and "想定外" in (tmp_path / "live" / "held.json").read_text()
+    led = Ledger(paths.ledger_path, read_only=True)
+    n = sum(p["race_key"] == RK2 for p in led.predictions())
+    s = sum(x["race_key"] == RK2 for x in led.settlements())
+    led.close()
+    assert n == 11 and (where != "settle" or s == 15)
+    again = run_live(paths)
+    assert not again.get("failed")
+    led = Ledger(paths.ledger_path, read_only=True)
+    assert sum(p["race_key"] == RK for p in led.predictions()) == 11
+    led.close()
+
+
+def test_partial_failure_is_notified_after_saving(tmp_path, monkeypatch):
+    """飛ばしたレースは黙って捨てない：まむへの入力まで作ってから通知する。"""
+    import types
+    from keiba import cli
+    from keiba.live import collector, mam, wallet
+    told, exported = [], []
+    monkeypatch.setattr(collector.Collector, "tick", lambda self, **k: (self.state.update(live_pending=True), {"saved": 1})[1])
+    monkeypatch.setattr(wallet, "run_live", lambda p: {"predicted": 11, "settled": 0, "failed": [f"{RK}|1h"]})
+    monkeypatch.setattr(mam, "export_packets", lambda p: exported.append(1) or [])
+    monkeypatch.setattr(cli, "_notify", lambda title, detail: told.append((title, detail)))
+    (tmp_path / "live").mkdir()
+    cli.cmd_collect(Paths(data_dir=tmp_path), types.SimpleNamespace(action="tick"))
+    assert exported and told and "東京|11" in told[0][1]
+
+
+@pytest.mark.parametrize("text", [
+    "0.99999999999999999", "1.000000000000001", "999999.90000000001", "999,999.91", "2.00000000000000001", "2.50", "2.",
+    "１６.０", "١٦", "1e2", "00000001.0", "0.9", "1,000,000.0",
+])
+def test_odds_digits_are_explicit(text):
+    """要修正1：小数1桁までの半角だけ。長い小数を丸めて境目を越えさせない（単勝も同じ）。"""
+    full = list(range(1, N + 1))
+    assert jra._num(text) is None
+    assert not jra.parse_trio_odds(trio_html().replace("<td>16.0</td>", f"<td>{text}</td>", 1), full)["ok"]
+    assert not jra.parse_win_odds(win_html(cell=lambda k: text if k == 1 else 2.0 + k), full)["ok"]
+
+
+@pytest.mark.parametrize("text,value", [("1", 1.0), ("1.0", 1.0), ("2.4", 2.4), ("99,999.9", 99999.9), ("99999.9", 99999.9), ("999,999.9", 999999.9)])
+def test_displayed_odds_round_trip_exactly(text, value):
+    from fractions import Fraction
+    assert jra._num(text) == value and Fraction(str(jra._num(text))) == Fraction(text.replace(",", ""))
+
+
+def test_one_bad_mam_item_does_not_stop_the_batch(tmp_path, monkeypatch):
+    from keiba.live.mam import import_predictions
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    base = {"schema": "keiba-mam-prediction-v1", "time_point": "1h", "generated_at": "2025-08-30T14:35:00+09:00"}
+    f = tmp_path / "p.json"
+    f.write_text(json.dumps([dict(base, race_key=RK, trios=[{"combo": "a-b-c"}]), "こわれた", dict(base, race_key=RK2, ranking=[1, 2, 3])]))
+    out = import_predictions(paths, f)
+    assert out["accepted"] == 1 and len(out["rejected"]) == 2

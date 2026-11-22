@@ -142,6 +142,8 @@ def cmd_collect(paths, args):
                     from datetime import date
                     from .review import write_review
                     write_review(paths, date.today().strftime("%Y-%m"))
+                if out["live"].get("failed"):  # 読めたレースは保存済み。飛ばしたレースは黙って捨てずに知らせる
+                    raise RuntimeError("一部のレースだけ失敗：" + "、".join(out["live"]["failed"][:5]))
             except Exception as exc:  # 予想の失敗で収集を止めない
                 out["live_error"] = repr(exc)
                 _notify("予想・精算に失敗", repr(exc)[:120])
