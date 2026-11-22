@@ -46,7 +46,7 @@ def prediction_problem(p) -> str | None:
         horses = p.get("horses")
         if not isinstance(horses, list) or not all(isinstance(h, dict) and type(h.get("n")) is int for h in horses):
             return "馬の一覧が読めない"
-        roster = {h["n"] for h in horses}
+        roster = {h["n"] for h in horses} or None  # 一覧が空なら名簿とは照らさない（金額・確率は見る。統合では今の出走馬と照らす）
         if not isinstance(p.get("race_date"), str):
             return "開催日が読めない"
         if not all(h.get("coverage") is None or (_num(h["coverage"]) and 0 <= h["coverage"] <= 1 + EPS) for h in horses):

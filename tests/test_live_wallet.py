@@ -1223,3 +1223,12 @@ def test_pool_survives_smallest_probability():
     from keiba.integrate import pool
     out = pool({"a": {"1-2-3": math.ulp(0.0), "1-2-4": 0.0, "1-2-5": 1.0}}, {"a": 0.2})
     assert len(out) == 3 and all(math.isfinite(v) and v > 0 for v in out.values())
+
+
+def test_saved_row_without_horses_still_checks_numbers():
+    from keiba.live.saved import prediction_problem
+    p = {"race_date": "2025-08-30", "horses": [], "trios": [{"combo": "1-2-3", "p": 0.1}],
+         "allocation": {"kelly": {"stakes": {"1-2-3": 100}}}}
+    assert prediction_problem(p) is None
+    assert prediction_problem({**p, "trios": [{"combo": "1-2-3", "p": NAN}]})
+    assert prediction_problem({**p, "allocation": {"kelly": {"stakes": {"1-2-3": -100}}}})
