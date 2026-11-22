@@ -144,3 +144,5 @@ def test_review_is_rebuilt_after_interruption(two, monkeypatch, where):
     assert saved(paths, "settlements") and not written
     cli.cmd_collect(paths, types.SimpleNamespace(action="tick"))
     assert written
+    state = Collector(col.root, client=None)
+    assert not state.live_pending() and not state.state.get("live_running")   # 正常に終わったら印が消える
