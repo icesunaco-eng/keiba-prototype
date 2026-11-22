@@ -145,9 +145,9 @@ def odds_gate(trio: dict, trio_rec, race: dict, tp: str) -> dict:
     else:
         g["fetched_at"], g["snapshot_sha256"] = trio_rec["fetched_at"], trio_rec["sha256"]
         g["odds_time"] = trio.get("odds_time")
-        if trio.get("implausible"):
+        if trio.get("implausible"):  # 組のずれ・重複もあれば、理由は両方残す
             reasons.append(f"票数なし{len(trio['no_votes'])}組を除くと倍率の逆数の合計が1未満（倍率が欠けている）")
-        elif not trio.get("ok"):
+        if not trio.get("ok") and not (trio.get("implausible") and trio.get("complete")):
             reasons.append(f"組が出走馬の全組と合わない（{trio.get('found')}/{trio.get('expected')}・重複{trio.get('duplicates')}"
                            f"・余分{trio.get('extra', 0)}・不足{trio.get('missing', 0)}）")
         dl = deadline(race["race_date"], race["post_time"], tp)

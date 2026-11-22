@@ -64,6 +64,9 @@ def export_packets(paths) -> list[Path]:
     return written
 
 
+PROB_MAX = 1e6  # p は合計1でなくてよいが、足して桁あふれしない範囲（百分率や点数でも足りる）
+
+
 class Rejected(Exception):
     pass
 
@@ -93,7 +96,16 @@ def _validate(pred: dict, state: dict, inputs: dict) -> tuple[dict, list]:
         combo = sorted(int(x) for x in t["combo"].split("-"))
         if len(set(combo)) != 3 or not set(combo) <= nums:
             raise Rejected(f"三連複の組が出走馬と合わない：{t['combo']}")
-        trios.append(("-".join(map(str, combo)), float(t["p"]) if t.get("p") is not None else None))
+        p = t.get("p")
+        if p is not None:
+            # 非数・無限大・負・合計0や桁あふれは、統合の計算が止まって、ほかのレースの予想も道連れになる
+            if isinstance(p, bool) or not isinstance(p, (int, float)) or not 0 <= p <= PROB_MAX:
+                raise Rejected(f"p は0以上の有限の数（合計1でなくてよい）：{t['combo']} {p!r}")
+            p = float(p)
+        trios.append(("-".join(map(str, combo)), p))
+    given = {c: p for c, p in trios if p is not None}
+    if given and not sum(given.values()) > 0:
+        raise Rejected("trios の p の合計が0")
     if not ranking and not trios:
         raise Rejected("ranking か trios のどちらかが要る")
     return {"race": r, "nums": nums, "ranking": ranking, "trios": trios, "gen": gen}, sorted(nums)

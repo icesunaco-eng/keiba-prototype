@@ -868,3 +868,125 @@ def test_no_votes_combo_is_never_bought(tmp_path, monkeypatch):
         assert not p[m]["formal_probability"] and p[m]["trio_probs_full"] is None
         assert all(a["status"] == "not_allocated" and not a["stakes"] for a in p[m]["allocation"].values())
         assert any("票数なし" in r for r in p[m]["reasons"])
+
+
+# ---- みに💚20261122-2（PR #18）の指摘 ----
+def _partly_no_votes(keep, value):
+    import re
+    count = iter(range(1000))
+    return re.sub(r"<td>[\d.]+</td>", lambda m: f"<td>{value}</td>" if next(count) < keep else NO_VOTES, trio_html())
+
+
+@pytest.mark.parametrize("value", ["0." + "0" * 309 + "1", "0.0000001", "0.5", "0.99"])
+def test_odds_below_one_are_rejected(value):
+    """重大1：極小の倍率（逆数が無限大になる）と、1倍未満の倍率は読まない。単勝も同じ。"""
+    full = list(range(1, N + 1))
+    t = jra.parse_trio_odds(_partly_no_votes(1, value), full)
+    assert not t["ok"] and not t["odds"] and t["unreadable"] == 1
+    assert not jra.parse_trio_odds(trio_html().replace("<td>16.0</td>", f"<td>{value}</td>", 1), full)["ok"]
+    assert not jra.parse_win_odds(win_html(cell=lambda k: value if k == 1 else 2.0 + k), full)["ok"]
+
+
+def test_payback_floor_odds_are_still_read():
+    from keiba.allocate import allocate
+    assert jra._num("1.0") == 1.0 and jra._num("99999.9") == 99999.9
+    for m in ("equal_payout", "ev_weighted", "kelly"):
+        assert allocate({"1-2-3": 1.0}, {"1-2-3": 1.0}, m).total == 0
+
+
+def test_tiny_odds_race_does_not_stop_next_race(tmp_path, monkeypatch):
+    """重大1：異常な倍率のレースがあっても、その回のほかのレースの予想・配分は続く。"""
+    from keiba.ledger import Ledger
+    orig = jra.parse_card
+    monkeypatch.setattr(jra, "parse_card",
+                        lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)])
+    paths, col = _setup(tmp_path, trio=_partly_no_votes(1, "0." + "0" * 309 + "1"))
+    rk2 = "2025-08-30|東京|12"
+    col.state["races"][rk2] = dict(col.state["races"][RK], race_number=12, post_time="15:42")
+    for kind, page in (("card", card_html([f"H{h:04d}" for h in range(N)])), ("odds_win", win_html()), ("odds_trio", trio_html())):
+        col._save(rk2, kind, "1h", "/JRADB/x", "c", page)
+    col._write_state()
+    run_live(paths)
+    led = Ledger(paths.ledger_path, read_only=True)
+    got = {(p["race_key"], p["method"]): p for p in led.predictions()}
+    led.close()
+    assert len([k for k in got if k[0] == RK]) == len([k for k in got if k[0] == rk2]) == 11
+    assert not got[(RK, "ml_lgbm")]["odds_gate"]["pass"] and got[(rk2, "ml_lgbm")]["odds_gate"]["pass"]
+
+
+@pytest.mark.parametrize("cell", [
+    '<td class="zero cancel">票数なし</td>', '<td class="warning zero">票数なし</td>',
+    '<td class="warning&nbsp;zero">票数なし</td>', '<td class="zero&nbsp;">票数なし</td>', '<td class="ZERO">票数なし</td>',
+    '<td class="zero">　票数なし　</td>', '<td class="zero">&nbsp;票数なし</td>', '<td class="zero">票数 なし</td>',
+    '<td class="zero"><span>票数なし</span></td>', '<td class="zero">票数なし<br></td>',
+    '<td class="zero">16.0</td>', '<td class="zero cancel">16.0</td>',
+])
+def test_no_votes_marker_is_exact_raw_form(cell):
+    """要修正1：class と文字は生の形でぴったり。印と倍率が食い違う欄も読まない。"""
+    assert not jra.parse_trio_odds(_no_vote_page(cell), list(range(1, N + 1)))["ok"]
+
+
+def test_no_votes_allows_html_whitespace_only():
+    assert jra.parse_trio_odds(_no_vote_page('<td class="zero">\r\n  票数なし\t</td>'), list(range(1, N + 1)))["ok"]
+
+
+@pytest.mark.parametrize("keep,value,ok", [
+    (49, "49.0", True), (49, "48.9", True), (49, "49.1", False), (16, "16.0", True), (7, "7.0", True),
+    (3, "3.0", True), (55, "55.0", True), (55, "55.1", False), (1, "1.0", True),
+])
+def test_inverse_sum_boundary_is_exact(keep, value, ok):
+    """要修正2：逆数の合計がちょうど1なら合格（小数の誤差で落とさない）。"""
+    t = jra.parse_trio_odds(_partly_no_votes(keep, value), list(range(1, N + 1)))
+    assert t["ok"] == ok and t["implausible"] != ok
+
+
+def test_gate_keeps_both_reasons(tmp_path):
+    """提案1：逆数の合計1未満と、重複・不足が同時にあれば理由は両方。片方だけなら1つ。"""
+    page = _partly_no_votes(49, "60.0")
+    r = _gate(tmp_path / "a", trio=page)
+    assert "1未満" in r["reasons"] and "重複" not in r["reasons"]
+    three = '<tr><th scope="row">3</th><td>60.0</td></tr>'
+    four = '<tr><th scope="row">4</th><td>60.0</td></tr>'
+    r = _gate(tmp_path / "b", trio=page.replace(three, three + three, 1).replace(four, "", 1))
+    assert not r["pass"] and all(w in r["reasons"] for w in ("1未満", "重複1", "不足1"))
+
+
+def test_reference_integration_is_not_scored(tmp_path, monkeypatch):
+    """要修正3：参考表示の統合は月次の当たり具合に数えない。"""
+    from keiba.review import build_review
+    orig = jra.parse_card
+    monkeypatch.setattr(jra, "parse_card",
+                        lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)])
+    paths, col = _setup(tmp_path, trio=_no_vote_page())
+    rk2 = "2025-08-30|東京|12"
+    col.state["races"][rk2] = dict(col.state["races"][RK], race_number=12, post_time="15:42")
+    for kind, page in (("card", card_html([f"H{h:04d}" for h in range(N)])), ("odds_win", win_html()), ("odds_trio", trio_html())):
+        col._save(rk2, kind, "1h", "/JRADB/x", "c", page)
+    col._write_state()
+    run_live(paths)
+    for rk in (RK, rk2):
+        col._save(rk, "result", "result", "/JRADB/x", "c", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
+    run_live(paths)
+    acc = {a["method"]: a["races"] for a in build_review(paths, "2025-08")["accuracy"]}
+    assert acc["ml_lgbm"] == 2 and acc["int_market"] == acc["int_market_ml"] == 1
+    assert "int_market_ml_mam" not in acc  # まむ抜きの参考予想も、まむ入りの成績にしない
+
+
+@pytest.mark.parametrize("ps,ok", [
+    ([float("nan")], False), ([float("inf")], False), ([-0.1, 0.3], False), ([0.0, 0.0], False), ([1e308, 1e308], False),
+    (["0.3"], False), ([True], False), ([10 ** 400], False), ([0.08, 0.05], True), ([8, 5], True), ([0.0, 0.2], True),
+])
+def test_mam_probability_must_be_finite(tmp_path, monkeypatch, ps, ok):
+    """同じ穴：まむの確率の非数・無限大・桁あふれで、統合の計算が止まらない。"""
+    from keiba.live.mam import import_predictions
+    orig = jra.parse_card
+    monkeypatch.setattr(jra, "parse_card",
+                        lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)])
+    paths, _ = _setup(tmp_path)
+    f = tmp_path / "p.json"
+    f.write_text(json.dumps({"schema": "keiba-mam-prediction-v1", "race_key": RK, "time_point": "1h",
+                             "generated_at": "2025-08-30T14:35:00+09:00",
+                             "trios": [{"combo": c, "p": p} for c, p in zip(("1-2-3", "1-2-4"), ps)]}))
+    assert (import_predictions(paths, f)["accepted"] == 1) == ok
+    if ok:
+        run_live(paths)
