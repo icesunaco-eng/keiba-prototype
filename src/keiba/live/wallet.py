@@ -325,6 +325,10 @@ def run_live(paths, log=print) -> dict:
             g = g[g["horse_number"].isin([c["horse_number"] for c in inp["card"]])]
             if len(g) < 3:
                 continue
+            if sorted(g["horse_number"].astype(int)) != sorted(int(c["horse_number"]) for c in inp["card"]):
+                # 結果で除外と分かった馬は特徴から抜ける。頭数の違う確率と倍率を混ぜた予想を作らない
+                held[f"{rk}|{tp}"] = "出馬表の出走馬と、予想に使える馬が合わない"
+                continue
             g = g.assign(live_win_odds=g["horse_number"].map(inp["win"]["odds"]) if inp["win"]["ok"] else np.nan)
             models = _models(paths, hist, "1h" if tp == "15m" else tp, str(g["race_date"].iloc[0].date()))
             for m in (*WALLET_METHODS, *RULE_METHODS):

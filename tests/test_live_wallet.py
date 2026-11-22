@@ -1178,3 +1178,12 @@ def test_one_bad_mam_item_does_not_stop_the_batch(tmp_path, monkeypatch):
     f.write_text(json.dumps([dict(base, race_key=RK, trios=[{"combo": "a-b-c"}]), "こわれた", dict(base, race_key=RK2, ranking=[1, 2, 3])]))
     out = import_predictions(paths, f)
     assert out["accepted"] == 1 and len(out["rejected"]) == 2
+
+
+def test_roster_shrunk_by_result_makes_no_prediction(tmp_path, monkeypatch):
+    """同じ穴：結果で除外と分かった馬が抜けた頭数と、全頭ぶんの倍率を混ぜない（実台帳に82件あった形）。"""
+    paths, col = _two_races(tmp_path, monkeypatch)
+    page = result_html([3, 1, 2, 4, 5, 6, 7, 8]).replace('<td class="place">8</td>', '<td class="place">除外</td>')
+    col._save(RK, "result", "result", "/JRADB/x", "c", page)
+    out = run_live(paths)
+    assert out["predicted"] == 11 and "合わない" in (tmp_path / "live" / "held.json").read_text()
