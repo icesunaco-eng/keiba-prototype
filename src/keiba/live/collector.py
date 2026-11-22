@@ -229,10 +229,14 @@ class Collector:
         rec = {"race_key": race_key, "kind": kind, "time_point": tp, "fetched_at": ts.isoformat(timespec="seconds"),
                "path": str((d / name).relative_to(self.root)), "sha256": hashlib.sha256(body).hexdigest(),
                "source": jra.BASE + path, "cname": cname}
-        append_lines(self.root / "snapshots.jsonl", [json.dumps(rec, ensure_ascii=False)])
+        self._append_index(rec)
         if race_key:
             self.state["live_pending"] = True   # 予想・精算がまだ（成功するまで毎回やり直す）
         return rec
+
+    def _append_index(self, rec: dict):
+        """snapshots.jsonl に1行足す。前の書き込みが改行の前で切れていたら、先に改行を入れて次の行とつながらないようにする。"""
+        append_lines(self.root / "snapshots.jsonl", [json.dumps(rec, ensure_ascii=False)])
 
     def _write_state(self):
         tmp = self.state_path.with_suffix(".tmp")
@@ -355,7 +359,7 @@ class Collector:
             if not odds_links:
                 saved.append({"race_key": rk, "kind": "odds_unavailable", "time_point": tp,
                               "fetched_at": self.now().isoformat(timespec="seconds"), "odds_status": r.get("odds_status")})
-                append_lines(self.root / "snapshots.jsonl", [json.dumps(saved[-1], ensure_ascii=False)])
+                self._append_index(saved[-1])
             else:
                 path, cname = odds_links[0]
                 first = self.client.get(path, cname)
