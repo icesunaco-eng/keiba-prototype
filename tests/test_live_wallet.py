@@ -791,3 +791,80 @@ def test_clock_skew_tolerance_across_midnight(fetched, odds_time, ok):
     from keiba.live.wallet import time_reasons
     race = {"race_date": "2025-09-01", "post_time": "15:40"}
     assert (not time_reasons(odds_time, fetched, race, "24h")) == ok
+
+
+NO_VOTES = '<td class="zero">票数なし</td>'
+
+
+def _no_vote_page(cell=NO_VOTES, page=None):
+    """1-2-3 の組の倍率の欄を cell に差し替えたページ。"""
+    return (page or trio_html()).replace("<td>16.0</td>", cell, 1)
+
+
+def test_no_votes_combo_counts_but_has_no_odds():
+    """実物（2026-11-22 東京3R）：票数なしは組として数え、倍率は持たない。"""
+    t = jra.parse_trio_odds(_no_vote_page(), list(range(1, N + 1)))
+    assert t["ok"] and t["found"] == t["expected"] == 56 and t["no_votes"] == ["1-2-3"]
+    assert "1-2-3" not in t["odds"] and len(t["odds"]) == 55 and t["unreadable"] == 0
+    assert jra.parse_trio_odds(_no_vote_page(), N)["ok"]  # 頭数で照らすときも同じ
+
+
+@pytest.mark.parametrize("cell", [
+    "<td>票数なし</td>", '<td class="zero"></td>', '<td class="zero">---</td>', '<td class="zero">取消</td>',
+    '<td class="zero">票数なし（予定）</td>', '<td class="nonzero">票数なし</td>', '<td class="cancel">票数なし</td>',
+    '<td class="zero">票数なし</td><td>16.0</td>', '<td class="zero"><table><tr><td>票数なし</td></tr></table></td>',
+])
+def test_only_exact_no_votes_cell_is_accepted(cell):
+    assert not jra.parse_trio_odds(_no_vote_page(cell), list(range(1, N + 1)))["ok"]
+
+
+@pytest.mark.parametrize("first", [True, False])
+def test_no_votes_does_not_hide_duplicates(first):
+    rows = [f'<tr><th scope="row">3</th>{NO_VOTES}</tr>', '<tr><th scope="row">3</th><td>16.0</td></tr>']
+    page = trio_html().replace(rows[1], "".join(rows if first else rows[::-1]), 1)
+    t = jra.parse_trio_odds(page, list(range(1, N + 1)))
+    assert not t["ok"] and t["duplicates"] == 1
+
+
+def test_no_votes_does_not_hide_wrong_roster():
+    assert not jra.parse_trio_odds(_no_vote_page(), [1, 2, 4, 5, 6, 7, 8])["ok"]  # 取消の馬の組が票数なしでも余分
+    assert not jra.parse_trio_odds(_no_vote_page(), list(range(1, N + 2)))["ok"]
+
+
+@pytest.mark.parametrize("keep", [0, 1, 5])
+def test_mostly_no_votes_page_is_rejected(tmp_path, keep):
+    """倍率の逆数の合計が1未満になるほど票数なしなら、倍率が欠けているので使わない。"""
+    import re
+    count = iter(range(1000))
+    page = re.sub(r"<td>[\d.]+</td>", lambda m: m.group(0) if next(count) < keep else NO_VOTES, trio_html())
+    assert not jra.parse_trio_odds(page, list(range(1, N + 1)))["ok"]
+    r = _gate(tmp_path, trio=page)
+    assert not r["pass"] and "1未満" in r["reasons"]
+
+
+def test_no_votes_gate_records_count(tmp_path):
+    r = _gate(tmp_path, trio=_no_vote_page())
+    assert r["pass"] and r["trio"] == "56/56" and r["no_votes"] == 1
+
+
+def test_no_votes_combo_is_never_bought(tmp_path, monkeypatch):
+    """学習の財布はほかの組を使い、票数なしの組は買わない。統合は扱いが決まるまで参考表示。"""
+    import re
+    from keiba.ledger import Ledger
+    orig = jra.parse_card
+    monkeypatch.setattr(jra, "parse_card",
+                        lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)])
+    flat = re.sub(r"<td>[\d.]+</td>", "<td>45.0</td>", trio_html())  # 期待値が1を超える組が出る倍率
+    combo = "1-2-3"
+    paths, _ = _setup(tmp_path, trio=flat.replace("<td>45.0</td>", NO_VOTES, 1))
+    run_live(paths)
+    led = Ledger(paths.ledger_path, read_only=True)
+    p = {x["method"]: x for x in led.predictions()}
+    led.close()
+    stakes = [a["stakes"] for m in ("ml_lgbm", "ml_market") for a in p[m]["allocation"].values()]
+    assert p["ml_lgbm"]["odds_gate"]["pass"] and any(stakes) and all(combo not in s for s in stakes)
+    assert combo in p["ml_lgbm"]["trio_probs_full"]  # 予想の確率は全組のまま
+    for m in ("int_market", "int_market_ml", "int_market_ml_mam"):
+        assert not p[m]["formal_probability"] and p[m]["trio_probs_full"] is None
+        assert all(a["status"] == "not_allocated" and not a["stakes"] for a in p[m]["allocation"].values())
+        assert any("票数なし" in r for r in p[m]["reasons"])

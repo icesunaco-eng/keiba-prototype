@@ -137,14 +137,17 @@ def time_reasons(odds_time, fetched_at: str, race: dict, tp: str, label: str = "
 def odds_gate(trio: dict, trio_rec, race: dict, tp: str) -> dict:
     """三連複オッズの合格判定（週末の確認の物差し）。"""
     g = {"trio_found": trio.get("found"), "trio_expected": trio.get("expected"), "duplicates": trio.get("duplicates"),
-         "unreadable": trio.get("unreadable"), "extra": trio.get("extra"), "missing": trio.get("missing"), "fetched_at": None, "odds_time": None, "snapshot_sha256": None}
+         "unreadable": trio.get("unreadable"), "extra": trio.get("extra"), "missing": trio.get("missing"),
+         "no_votes": trio.get("no_votes", []), "fetched_at": None, "odds_time": None, "snapshot_sha256": None}
     reasons = []
     if trio_rec is None:
         reasons.append("三連複オッズのページが無い")
     else:
         g["fetched_at"], g["snapshot_sha256"] = trio_rec["fetched_at"], trio_rec["sha256"]
         g["odds_time"] = trio.get("odds_time")
-        if not trio.get("ok"):
+        if trio.get("implausible"):
+            reasons.append(f"票数なし{len(trio['no_votes'])}組を除くと倍率の逆数の合計が1未満（倍率が欠けている）")
+        elif not trio.get("ok"):
             reasons.append(f"組が出走馬の全組と合わない（{trio.get('found')}/{trio.get('expected')}・重複{trio.get('duplicates')}"
                            f"・余分{trio.get('extra', 0)}・不足{trio.get('missing', 0)}）")
         dl = deadline(race["race_date"], race["post_time"], tp)
@@ -416,6 +419,11 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) ->
         reasons, sources, formal = [], {}, True
         if gate["pass"]:
             sources["market"] = market_probs(inp["trio"]["odds"])
+            if inp["trio"].get("no_votes"):
+                # 欠けた組の確率の埋め方は、あいすとの取り決めに無い。決まるまで統合は参考表示だけ（配分・成績の比較に入れない）
+                formal = False
+                reasons.append(f"市場推定確率：票数なしが{len(inp['trio']['no_votes'])}組あり、全組の確率がそろわない"
+                               "（扱いが決まるまで正式な確率にしない。参考表示）")
         else:
             reasons.append("市場推定確率：三連複オッズが合格していない（" + " / ".join(gate.get("reasons", [])) + "）")
         if "ml" in w:
@@ -471,6 +479,7 @@ def odds_check(paths) -> pd.DataFrame:
         g = inp["gate"]
         rows.append({"race_key": rk, "time_point": tp, "deadline": g.get("deadline"), "pass": g["pass"], "reasons": " / ".join(g["reasons"]),
                      "trio": f"{g.get('trio_found')}/{g.get('trio_expected')}", "duplicates": g.get("duplicates"),
+                     "no_votes": len(g.get("no_votes") or []),
                      "odds_time": g.get("odds_time"), "fetched_at": g.get("fetched_at"),
                      "scratched_known": ",".join(map(str, inp["scratched"])), "snapshot_sha256": g.get("snapshot_sha256")})
     return pd.DataFrame(rows)

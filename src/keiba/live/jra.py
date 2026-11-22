@@ -351,9 +351,11 @@ def _expected_set(horses) -> tuple[set[str] | None, int | None]:
 def parse_trio_odds(page: str, horses) -> dict:
     """三連複オッズ（"a-b-c" → 倍）。実物（2026-11-21 確認）の三連複の表（class に fuku3）だけを読む。
     表の見出し（caption）がちょうど「a-b」の形、行は「馬番の th が1つ・倍率の td が1つ」の形だけ使う。
-    読めた組が「出走馬（取消を除く）の全組」とぴったり同じとき（多くも少なくもなく、重複なし）だけ ok=True。"""
+    読めた組が「出走馬（取消を除く）の全組」とぴったり同じとき（多くも少なくもなく、重複なし）だけ ok=True。
+    票数なし（実物 2026-11-22 東京3R：<td class="zero">票数なし</td>）は「組はあるが倍率なし」：
+    組としては数え、odds には入れない（買わない）。欄の class と文字の両方がぴったりのときだけ。"""
     doc = lxml_html.fromstring(page)
-    odds, dups, bad, seen = {}, 0, 0, set()
+    odds, dups, bad, seen, no_votes = {}, 0, 0, set(), set()
     nested = _nested(doc)  # 実物のオッズのページには入れ子の表が無い。あれば全体を不合格にする
     for table in ([] if nested else doc.xpath(f"//table[{_has_class('fuku3')}]")):
         cap = table.xpath("./caption")
@@ -382,20 +384,33 @@ def parse_trio_odds(page: str, horses) -> dict:
                 bad += 1
                 continue
             key = "-".join(map(str, sorted(head + [third])))
+            if _is_no_votes(tds[0]):
+                no_votes.add(key)
+                continue
             if v is None:
                 bad += 1  # 「取消」「---」など
                 continue
             odds[key] = v
     want, expected = _expected_set(horses)
+    combos = set(odds) | no_votes
+    # 票数なしを除いた倍率の逆数の合計は、払戻率が100%以下なら1以上になる（実物の97ページでは最小1.334）。
+    # 1未満なら、票のある組まで「票数なし」に読めている（倍率が欠けている）ので使わない
+    implausible = bool(no_votes) and sum(1 / v for v in odds.values()) < 1
+    sound = dups == 0 and not nested and not implausible
     if want is not None:
-        extra, missing = sorted(set(odds) - want), sorted(want - set(odds))
-        ok = bool(want) and not extra and not missing and dups == 0 and not nested
+        extra, missing = sorted(combos - want), sorted(want - combos)
+        ok = bool(want) and not extra and not missing and sound
     else:
         extra, missing = [], []
-        ok = expected is not None and len(odds) == expected and dups == 0 and not nested
-    return {"odds": odds, "ok": ok, "expected": expected, "found": len(odds), "duplicates": dups, "unreadable": bad,
+        ok = expected is not None and len(combos) == expected and sound
+    return {"odds": odds, "ok": ok, "expected": expected, "found": len(combos), "duplicates": dups, "unreadable": bad,
+            "no_votes": sorted(no_votes), "implausible": implausible,
             "nested_table": nested,
             "extra": len(extra), "missing": len(missing), "extra_examples": extra[:5], "missing_examples": missing[:5]}
+
+
+def _is_no_votes(td) -> bool:
+    return "zero" in (td.get("class") or "").split() and _t(td) == "票数なし"
 
 
 _ODDS_TIME = re.compile(r"(\d{1,2})時(\d{2})分現在オッズ")
