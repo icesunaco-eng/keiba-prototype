@@ -16,7 +16,7 @@ def pool(method_probs: dict[str, dict[str, float]], weights: dict[str, float]) -
     used = {m: p for m, p in method_probs.items() if weights.get(m, 0) > 0 and p}
     if not used:
         return {}
-    combos = set().union(*used.values())
+    combos = sorted(set().union(*used.values()))  # 集合の並びは起動ごとに変わる。同率の順位・上位20組・保存値を毎回同じにする
     floor = {m: min(v for v in p.values() if v > 0) / 2 for m, p in used.items()}
     logp = {c: sum(weights[m] * math.log(p.get(c) or floor[m]) for m, p in used.items()) for c in combos}
     top = max(logp.values())

@@ -1187,3 +1187,31 @@ def test_roster_shrunk_by_result_makes_no_prediction(tmp_path, monkeypatch):
     col._save(RK, "result", "result", "/JRADB/x", "c", page)
     out = run_live(paths)
     assert out["predicted"] == 11 and "合わない" in (tmp_path / "live" / "held.json").read_text()
+
+
+@pytest.mark.parametrize("cell", [
+    '<td class="zero" class="cancel">票数なし</td>', '<td class="cancel" class="zero">16.0</td>',
+    "<td class='zero' CLASS=cancel>票数なし</td>", '<td class="zero"class="x">票数なし</td>', '<td title=">" class="zero" class="x">票数なし</td>',
+])
+def test_duplicated_class_attribute_is_rejected(cell):
+    """同じ穴：class が2回ある欄は、読み取り部品が片方を捨てるので、ページごと使わない。"""
+    full = list(range(1, N + 1))
+    assert not jra.parse_trio_odds(_no_vote_page(cell), full)["ok"]
+    assert not jra.parse_win_odds(win_html().replace('<td class="odds_tan">', '<td class="odds_tan" class="cancel">', 1), full)["ok"]
+    assert jra.parse_card(card_html(["H0"] * N).replace('<td class="num">', '<td class="num" class="x">', 1)).problems
+
+
+def test_class_word_inside_other_attributes_is_fine():
+    page = _no_vote_page().replace('<th scope="row">', '<th data-class="a" title="class=x" scope="row">', 1)
+    assert jra.parse_trio_odds(page, list(range(1, N + 1)))["ok"]
+
+
+def test_tie_order_does_not_depend_on_process():
+    """同じ穴：同率の組の順位が、起動ごとの集合の並びで変わらない。"""
+    import os, subprocess, sys
+    code = ("from keiba.integrate import pool; from itertools import combinations as c; "
+            "print(list(pool({'m': {'-'.join(map(str, x)): 1/56 for x in c(range(1, 9), 3)}}, {'m': 1.0}))[:20])")
+    runs = {subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
+                           env={**os.environ, "PYTHONHASHSEED": str(seed), "PYTHONPATH": os.pathsep.join(sys.path)}).stdout
+            for seed in range(4)}
+    assert len(runs) == 1

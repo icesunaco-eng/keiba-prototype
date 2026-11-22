@@ -123,6 +123,8 @@ def parse_card(page: str) -> list[dict]:
     tables = [t for t in doc.xpath("//table") if _entry_rows(t)]
     if _nested(doc):
         rows.problems.append("出馬表のページに入れ子の表がある")
+    if _dup_class(page):
+        rows.problems.append("出馬表のページに class が2回ある欄がある")
     if len(tables) != 1:
         rows.problems.append(f"出馬表の表が{len(tables)}個")
     for tr in (_entry_rows(tables[0]) if len(tables) == 1 and not rows.problems else []):
@@ -288,6 +290,18 @@ def _num(text: str):
     return v if math.isfinite(v) and ODDS_MIN <= v <= ODDS_MAX else None
 
 
+_TAG = re.compile(r"<(?:td|th|table)\b(?:[^>\"']|\"[^\"]*\"|'[^']*')*>", re.I)
+
+
+def _dup_class(page: str) -> bool:
+    """class が2回書いてある欄があるか。HTMLの読み取り部品は1つ目しか残さないので、生のページで見る（実物には無い）。"""
+    for tag in _TAG.findall(page):
+        bare = re.sub(r"\"[^\"]*\"|'[^']*'", '""', tag)
+        if len(re.findall(r"(?<![\w-])class\s*=", bare, re.I)) > 1:
+            return True
+    return False
+
+
 def _raw(node) -> str:
     """倍率の欄の生の文字。_t は全角を半角に直してしまうので、倍率には使わない。"""
     return node.text_content().strip(" \t\r\n\f")
@@ -313,6 +327,8 @@ def parse_win_odds(page: str, field=None) -> dict:
         problems.append(f"単勝の表が{len(tables)}個")
     if _nested(doc):
         problems.append("入れ子の表がある")
+    if _dup_class(page):
+        problems.append("class が2回ある欄がある")
     for table in tables[:1]:
         for tr in _rows(table):
             nums, tans = tr.xpath(f"./td[{_has_class('num')}]"), tr.xpath(f"./td[{_has_class('odds_tan')}]")
@@ -409,7 +425,7 @@ def parse_trio_odds(page: str, horses) -> dict:
     # 1未満なら、票のある組まで「票数なし」に読めている（倍率が欠けている）ので使わない
     # 小数の誤差で境目（ちょうど1）を落とさないよう、表示どおりの10進数を分数で足す
     implausible = bool(no_votes) and sum(1 / Fraction(str(v)) for v in odds.values()) < 1
-    sound = dups == 0 and not nested
+    sound = dups == 0 and not nested and not _dup_class(page)
     if want is not None:
         extra, missing = sorted(combos - want), sorted(want - combos)
         complete = bool(want) and not extra and not missing and sound
