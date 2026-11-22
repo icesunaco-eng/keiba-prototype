@@ -300,21 +300,28 @@ class Collector:
         if not force and last and self.now() - datetime.fromisoformat(last) < timedelta(minutes=REFRESH_MINUTES):
             return
         index = self.client.get(*jra.ENTRY_INDEX)
+        failed = []
         for path, cname in jra.links(index):
             if not cname.startswith("pw01drl"):
                 continue
-            page = self.client.get(path, cname)
-            meeting = jra.parse_race_list(page)
-            if not meeting.get("race_date"):
-                continue
-            for r in meeting["races"]:
-                rk = f"{meeting['race_date']}|{meeting['venue']}|{r['race_number']}"
-                prev = self.state["races"].get(rk, {})
-                # 一覧の一部の欄だけ読めなかったとき（None）は、前に確かめた値（頭数・発走時刻など）を消さない
-                r = {**r, **{k: prev[k] for k in KEEP_FIELDS if r.get(k) is None and prev.get(k) is not None}}
-                self.state["races"][rk] = {**r, "race_date": meeting["race_date"], "venue": meeting["venue"],
-                                           "kai": meeting.get("kai"), "nichi": meeting.get("nichi"), "list_cname": cname,
-                                           "known_at": prev.get("known_at", self.now().isoformat(timespec="seconds"))}
+            try:
+                page = self.client.get(path, cname)
+                meeting = jra.parse_race_list(page)
+                if not meeting.get("race_date"):
+                    continue
+                for r in meeting["races"]:
+                    rk = f"{meeting['race_date']}|{meeting['venue']}|{r['race_number']}"
+                    prev = self.state["races"].get(rk, {})
+                    # 一覧の一部の欄だけ読めなかったとき（None）は、前に確かめた値（頭数・発走時刻など）を消さない
+                    r = {**r, **{k: prev[k] for k in KEEP_FIELDS if r.get(k) is None and prev.get(k) is not None}}
+                    self.state["races"][rk] = {**r, "race_date": meeting["race_date"], "venue": meeting["venue"],
+                                               "kai": meeting.get("kai"), "nichi": meeting.get("nichi"), "list_cname": cname,
+                                               "known_at": prev.get("known_at", self.now().isoformat(timespec="seconds"))}
+            except Exception as exc:   # 1つの開催の失敗で、ほかの開催の更新を止めない
+                failed.append(f"一覧 {cname}: {exc!r}"[:200])
+        if failed:   # 更新ずみにせず、次の回にもう一度
+            self._write_state()
+            raise RuntimeError("; ".join(failed))
         self.state["refreshed_at"] = self.now().isoformat(timespec="seconds")
         self._write_state()
 
@@ -430,8 +437,14 @@ class Collector:
         return first
 
     def tick(self, log=print, notify=None) -> dict:
-        self.refresh()
-        done, errors = [], []
+        done, errors, refresh_error = [], [], None
+        try:
+            self.refresh()
+        except Exception as exc:   # 一覧を更新できなくても、知っているレースの取得・予想・精算は続ける
+            refresh_error = f"開催一覧の更新: {exc!r}"[:300]
+            log(refresh_error)
+        first_refresh_failure = bool(refresh_error) and not self.state.get("refresh_failed")
+        self.state["refresh_failed"] = bool(refresh_error)
         for rk, tp in self.due():
             try:
                 done += self.capture(rk, tp)
@@ -442,8 +455,11 @@ class Collector:
         missed = self.missed()
         notified = self.state.setdefault("missed_notified", [])
         new_missed = [k for k in missed if k not in notified]
-        if (new_missed or errors) and notify:
-            notify(f"取れなかった {len(new_missed)}件・失敗 {len(errors)}件", "; ".join((new_missed + errors)[:3]))
+        tell = errors + ([refresh_error] if first_refresh_failure else [])   # 一覧の更新の失敗は、続いている間1回だけ知らせる
+        if refresh_error:
+            errors.append(refresh_error)
+        if (new_missed or tell) and notify:
+            notify(f"取れなかった {len(new_missed)}件・失敗 {len(tell)}件", "; ".join((new_missed + tell)[:3]))
         self.state["missed_notified"] += new_missed
         health = {"checked_at": self.now().isoformat(timespec="seconds"), "missed": missed, "errors": errors,
                   "races_known": len(self.state["races"]), "taken": len(self.state["taken"])}
