@@ -1123,8 +1123,8 @@ def test_unexpected_error_skips_only_that_race(tmp_path, monkeypatch, where):
                 real = wallet.ev.predict_race
                 mp.setattr(wallet.ev, "predict_race", lambda *a, **k: boom() if current["i"] == 0 else real(*a, **k))
         out = run_live(paths)
-    tag = f"{RK}|result" if where == "settle" else f"{RK}|1h"
-    assert out["failed"] == [tag] and "想定外" in (tmp_path / "live" / "held.json").read_text()
+    assert out["failed"] and all(f.startswith(RK) for f in out["failed"])  # 飛ばすのはそのレースだけ（合流先では方式ごと）
+    assert "想定外" in str(out["failed"]) + (tmp_path / "live" / "held.json").read_text()
     led = Ledger(paths.ledger_path, read_only=True)
     n = sum(p["race_key"] == RK2 for p in led.predictions())
     s = sum(x["race_key"] == RK2 for x in led.settlements())
@@ -1296,3 +1296,21 @@ def test_failed_packet_is_notified(tmp_path, monkeypatch):
     (tmp_path / "live").mkdir()
     cli.cmd_collect(Paths(data_dir=tmp_path), types.SimpleNamespace(action="tick"))
     assert told and "まむへの入力" in told[0]
+
+
+@pytest.mark.parametrize("where", ["run", "import"])
+def test_ledger_failure_is_not_skipped(tmp_path, monkeypatch, where):
+    """台帳そのものの失敗（ロックなど）は1レースの不具合として飛ばさず、その回ごとやり直す。"""
+    import sqlite3
+    from keiba.ledger import Ledger
+    from keiba.live.mam import import_predictions
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    f = tmp_path / "p.json"
+    f.write_text(json.dumps({"schema": "keiba-mam-prediction-v1", "race_key": RK, "time_point": "1h",
+                             "generated_at": "2025-08-30T14:35:00+09:00", "ranking": [1, 2, 3]}))
+
+    def locked(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(Ledger, "add_prediction", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        run_live(paths) if where == "run" else import_predictions(paths, f)

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime
 from itertools import combinations
 from pathlib import Path
@@ -171,6 +172,9 @@ def import_predictions(paths, file: Path) -> dict:
         }
         try:
             added = led.add_prediction(rk, tp, "text_ai", MAM_VERSION, payload, sha(canonical(pred))[:16], "mam", code_hash())
+        except sqlite3.Error:
+            led.close()
+            raise  # 台帳の失敗（ロックなど）は「受け付けない予想」ではない。取り込みごとやり直す
         except Exception as exc:  # 1件の保存の失敗で、ほかの予想を巻き込まない
             why = "同じレース・時点の予想をもう受け付けている（書き換えない）" if isinstance(exc, LedgerConflict) else f"保存できない：{exc!r}"[:160]
             rejected.append({"race_key": rk, "time_point": tp, "reason": why})

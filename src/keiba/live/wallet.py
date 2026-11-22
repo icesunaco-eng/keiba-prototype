@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import pickle
+import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -414,6 +415,8 @@ def run_live(paths, log=print) -> dict:
 
 
 def _race_failed(held: dict, failed: list, key: str, what: str, exc: Exception):
+    if isinstance(exc, sqlite3.Error):
+        raise exc  # 台帳の失敗（ロックなど）はレースのせいではない。飛ばさずに回ごとやり直す（PR #15 と同じ決まり）
     held[key] = f"{what}に失敗：{type(exc).__name__}: {exc}"[:200]
     failed.append(key)
     print(f"{key} の{what}に失敗したので、そこだけ飛ばした：{exc!r}"[:300])
