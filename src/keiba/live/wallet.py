@@ -401,6 +401,15 @@ def market_probs(trio_odds: dict) -> dict:
     return {c: v / total for c, v in inv.items()}
 
 
+def _usable_probs(probs, combos) -> bool:
+    """台帳に保存済みのまむの確率を、統合に渡せるか（検査のゆるかった版の非数などが残っている）。
+    受付は合計1に直して7桁に丸めて保存するので、正しい値は 0 か 1e-7〜1 だけ。確率なし（順位だけの予想）は空。"""
+    if probs is None or probs == {}:
+        return True
+    return isinstance(probs, dict) and any(probs.values()) and all(
+        c in combos and type(v) in (int, float) and (v == 0 or 1e-7 <= v <= 1) for c, v in probs.items())
+
+
 def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) -> int:
     """統合の3版を記録する。入力が欠けたら黙って外さず、理由を残して未配分にする。"""
     from datetime import timezone
@@ -434,6 +443,9 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) ->
                 if now <= dl:
                     continue  # 締切まではまむの予想を待つ
                 reasons.append("まむ：締切までに予想が無い")
+            elif not _usable_probs(mp.get("trios_all"), ml):
+                formal = False
+                reasons.append("まむ：保存済みの確率を使えない（数でない・範囲外・出走馬と合わない）")
             else:
                 sources["mam"] = mp.get("trios_all") or {}
                 if not mp.get("complete"):

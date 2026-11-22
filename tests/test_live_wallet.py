@@ -990,3 +990,112 @@ def test_mam_probability_must_be_finite(tmp_path, monkeypatch, ps, ok):
     assert (import_predictions(paths, f)["accepted"] == 1) == ok
     if ok:
         run_live(paths)
+
+
+# ---- みに💚20261122-3（PR #18）の指摘
+RK2 = "2025-08-30|東京|12"
+
+
+def _two_races(tmp_path, monkeypatch, trio=None):
+    orig = jra.parse_card
+    monkeypatch.setattr(jra, "parse_card",
+                        lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)])
+    paths, col = _setup(tmp_path, trio=trio)
+    col.state["races"][RK2] = dict(col.state["races"][RK], race_number=12, post_time="15:42")
+    for kind, page in (("card", card_html([f"H{h:04d}" for h in range(N)])), ("odds_win", win_html()), ("odds_trio", trio_html())):
+        col._save(RK2, kind, "1h", "/JRADB/x", "c", page)
+    col._write_state()
+    return paths, col
+
+
+def _stored_mam(paths, **change):
+    """検査のゆるかった版が台帳に入れた、まむの予想。"""
+    from keiba.ledger import Ledger
+    payload = {"race_date": "2025-08-30", "method_kind": "text_ai", "horses": [{"n": n, "rank": None} for n in range(1, N + 1)],
+               "trios": [{"combo": "1-2-3", "p": 1.0}], "trios_all": {"1-2-3": 1.0}, "complete": False, "confidence": "Z",
+               "allocation": {a: {"status": "allocated", "stakes": {"1-2-3": 100}, "total": 100}
+                              for a in ("equal_payout", "ev_weighted", "kelly")},
+               "period": "live", **change}
+    led = Ledger(paths.ledger_path)
+    led.add_prediction(RK, "1h", "text_ai", "live-mam-v1", payload, "i", "mam", "old")
+    led.commit()
+    led.close()
+
+
+NAN, INF = float("nan"), float("inf")
+
+
+@pytest.mark.parametrize("probs", [
+    {"1-2-3": NAN}, {"1-2-3": INF}, {"1-2-3": -INF}, {"1-2-3": -0.2, "1-2-4": 1.2}, {"1-2-3": 7.0}, {"1-2-3": 0.0},
+    {"1-2-3": "0.5"}, {"1-2-3": None}, {"1-2-3": True}, {"1-2-3": [1]}, {"1-2-3": 5e-324, "1-2-4": 1.0},
+    {"1-2-3": 1.0, "1-2-4": NAN}, {"1-2-3": 10 ** 400}, {"1-2-99": 1.0}, {"3-2-1": 1.0}, {"1-2-3-4": 1.0}, {"x": 1.0},
+    [["1-2-3", 1.0]], [], "NaN", 0,
+])
+@pytest.mark.parametrize("no_votes", [True, False])
+def test_broken_saved_mam_probs_are_not_pooled(tmp_path, monkeypatch, probs, no_votes):
+    """重大1：台帳に残った壊れた確率は統合に入れず、そのレースも次のレースも予想が保存される。"""
+    from keiba.ledger import Ledger
+    paths, _ = _two_races(tmp_path, monkeypatch, trio=_no_vote_page() if no_votes else None)
+    _stored_mam(paths, trios_all=probs, complete=True)
+    assert run_live(paths)["predicted"] == 22
+    led = Ledger(paths.ledger_path, read_only=True)
+    got = {(p["race_key"], p["method"]): p for p in led.predictions()}
+    led.close()
+    it = got[(RK, "int_market_ml_mam")]
+    assert "mam" not in it["inputs_used"] and not it["formal_probability"]
+    assert any("保存済みの確率を使えない" in r for r in it["reasons"])
+    assert all(not a["stakes"] for a in it["allocation"].values())
+    assert got[(RK2, "ml_lgbm")]["odds_gate"]["pass"]
+
+
+@pytest.mark.parametrize("probs", [{"1-2-3": 1.0}, {"1-2-3": 1, "1-2-4": 0}, {"1-2-3": 1e-7, "1-2-4": 0.9999999}])
+def test_good_saved_mam_probs_are_still_pooled(tmp_path, monkeypatch, probs):
+    from keiba.ledger import Ledger
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    _stored_mam(paths, trios_all=probs)
+    assert run_live(paths)["predicted"] == 22
+    led = Ledger(paths.ledger_path, read_only=True)
+    it = next(p for p in led.predictions() if p["race_key"] == RK and p["method"] == "int_market_ml_mam")
+    led.close()
+    assert "mam" in it["inputs_used"]
+
+
+@pytest.mark.parametrize("small,formal", [(0.0, True), (4e-8, True), (5.1e-8, True), (0.01, True), (None, False)])
+def test_accepted_mam_probs_pass_saved_check(tmp_path, monkeypatch, small, formal):
+    """受付が保存した値（7桁丸めの端を含む）は、保存値の検査で落ちない。順位だけの予想も今までどおり。"""
+    from itertools import combinations
+    from keiba.ledger import Ledger
+    from keiba.live.mam import import_predictions
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    combos = ["-".join(map(str, c)) for c in combinations(range(1, N + 1), 3)]
+    body = {"ranking": [1, 2, 3]} if small is None else {
+        "trios": [{"combo": c, "p": 1.0 if i == 0 else small} for i, c in enumerate(combos)]}
+    f = tmp_path / "p.json"
+    f.write_text(json.dumps({"schema": "keiba-mam-prediction-v1", "race_key": RK, "time_point": "1h",
+                             "generated_at": "2025-08-30T14:35:00+09:00", **body}))
+    assert import_predictions(paths, f)["accepted"] == 1
+    run_live(paths)
+    led = Ledger(paths.ledger_path, read_only=True)
+    it = next(p for p in led.predictions() if p["race_key"] == RK and p["method"] == "int_market_ml_mam")
+    led.close()
+    assert "mam" in it["inputs_used"] and it["formal_probability"] == formal
+    assert not any("保存済みの確率を使えない" in r for r in it["reasons"])
+
+
+@pytest.mark.parametrize("text", [
+    "0.99999999999999999", "1.000000000000001", "999999.90000000001", "999,999.91", "2.00000000000000001", "2.50", "2.",
+    "１６.０", "١٦", "1e2", "00000001.0", "0.9", "1,000,000.0",
+    "\u00a016.0", "16.0\u3000", "16 .0", "16.0\n0",
+])
+def test_odds_digits_are_explicit(text):
+    """要修正1：小数1桁までの半角だけ。長い小数を丸めて境目を越えさせない（単勝も同じ）。"""
+    full = list(range(1, N + 1))
+    assert jra._num(text) is None
+    assert not jra.parse_trio_odds(trio_html().replace("<td>16.0</td>", f"<td>{text}</td>", 1), full)["ok"]
+    assert not jra.parse_win_odds(win_html(cell=lambda k: text if k == 1 else 2.0 + k), full)["ok"]
+
+
+@pytest.mark.parametrize("text,value", [("1", 1.0), ("1.0", 1.0), ("2.4", 2.4), ("99,999.9", 99999.9), ("99999.9", 99999.9), ("999,999.9", 999999.9)])
+def test_displayed_odds_round_trip_exactly(text, value):
+    from fractions import Fraction
+    assert jra._num(text) == value and Fraction(str(jra._num(text))) == Fraction(text.replace(",", ""))

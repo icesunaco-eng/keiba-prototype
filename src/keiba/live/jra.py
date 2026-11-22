@@ -272,14 +272,14 @@ def _clock(text: str):
     return int(m.group(1) or 0) * 60 + int(m.group(2)) + int(m.group(3)) / 10 if m else None
 
 
-_ODDS_TEXT = re.compile(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
+_ODDS_TEXT = re.compile(r"(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]{1,7})(?:\.[0-9])?")  # 実物どおり半角・小数1桁まで
 ODDS_MAX = 999999.9
 ODDS_MIN = 1.0  # 払戻は100円につき100円が下限（元返し）。1倍未満は倍率ではない（逆数が無限大になる極小値も入らない）
 
 
 def _num(text: str):
     """倍率の文字列 → 数。桁区切りは3桁ごとの正しい形だけ（「2,3,4.5」は読まない）。有限の正の数で、1倍以上・上限以下だけ。"""
-    t = text.strip()
+    t = text.strip(" \t\r\n\f")
     if not _ODDS_TEXT.fullmatch(t):
         return None
     v = float(t.replace(",", ""))
@@ -320,7 +320,7 @@ def parse_win_odds(page: str, field=None) -> dict:
             if len(nums) != 1 or len(tans) != 1 or not _t(nums[0]).isdigit() or tans[0].xpath(".//table"):
                 bad += 1
                 continue
-            n, v = int(_t(nums[0])), _num(_t(tans[0]))
+            n, v = int(_t(nums[0])), _num(tans[0].text_content())
             if v is None:
                 bad += 1  # 「取消」など
                 continue
@@ -381,7 +381,7 @@ def parse_trio_odds(page: str, horses) -> dict:
             if len(ths) != 1 or len(tds) != 1 or not _t(ths[0]).isdigit() or tds[0].xpath(".//table"):
                 bad += 1  # 形が違う行は使わない
                 continue
-            third, v = int(_t(ths[0])), _num(_t(tds[0]))
+            third, v = int(_t(ths[0])), _num(tds[0].text_content())
             if third in head:
                 bad += 1
                 continue
