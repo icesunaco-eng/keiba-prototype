@@ -21,6 +21,27 @@ from keiba.ledger import Ledger
 RK = "2026-11-22|京都|11"
 
 
+@pytest.fixture(autouse=True)
+def saved_at_deadline(monkeypatch):
+    """合成の予想は、その時点の締切ちょうどに保存したものとする（材料が無くても正式になる時刻。発走は15:40）。"""
+    from datetime import datetime, timedelta, timezone
+
+    from keiba.live.collector import DEADLINE_MIN
+    orig = Ledger.add_prediction
+
+    def add(self, race_key, time_point, *a, **k):
+        post = datetime.fromisoformat(f"{race_key[:10]}T15:40:00+09:00")
+        f = self.path.parent / "live" / "state.json"
+        if f.exists():
+            hhmm = (json.loads(f.read_text()).get("races", {}).get(race_key) or {}).get("post_time")
+            if hhmm:
+                post = datetime.fromisoformat(f"{race_key[:10]}T{hhmm}:00+09:00")
+        at = (post - timedelta(minutes=DEADLINE_MIN.get(time_point, 0))).astimezone(timezone.utc).isoformat(timespec="seconds")
+        self._now = lambda: at
+        return orig(self, race_key, time_point, *a, **k)
+    monkeypatch.setattr(Ledger, "add_prediction", add)
+
+
 # ---------------- 購入記録 ----------------
 
 def test_combo_and_stakes_rules():
@@ -206,6 +227,18 @@ def test_pages_render_and_escape(live_paths, tmp_path):
     assert "運用中" in out["improve"]
     for html in out.values():  # 1画面のカードは多すぎない
         assert html.count('class="card') <= 30
+
+
+def test_reference_prediction_is_not_called_hit_or_miss(live_paths, tmp_path):
+    src = Source(live_paths, "live")
+    store = Store(tmp_path / "p.sqlite")
+    ctx = {"mode": "live", "theme": "auto", "size": "normal", "token": "t"}
+    src.results[RK] = _res([(3, 1), (7, 2), (11, 3)], payouts={"3-7-11": 500})
+    q = {"rk": RK, "tp": "15m", "m": "int"}
+    assert "当たり・払戻" in pages.race_page(ctx, src, store, q)
+    src.preds[RK][("int_market_ml", "15m")]["formal_probability"] = False
+    page = pages.race_page(ctx, src, store, q)
+    assert "参考の予想（成績に数えない）" in page and "当たり・払戻" not in page and "はずれ・払戻" not in page
 
 
 def test_empty_data_shows_zero_not_numbers(tmp_path):
@@ -437,7 +470,10 @@ def test_notify_loop_sends_once(live_paths, tmp_path, monkeypatch):
         sent.append((title, text))
         if len(sent) >= 1:
             stop.set()
+    guard = threading.Timer(20, stop.set)   # 知らせが来なければ、回り続けずに落とす
+    guard.start()
     notify_loop(app, stop, interval=0, sender=sender)
+    guard.cancel()
     assert sent and sent[0][0].startswith("京都11R") and "自信度A" in sent[0][1]
 
 

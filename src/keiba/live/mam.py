@@ -86,6 +86,8 @@ def _validate(pred: dict, state: dict, inputs: dict) -> tuple[dict, list]:
     from .. import official
     if wallet.prediction_clock() > official.save_limit(rk, tp, r["post_time"]):
         raise Rejected(f"受付の期限（締切＋{official.GRACE_MINUTES}分）を過ぎて届いた")
+    if not wallet.input_ready(rk, tp, inputs[(rk, tp)], r, wallet.prediction_clock()):
+        raise Rejected("その時点の材料（出馬表・オッズ）を取る前に届いた")
     if gen > dl:
         raise Rejected(f"締切後の予想（締切 {dl:%H:%M}・作成 {gen.astimezone(dl.tzinfo):%H:%M}）")
     nums = {c["horse_number"] for c in inputs[(rk, tp)]["card"]}

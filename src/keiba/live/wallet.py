@@ -168,6 +168,7 @@ def _write_held(root: Path, held: dict):
 def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """集めたページから、正規の表と同じ形の races / runners と、時点ごとの入力を作る。
     held に辞書を渡すと、読み取りで保留にしたレースと理由を入れて返す（ファイルには書かない）。"""
+    from .. import official
     races, runners, inputs = [], [], {}
     held = {} if held is None else held
     for rk, r in state.get("races", {}).items():
@@ -225,10 +226,8 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                     page = _read(root, trio_rec)
                     t = jra.parse_trio_odds(page, active)
                     t["odds_time"] = jra.parse_odds_time(page)
-                at_tp = set(s[(s["time_point"] == tp) & before]["kind"])
-                # この時点の取得が終わったか（出馬表は取れてオッズの途中で失敗、はまだ）
-                captured = f"{rk}|{tp}" in (state.get("taken") or {}) or (
-                    "card" in at_tp and bool(at_tp & {"odds_trio", "odds_unavailable"}))
+                at_tp = s[s["time_point"] == tp]
+                captured = official.material_time(zip(at_tp["kind"], at_tp["fetched_at"]), dl) is not None   # その時点の材料がそろったか
                 inputs[(rk, tp)] = {"card": card, "scratched": scratched, "win": w, "trio": t, "captured": captured,
                                     "gate": _with_card_issue(odds_gate(t, trio_rec, r, tp) if tp != "24h" or trio_rec is not None else
                                                              {"pass": False, "reasons": ["前日はオッズを使わない（未発売のことが多い）"]},
@@ -315,7 +314,7 @@ def prediction_clock() -> datetime:
 
 
 def input_ready(rk: str, tp: str, inp: dict, race: dict, now: datetime) -> bool:
-    """その時点の入力で確定してよいか：その時点の取得が終わったか、締切を過ぎた（取れなかったので、ある材料で作る）。
+    """その時点の入力で確定してよいか：その時点の材料がそろったか（official.material_time。数える側と同じ判定）、締切を過ぎた（取れなかったので、ある材料で作る）。
     前の時点の出馬表しか無いうちに作ると、馬体重もオッズも無いまま固定される（台帳・まむへの入力は書き直さない）。"""
     return inp["captured"] or now >= deadline(race["race_date"], race["post_time"], tp)
 

@@ -1,4 +1,4 @@
-"""数え方：締切＋10分までに最初に保存した版だけ（2026-11-22 決定）。別実装の答えと、画面・仮想財布・月次の3つを照らす。"""
+"""数え方：材料を取った後、締切＋10分までに最初に保存した版だけ（2026-11-22 決定）。別実装の答えと、画面・仮想財布・月次の3つを照らす。"""
 import json
 import random
 import threading
@@ -20,7 +20,7 @@ POST = datetime(2026, 11, 21, 10, 1, tzinfo=JST)
 LIMIT_BEFORE_POST = {"24h": 1430, "1h": 50, "15m": 5}   # 締切＋10分は発走の何分前か
 
 
-def world(tmp_path, preds, posts=None, settle=True):
+def world(tmp_path, preds, posts=None, settle=True, snaps=()):
     """preds：(レース, 時点, 方式, 版, 作った時刻, 賭け金, 払戻)。"""
     paths = Paths(data_dir=tmp_path / "data")
     live = paths.data_dir / "live"
@@ -29,7 +29,9 @@ def world(tmp_path, preds, posts=None, settle=True):
     races = {rk: {"race_date": rk[:10], "venue": rk.split("|")[1], "race_number": int(rk.split("|")[2]), "post_time": p,
                   "field_size": 8} for rk, p in posts.items()}
     (live / "state.json").write_text(json.dumps({"races": races}, ensure_ascii=False))
-    (live / "snapshots.jsonl").write_text("")
+    (live / "snapshots.jsonl").write_text("".join(
+        json.dumps({"race_key": rk, "time_point": tp, "kind": kind, "fetched_at": at.isoformat(), "path": "none.html",
+                    "sha256": "x"}, ensure_ascii=False) + "\n" for rk, tp, kind, at in snaps))
     led = Ledger(paths.ledger_path)
     for rk, tp, m, v, at, stake, back in preds:
         led._now = lambda at=at: at.astimezone(timezone.utc).isoformat(timespec="seconds")
@@ -65,7 +67,23 @@ def test_random_ledgers_match_independent_answer(tmp_path, seed):
     rnd = random.Random(seed)
     posts = {f"{DAY}|{v}|{n}": rnd.choice(["00:30", "09:45", "10:01", "15:40", "23:59", None])
              for v in ("京都", "福島") for n in range(1, rnd.randint(2, 5))}
-    preds, seen = [], set()
+    preds, seen, snaps, ready = [], set(), [], {}
+    for rk in sorted(posts):
+        for tp, before in LIMIT_BEFORE_POST.items():
+            if not posts[rk]:
+                continue
+            dl = datetime.fromisoformat(f"{DAY}T{posts[rk]}:00+09:00") - timedelta(minutes=before + 10)
+            case = rnd.choice(["complete", "unsold", "none", "card_only", "late_odds", "odds_first", "retry", "just", "subsec"])
+            c, o = dl - timedelta(minutes=12), dl - timedelta(minutes=10)
+            got = {"complete": [("card", c), ("odds_trio", o)], "unsold": [("card", c), ("odds_unavailable", o)],
+                   "none": [], "card_only": [("card", c), ("odds_first", o)],
+                   "late_odds": [("card", c), ("odds_trio", dl + timedelta(seconds=1))],
+                   "odds_first": [("odds_trio", c), ("card", o)],
+                   "retry": [("odds_trio", c - timedelta(minutes=1)), ("card", c), ("odds_trio", o), ("odds_trio", dl)],
+                   "just": [("card", c), ("odds_trio", dl)],
+                   "subsec": [("card", c), ("odds_trio", o + timedelta(microseconds=400000))]}[case]
+            snaps += [(rk, tp, k, at) for k, at in got]
+            ready[(rk, tp)] = o if case in ("complete", "unsold", "retry", "subsec") else dl
     for _ in range(rnd.randint(1, 45)):
         rk = rnd.choice(sorted(posts))
         key = (rk, rnd.choice(["24h", "1h", "15m"]), rnd.choice(["ml_lgbm", "int_market_ml"]), f"live-{rnd.randint(0, 6):08d}")
@@ -75,13 +93,14 @@ def test_random_ledgers_match_independent_answer(tmp_path, seed):
         hhmm = posts[rk] or "12:00"
         post = datetime.fromisoformat(f"{DAY}T{hhmm}:00+09:00")
         limit = post - timedelta(minutes=LIMIT_BEFORE_POST[key[1]])
-        at = limit + timedelta(seconds=rnd.choice([-90000, -3600, -900, -60, -1, -1, 0, 0, 1, 60, 7200]))
+        at = limit + timedelta(seconds=rnd.choice([-90000, -1201, -1200, -1199, -601, -600, -599, -60, -1, -1, 0, 0, 1, 60, 7200]))
         preds.append((*key, at, rnd.randint(1, 90) * 100, rnd.choice([0, 0, 1200, 45600])))
-    paths = world(tmp_path, preds, posts)
+    paths = world(tmp_path, preds, posts, snaps=snaps)
 
     shown = {}                                  # 別実装：書いた順に見て、期限内で一番早い時刻を残す
     for rk, tp, m, v, at, stake, back in preds:
-        if posts[rk] and at <= datetime.fromisoformat(f"{DAY}T{posts[rk]}:00+09:00") - timedelta(minutes=LIMIT_BEFORE_POST[tp]):
+        if posts[rk] and at <= datetime.fromisoformat(f"{DAY}T{posts[rk]}:00+09:00") - timedelta(minutes=LIMIT_BEFORE_POST[tp]) \
+                and at >= ready[(rk, tp)]:
             if (rk, m, tp) not in shown or at < shown[(rk, m, tp)][0]:
                 shown[(rk, m, tp)] = (at, v, stake, back)
     want = defaultdict(lambda: [0, 0, 0, 0])
@@ -105,12 +124,12 @@ def test_seventeen_versions_count_as_one_race(tmp_path):
     preds = [(RK, "15m", "ml_lgbm", f"live-{i:08d}", POST + timedelta(minutes=i - 12), 100 * (i + 1), 0) for i in range(17)]
     app, wallet, review, src = totals_everywhere(world(tmp_path, preds))
     assert app == wallet == review and app[("ml_lgbm", "kelly")] == (1, 1, 100, 0)   # 期限内で最初の版（1番目）
-    assert src.excluded == {"after_limit": 9, "post_unknown": 0}
+    assert src.excluded == {"before_material": 0, "after_limit": 9, "post_unknown": 0}
 
 
 def test_newer_24h_only_version_does_not_displace_15m(tmp_path):
     preds = [(RK, "15m", "ml_lgbm", "live-aaaaaaaa", POST - timedelta(minutes=10), 700, 0),
-             (RK, "24h", "ml_lgbm", "live-bbbbbbbb", POST - timedelta(hours=25), 900, 0)]
+             (RK, "24h", "ml_lgbm", "live-bbbbbbbb", POST - timedelta(hours=23, minutes=58), 900, 0)]
     app, wallet, review, _ = totals_everywhere(world(tmp_path, preds))
     assert app == wallet == review and app[("ml_lgbm", "kelly")][2] == 700
 
@@ -208,3 +227,20 @@ def test_same_version_settles_official_1h_even_if_late_15m_was_settled(tmp_path)
     state = json.loads((live / "state.json").read_text())
     assert _settle(led, {(RK, "result"): res}, state, live, POST + timedelta(hours=1)) == 3
     led.close()
+
+
+def test_early_version_is_replaced_by_the_first_one_after_material(tmp_path):
+    dl = POST - timedelta(minutes=60)
+    snaps = [(RK, "1h", "card", dl - timedelta(minutes=12)), (RK, "1h", "odds_trio", dl - timedelta(minutes=11))]
+    preds = [(RK, "1h", "ml_lgbm", "live-aaaaaaaa", POST - timedelta(hours=20), 900, 0),
+             (RK, "1h", "ml_lgbm", "live-bbbbbbbb", dl - timedelta(minutes=10), 400, 0),
+             (RK, "1h", "ml_lgbm", "live-cccccccc", dl, 700, 0)]
+    app, wallet, review, src = totals_everywhere(world(tmp_path, preds, snaps=snaps))
+    assert app == wallet == review and app[("ml_lgbm", "kelly")][2] == 400
+    assert src.excluded["before_material"] == 1
+
+
+def test_early_only_is_neither_counted_nor_settled(tmp_path):
+    preds = [(RK, "1h", "ml_lgbm", "live-aaaaaaaa", POST - timedelta(hours=20), 900, 9000)]
+    app, wallet, review, _ = totals_everywhere(world(tmp_path, preds))
+    assert app == wallet == review == {}

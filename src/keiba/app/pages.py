@@ -484,7 +484,8 @@ def race_page(ctx, src, store, q) -> str:
         hit = bool(wins & set(stakes)) if stakes else any(t["combo"] in wins for t in p.get("trios", [])[:10])
         pay = "・".join(yen(v) for v in (res.get("payouts") or {}).values())
         items.append((f"結果 {res['label']}", "全額返還" if res.get("cancelled") else
-                      ("当たり" if hit else "はずれ") + (f"・払戻 {pay}" if pay else "・払戻はまだ分からない"),
+                      ("参考の予想（成績に数えない）" if p.get("formal_probability") is False else
+                       "当たり" if hit else "はずれ") + (f"・払戻 {pay}" if pay else "・払戻はまだ分からない"),
                       url("/history/detail", rk=rk)))
     body.append(link_list(items))
     skip = (f'<form method="post" action="/buy" class="inline" style="flex:1"><input type="hidden" name="token" value="{h(ctx["token"])}">'
@@ -973,8 +974,10 @@ def counting_note(src) -> str:
     """仮想の成績の数え方と、数えていない件数。"""
     if src.mode != "live":
         return ""
+    early = src.excluded["before_material"]
     late, unknown = src.excluded["after_limit"], src.excluded["post_unknown"]
-    return ('<p class="muted small">仮想は、締切＋10分までに最初に保存した版だけを数えるよ'
+    return ('<p class="muted small">仮想は、その時点の材料を取った後、締切＋10分までに最初に保存した版だけを数えるよ'
+            + (f"。材料を取る前に保存した予想 {early:,}件は数えていない" if early else "")
             + (f"。締切＋10分より後に保存した予想 {late:,}件は数えていない" if late else "")
             + (f"。発走時刻が分からない予想 {unknown:,}件も数えていない" if unknown else "") + "</p>")
 

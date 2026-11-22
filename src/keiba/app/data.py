@@ -241,7 +241,7 @@ class Source:
         self.race_meta: dict = {}
         self.past_keys: set[str] = set()                    # 収集の予定表（7日で整理）から外れた、過去14日のレース（原本の記録から）
         self.settlements: list[dict] = []
-        self.excluded = {"after_limit": 0, "post_unknown": 0}   # 数えていない予想の件数（期限より後に保存・発走時刻が不明）
+        self.excluded = {"before_material": 0, "after_limit": 0, "post_unknown": 0}   # 数えていない予想の件数（材料の前・期限の後に保存、発走時刻が不明）
         self.versions: list[dict] = []
         self.version = None
         self.loaded_at = time.time()
@@ -277,7 +277,7 @@ class Source:
             self._version_list(conn)
             from .. import official
             sel = official.load(conn, root)
-            self.excluded = {"after_limit": len(sel.late), "post_unknown": len(sel.unknown)}
+            self.excluded = {"before_material": len(sel.early), "after_limit": len(sel.late), "post_unknown": len(sel.unknown)}
             usable: dict = defaultdict(set)
             for (rk, _, _), v in sel.shown.items():
                 usable[v].add(rk)

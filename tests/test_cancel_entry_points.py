@@ -228,3 +228,52 @@ def test_P_review_reads_results_of_archived_races(env):
     col._write_state()
     (col.root / "races_archive.jsonl").write_text(json.dumps({"race_key": RK, **race}, ensure_ascii=False) + "\n")
     assert _results(paths)[0][RK]["actual"] == "1-2-3"
+
+
+def test_Q_saved_early_version_does_not_block_the_real_1h(tmp_path, monkeypatch):
+    """前の版が前日の材料で1時間前を保存ずみでも、材料を取った後に作り直し、それが正式になる（11/23 の22レースの形）。"""
+    from keiba import official
+    _reread_card(monkeypatch)
+    paths, col = _setup(tmp_path, at=(9, 0), tp="24h")
+    led = Ledger(paths.ledger_path)
+    led._now = lambda: "2025-08-30T00:05:00+00:00"
+    led.add_prediction(RK, "1h", "ml_lgbm", "live-oldoldol", {"trios": [], "horses": []}, "i", "m", "c")
+    led.commit()
+    led.close()
+    at = datetime(2025, 8, 30, 14, 30, tzinfo=JST)
+    col.now = lambda: at
+    for kind, page in (("card", card_html([f"H{h:04d}" for h in range(8)])), ("odds_trio", trio_html())):
+        col._save(RK, kind, "1h", "/x", "c", page)
+    monkeypatch.setattr(Ledger, "_now", lambda self: "2025-08-30T05:31:00+00:00")
+    wallet.run_live(paths, now=datetime(2025, 8, 30, 14, 31, tzinfo=JST))
+    led = Ledger(paths.ledger_path, read_only=True)
+    chosen = official.load(led.conn, col.root).shown[(RK, "ml_lgbm", "1h")]
+    led.close()
+    assert chosen != "live-oldoldol"
+
+
+def test_R_taken_without_trio_waits_for_deadline_like_counting(tmp_path, monkeypatch):
+    """「取得済み」でも三連複が無ければ締切まで待つ（数える側の下限と同じ。早く作ると正式にならず、作り直せない）。"""
+    _reread_card(monkeypatch)
+    paths, col = _setup(tmp_path, at=(9, 0), tp="24h")
+    at = datetime(2025, 8, 30, 14, 30, tzinfo=JST)
+    col.now = lambda: at
+    col._save(RK, "card", "1h", "/x", "c", card_html([f"H{h:04d}" for h in range(8)]))
+    col.state["taken"][f"{RK}|1h"] = at.isoformat()
+    col._write_state()
+    wallet.run_live(paths, now=at)
+    led = Ledger(paths.ledger_path, read_only=True)
+    assert "1h" not in {p["time_point"] for p in led.predictions()}
+    led.close()
+
+
+def test_S_mam_prediction_before_material_is_rejected(tmp_path, monkeypatch):
+    _reread_card(monkeypatch)
+    paths, col = _setup(tmp_path, at=(9, 0), tp="24h")
+    early = datetime(2025, 8, 30, 9, 5, tzinfo=JST)
+    monkeypatch.setattr(wallet, "prediction_clock", lambda: early)
+    f = tmp_path / "p.json"
+    f.write_text(json.dumps({"schema": mam.SCHEMA_OUT, "race_key": RK, "time_point": "1h", "ranking": [1, 2, 3],
+                             "generated_at": early.isoformat()}, ensure_ascii=False))
+    out = mam.import_predictions(paths, f)
+    assert not out["accepted"] and "材料" in out["rejected"][0]["reason"]

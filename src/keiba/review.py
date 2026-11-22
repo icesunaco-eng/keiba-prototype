@@ -98,11 +98,12 @@ def build_review(paths, month: str | None, start: str | None = None, end: str | 
     led = Ledger(paths.ledger_path, read_only=True) if paths.ledger_path.exists() else None
     preds = [p for p in (led.predictions() if led else []) if p["version"].startswith("live-") and _in_range(p["race_date"], month, start, end)]
     setts = [s for s in (led.settlements() if led else []) if s["version"].startswith("live-") and _in_range(s["race_key"][:10], month, start, end)]
-    late = unknown = 0
+    late = unknown = early = 0
     if led:
         sel = official.load(led.conn, paths.data_dir / "live")
         key = lambda x: (x["race_key"], x["time_point"], x["method"], x["version"])
         late, unknown = sum(key(p) in sel.late for p in preds), sum(key(p) in sel.unknown for p in preds)
+        early = sum(key(p) in sel.early for p in preds)
         preds = [p for p in preds if sel.is_shown(*key(p))]
         setts = [s for s in setts if sel.is_counted(*key(s))]
         led.close()
@@ -110,8 +111,8 @@ def build_review(paths, month: str | None, start: str | None = None, end: str | 
     review = {"month": month or f"{start}〜{end}", "races_predicted": len({p["race_key"] for p in preds}),
               "races_with_result": len({p["race_key"] for p in preds if p["race_key"] in results}),
               "versions": sorted({p["version"] for p in preds}),
-              "counting": "締切＋10分までに最初に保存した版だけを数える（2026-11-22 決定）",
-              "excluded": {"after_limit": late, "post_unknown": unknown},
+              "counting": "その時点の材料を取った後、締切＋10分までに最初に保存した版だけを数える（2026-11-22 決定）",
+              "excluded": {"before_material": early, "after_limit": late, "post_unknown": unknown},
               "judgement": "回収率の達成判定はしない（取り決め：初週は判定しない。数週たまるまで参考）。実購入はしない"}
 
     review["comparison"] = comparison(preds, setts, results)
@@ -183,7 +184,7 @@ def write_review(paths, month: str | None, start: str | None = None, end: str | 
 
     parts = [f"<h1>月次の振り返り {html.escape(month)}</h1>",
              f"<p class='muted'>予想したレース {r['races_predicted']}・結果が分かったレース {r['races_with_result']}・版 {html.escape(', '.join(r['versions']) or '–')}</p>",
-             f"<p class='muted'>{html.escape(r['counting'])}。数えていない予想：締切＋10分より後に保存 {r['excluded']['after_limit']}件・"
+             f"<p class='muted'>{html.escape(r['counting'])}。数えていない予想：材料を取る前に保存 {r['excluded']['before_material']}件・締切＋10分より後に保存 {r['excluded']['after_limit']}件・"
              f"発走時刻が不明 {r['excluded']['post_unknown']}件</p>",
              f"<p class='warn'>{html.escape(r['judgement'])}</p>",
              "<h2>比較：市場のみ・学習のみ・統合（同じレース・同じ時点）</h2>",

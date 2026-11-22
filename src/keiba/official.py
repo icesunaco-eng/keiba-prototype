@@ -1,8 +1,9 @@
 """これからのレースの予想のうち、どれを表示・精算・集計に使うか（2026-11-22 たかむね決定）。
 
-「締切＋10分までに最初に保存した版」だけが正式。台帳の行は消さず、読むときに選ぶ。
-  - 期限：その時点の締切（24h・1h・15m）＋10分。台帳に書いた時刻（created_at）で見る。発走時刻が分からなければ使わない
-  - 表示：レース × 方式 × 時点ごとに、期限までに最初に保存した版
+「その時点の材料を取った後、締切＋10分までに最初に保存した版」だけが正式。台帳の行は消さず、読むときに選ぶ。
+  - 下限：その時点の材料（出馬表 → 三連複オッズか「オッズ未発表」の記録）が締切までにそろった時刻。そろわなければ締切
+  - 期限：その時点の締切（24h・1h・15m）＋10分。どちらも台帳に書いた時刻（created_at）で見る。発走時刻が分からなければ使わない
+  - 表示：レース × 方式 × 時点ごとに、材料の後、期限までに最初に保存した版
   - 集計・精算：レース × 方式ごとに1つ。15分前（無ければ1時間前）の正式な版
 成績は見ない（時刻だけで選ぶ）。
 """
@@ -15,13 +16,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 GRACE_MINUTES = 10   # 締切のあと、ここまでに保存したものだけが正式
+MATERIAL_ODDS = ("odds_trio", "odds_unavailable")   # 1つの時点の取得で最後に残る記録
 COUNT_TIME_POINTS = ("15m", "1h")   # 精算に使う時点（先にある方）。24時間前の予想は精算しない
 _HHMM = re.compile(r"\d{2}:\d{2}")
 
 
 @dataclass
 class Selection:
-    valid: set = field(default_factory=set)      # 期限までに保存した (レース, 時点, 方式, 版)
+    valid: set = field(default_factory=set)      # 材料の後・期限までに保存した (レース, 時点, 方式, 版)
+    early: set = field(default_factory=set)      # 材料を取る前に保存した
     late: set = field(default_factory=set)       # 期限より後に保存した
     unknown: set = field(default_factory=set)    # 発走時刻が分からない
     shown: dict = field(default_factory=dict)    # (レース, 方式, 時点) → 版
@@ -99,14 +102,49 @@ def save_limit(rk: str, tp: str, post_time: str | None) -> datetime | None:
     return post - timedelta(minutes=DEADLINE_MIN[tp] - GRACE_MINUTES) if post else None
 
 
-def select(rows: list[tuple], posts: dict[str, str]) -> Selection:
-    sel, first = Selection(), {}
+def material_time(records, dl: datetime) -> datetime | None:
+    """その時点の材料がそろった時刻。records：その時点の（種類, 取得時刻）。締切までにそろわなければ None。
+    予想を作ってよいか（wallet.input_ready）と、正式に数えるかの両方がこの関数を使う。"""
+    got = [(k, t) for k, t in ((k, _moment(at)) for k, at in records) if t and t <= dl]
+    cards = [t for k, t in got if k == "card"]
+    if not cards:
+        return None
+    start = min(cards)
+    return min((t for k, t in got if k in MATERIAL_ODDS and t >= start), default=None)
+
+
+def capture_records(root: Path) -> dict[tuple, list]:
+    """(レース, 時点) → （種類, 取得時刻）の並び。目録が読めなければ空（＝材料は締切までそろわなかった扱い）。"""
+    from .live.wallet import _snapshots
+
+    out: dict[tuple, list] = {}
+    if not (root / "snapshots.jsonl").exists():
+        return out
+    try:
+        snaps = _snapshots(root)
+        for rk, tp, kind, at in snaps[["race_key", "time_point", "kind", "fetched_at"]].itertuples(index=False):
+            if isinstance(rk, str) and isinstance(tp, str):
+                out.setdefault((rk, tp), []).append((kind, at))
+    except (OSError, KeyError):
+        return {}
+    return out
+
+
+def select(rows: list[tuple], posts: dict[str, str], records: dict[tuple, list]) -> Selection:
+    sel, first, start = Selection(), {}, {}
     for i, (rk, tp, m, v, created) in enumerate(rows):
         limit, at = save_limit(rk, tp, posts.get(rk)), _moment(created)
         if not limit or not at:
             sel.unknown.add((rk, tp, m, v))
-        elif at > limit:
+            continue
+        if (rk, tp) not in start:
+            dl = limit - timedelta(minutes=GRACE_MINUTES)
+            # 台帳の時刻は秒まで。材料の時刻も秒にそろえる
+            start[(rk, tp)] = (material_time(records.get((rk, tp), []), dl) or dl).replace(microsecond=0)
+        if at > limit:
             sel.late.add((rk, tp, m, v))
+        elif at < start[(rk, tp)]:
+            sel.early.add((rk, tp, m, v))
         else:
             sel.valid.add((rk, tp, m, v))
             if (rk, m, tp) not in first or (at, i) < first[(rk, m, tp)][0]:   # 同じ秒なら、先に書いた行
@@ -122,4 +160,4 @@ def select(rows: list[tuple], posts: dict[str, str]) -> Selection:
 
 def load(conn, root: Path) -> Selection:
     rows = prediction_rows(conn)
-    return select(rows, post_times(root, {r[0] for r in rows}))
+    return select(rows, post_times(root, {r[0] for r in rows}), capture_records(root) if rows else {})
