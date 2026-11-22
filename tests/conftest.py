@@ -10,7 +10,7 @@ def before_post_clock(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
     from keiba.live import wallet
-    at = datetime(2025, 8, 30, 14, 41, tzinfo=timezone(timedelta(hours=9)))
+    at = datetime(2025, 8, 30, 14, 45, tzinfo=timezone(timedelta(hours=9)))
     monkeypatch.setattr(wallet, "prediction_clock", lambda: at)
     from keiba.ledger import Ledger
     monkeypatch.setattr(Ledger, "_now", lambda self: at.astimezone(timezone.utc).isoformat(timespec="seconds"))
