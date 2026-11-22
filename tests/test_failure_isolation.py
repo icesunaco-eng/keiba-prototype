@@ -113,3 +113,34 @@ def test_tick_retries_and_notifies_once(two, monkeypatch):
     for _ in range(3):
         cli.cmd_collect(paths, types.SimpleNamespace(action="tick"))
     assert len(sent) == 1 and Collector(col.root, client=None).live_pending()
+
+
+@pytest.mark.parametrize("where", ["export", "review", "killed"])
+def test_review_is_rebuilt_after_interruption(two, monkeypatch, where):
+    """精算を台帳に書いた後に止まっても、次の回に月次を作り直す（次の回の精算は0件）。"""
+    from keiba import cli, review
+    paths, col = two
+    wallet.run_live(paths)
+    col._save(RK, "result", "result", "/x", "c", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
+    col._write_state()
+    at = datetime(2025, 8, 30, 16, 15, tzinfo=JST)
+    monkeypatch.setattr(c, "Collector", lambda root: Collector(root, client=types.SimpleNamespace(count=0), now=lambda: at))
+    for name in ("refresh", "check_notices"):
+        monkeypatch.setattr(Collector, name, lambda self, *a, **k: None)
+    monkeypatch.setattr(Collector, "due", lambda self: [])
+    monkeypatch.setattr(cli, "_notify", lambda *a, **k: None)
+    monkeypatch.setattr(mam, "export_packets", lambda p: [])
+    written = []
+    monkeypatch.setattr(review, "write_review", lambda p, month, *a, **k: written.append(month))
+
+    def stop(*a, **k):
+        raise (KeyboardInterrupt if where == "killed" else OSError)("途中で止まった")
+    with monkeypatch.context() as m:
+        m.setattr(*((review, "write_review") if where == "review" else (mam, "export_packets")), stop)
+        try:
+            cli.cmd_collect(paths, types.SimpleNamespace(action="tick"))
+        except KeyboardInterrupt:
+            pass
+    assert saved(paths, "settlements") and not written
+    cli.cmd_collect(paths, types.SimpleNamespace(action="tick"))
+    assert written

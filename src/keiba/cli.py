@@ -136,14 +136,18 @@ def cmd_collect(paths, args):
         out = col.tick(notify=_notify)
         if col.live_pending():   # 新しいページ・取りやめ・前の回の失敗のどれかがある
             from .live.wallet import run_live
+            interrupted = col.live_started()   # 前の回が最後まで終わっていない（途中で止まった・失敗した）
             try:
                 out["live"] = run_live(paths)
                 from .live.mam import export_packets
                 out["mam_packets"] = len(export_packets(paths))
-                if out["live"].get("settled"):
-                    from datetime import date
+                if out["live"].get("settled") or interrupted:
+                    # 前の回が精算を書いた後に止まっていると、この回の精算は0件でも月次は古いまま
+                    from datetime import date, timedelta
                     from .review import write_review
-                    write_review(paths, date.today().strftime("%Y-%m"))
+                    days = [date.today(), *([date.today() - timedelta(days=1)] if interrupted else [])]
+                    for month in sorted({x.strftime("%Y-%m") for x in days}):
+                        write_review(paths, month)
                 failed = out["live"].get("failed")   # 一部のレース・方式だけの失敗：ほかは書けている。次の回にやり直す
                 if col.live_finished(not failed):
                     _notify("予想・精算の一部に失敗", "; ".join(failed)[:120])

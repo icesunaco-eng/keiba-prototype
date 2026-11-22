@@ -428,10 +428,18 @@ class Collector:
     def live_pending(self) -> bool:
         return bool(self.state.get("live_pending"))
 
+    def live_started(self) -> bool:
+        """予想・精算を始める印を先に残す。返すのは、前の回の印が残っていたか（＝最後まで終わっていない）。"""
+        before = bool(self.state.get("live_running"))
+        self.state["live_running"] = True
+        self._write_state()
+        return before
+
     def live_finished(self, ok: bool) -> bool:
         """予想・精算の結果を残す。返すのは、失敗を知らせるか（続けて失敗している間は1回だけ）。"""
         first = not ok and not self.state.get("live_failed")
         self.state["live_pending"] = not ok
+        self.state["live_running"] = not ok
         self.state["live_failed"] = not ok
         self._write_state()
         return first
