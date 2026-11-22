@@ -149,11 +149,12 @@ def cmd_collect(paths, args):
                     for month in sorted({x.strftime("%Y-%m") for x in days}):
                         write_review(paths, month)
                 failed = out["live"].get("failed")   # 一部のレース・方式だけの失敗：ほかは書けている。次の回にやり直す
-                if col.live_finished(not failed):
-                    _notify("予想・精算の一部に失敗", "; ".join(failed)[:120])
+                new = col.live_finished(failed or [], out["live"].get("retry_now", True))
+                if new:
+                    _notify("予想・精算の一部に失敗", "; ".join(new)[:120])
             except Exception as exc:  # 予想の失敗で収集を止めない（次の回にやり直す）
                 out["live_error"] = repr(exc)
-                if col.live_finished(False):
+                if col.live_finished([repr(exc)[:200]]):
                     _notify("予想・精算に失敗", repr(exc)[:120])
         print(json.dumps(out, ensure_ascii=False))
     elif args.action == "install":

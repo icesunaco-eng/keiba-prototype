@@ -44,6 +44,7 @@ ARCHIVE_FILE = "races_archive.jsonl"   # 予定表から外したレースの記
 KEEP_FIELDS = ("post_time", "field_size", "race_name", "surface", "distance_m")   # 一覧の再取得で欠けても前の値を残す欄
 ARCHIVE_FIELDS = ("race_date", "venue", "race_number", "race_name", "post_time", "field_size", "surface", "distance_m")
 CANCEL_FILE = "cancellations.jsonl"   # JRAが発表したレースの取りやめ（追記だけ）
+LIVE_RETRY_MINUTES = 30   # 同じ精算の失敗が続くときに、やり直す間隔
 NOTICE_MINUTES = 30   # 取りやめのお知らせ（ニュースの月別一覧）を見に行く間隔
 ODDS_TABS = {"win": ("単勝",), "trio": ("3連複", "３連複")}
 
@@ -231,7 +232,7 @@ class Collector:
                "source": jra.BASE + path, "cname": cname}
         self._append_index(rec)
         if race_key:
-            self.state["live_pending"] = True   # 予想・精算がまだ（成功するまで毎回やり直す）
+            self._live_needed()   # 予想・精算がまだ（成功するまでやり直す）
         return rec
 
     def _append_index(self, rec: dict):
@@ -410,7 +411,7 @@ class Collector:
             closed = not race_post(rk, r) or now >= race_post(rk, r) + timedelta(minutes=WINDOWS["result"][1])
             due.append(f"{rk}|{'closed' if closed else 'started'}")
         if set(due) - set(self.state.get("cancel_marked", [])):
-            self.state["live_pending"] = True
+            self._live_needed()
         self.state["cancel_marked"] = sorted(due)
 
     def mark_deadlines(self):
@@ -422,11 +423,19 @@ class Collector:
             if post and now < post:
                 due += [f"{rk}|{tp}" for tp, m in DEADLINE_MIN.items() if now >= post - timedelta(minutes=m)]
         if set(due) - set(self.state.get("deadline_marked", [])):
-            self.state["live_pending"] = True
+            self._live_needed()
         self.state["deadline_marked"] = sorted(due)
 
+    def _live_needed(self):
+        """予想・精算をすぐ動かす（新しい材料・締切・取りやめ）。やり直しの待ちは取り消す。"""
+        self.state["live_pending"] = True
+        self.state.pop("live_retry_at", None)
+
     def live_pending(self) -> bool:
-        return bool(self.state.get("live_pending"))
+        if not self.state.get("live_pending"):
+            return False
+        wait = self.state.get("live_retry_at")
+        return not wait or self.now() >= datetime.fromisoformat(wait)
 
     def live_started(self) -> bool:
         """予想・精算を始める印を先に残す。返すのは、前の回の印が残っていたか（＝最後まで終わっていない）。"""
@@ -435,14 +444,21 @@ class Collector:
         self._write_state()
         return before
 
-    def live_finished(self, ok: bool) -> bool:
-        """予想・精算の結果を残す。返すのは、失敗を知らせるか（続けて失敗している間は1回だけ）。"""
-        first = not ok and not self.state.get("live_failed")
-        self.state["live_pending"] = not ok
-        self.state["live_running"] = not ok
-        self.state["live_failed"] = not ok
+    def live_finished(self, failures: list[str], retry_now: bool = True) -> list[str]:
+        """予想・精算の結果を残す（failures が空なら成功）。返すのは、まだ知らせていない失敗。
+        同じ失敗は直るまで1回だけ知らせる。別の失敗は、前の失敗が続いていても知らせる。
+        精算だけの同じ失敗が続くなら（台帳の壊れた行は直らない）、やり直しの間隔をあける。"""
+        told = self.state.get("live_failures", [])
+        new = [f for f in failures if f not in told]
+        self.state["live_failures"] = (told + new)[-200:] if failures else []
+        self.state["live_pending"] = bool(failures)
+        self.state["live_running"] = bool(failures)
+        if failures and not new and not retry_now:
+            self.state["live_retry_at"] = (self.now() + timedelta(minutes=LIVE_RETRY_MINUTES)).isoformat(timespec="seconds")
+        else:
+            self.state.pop("live_retry_at", None)
         self._write_state()
-        return first
+        return new
 
     def tick(self, log=print, notify=None) -> dict:
         done, errors, refresh_error = [], [], None

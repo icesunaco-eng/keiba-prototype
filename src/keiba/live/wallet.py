@@ -367,7 +367,8 @@ def run_live(paths, log=print, now: datetime | None = None) -> dict:
         n_set = _settle(led, inputs, state, root, now, failed)
         led.commit()
         led.close()
-        return {"predicted": 0, "settled": n_set, "held": len(held), **({"failed": failed} if failed else {})}
+        return {"predicted": 0, "settled": n_set, "held": len(held),
+                **({"failed": failed, "retry_now": False} if failed else {})}
     feat, hist = _features(paths, lr, lrun)
     version = f"live-{code_hash()[:8]}"
     led = Ledger(paths.ledger_path)
@@ -443,10 +444,12 @@ def run_live(paths, log=print, now: datetime | None = None) -> dict:
                 n_pred += _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state, clock)
             except Exception as exc:
                 _failed(failed, f"{rk}|{tp} の統合", exc)
+    retry_now = bool(failed)   # 予想の失敗は締切＋10分までに毎回やり直す（精算だけの失敗は間隔をあけてよい）
     n_set = _settle(led, inputs, state, root, now, failed)
     led.commit()
     led.close()
-    return {"predicted": n_pred, "settled": n_set, "version": version, "held": len(held), **({"failed": failed} if failed else {})}
+    return {"predicted": n_pred, "settled": n_set, "version": version, "held": len(held),
+            **({"failed": failed, "retry_now": retry_now} if failed else {})}
 
 
 def _settle(led, inputs: dict, state: dict, root: Path, now: datetime | None = None, failed: list | None = None) -> int:

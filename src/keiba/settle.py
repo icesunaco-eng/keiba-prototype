@@ -68,8 +68,9 @@ def result_problem(finished: list, finishers: int, scratched, payouts, rows: int
     一部しか読めていない結果を「完走3頭未満＝不成立」と取り違えないために、精算の前に確かめる。
     """
     if payouts and any(not isinstance(v, int) or isinstance(v, bool) or v < 100 for v in payouts.values()):
-        # 三連複の払戻は100円が最低（元返し）。それ未満は数字が途中で切れた読取など：確定させずに待つ
-        return "三連複の払戻の金額がおかしい（100円未満。結果がそろうまで待つ）"
+        # 100円未満は、数字が途中で切れた読取か、的中者がいないときの特払い（JRA：その投票法の全員に100円につき70円）。
+        # 特払いのページの形は実物で未確認。組の払戻として精算すると金額を誤るので、確定させずに待つ
+        return "三連複の払戻が100円未満（読取の途中か、特払い。特払いの精算は未対応なので保留）"
     if any(pos is None for _, pos in finished):
         # 完走なのに着順が空欄の馬がいる（途中まで読めたページなど）：同着の的中組が決まらないので待つ
         return "着順が空欄の完走馬がいる（結果がそろうまで待つ）"
