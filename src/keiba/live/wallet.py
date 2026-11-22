@@ -316,6 +316,24 @@ def _finite(payload: dict):
         raise ValueError(f"予想に非数・無限がある：{exc}") from exc
 
 
+def _write_together(led, rows: list[tuple]) -> int:
+    """予想1行分の精算（配分ごと）をまとめて書く。途中で失敗したら1つも残さない（台帳は追記専用で消せない）。"""
+    if not rows:
+        return 0
+    for *_, body in rows:
+        _finite(body)
+    led.conn.execute("SAVEPOINT settle_row")
+    try:
+        for row in rows:
+            led.add_settlement(*row)
+    except BaseException:
+        led.conn.execute("ROLLBACK TO settle_row")
+        led.conn.execute("RELEASE settle_row")
+        raise
+    led.conn.execute("RELEASE settle_row")
+    return len(rows)
+
+
 def _failed(failed: list, label: str, exc: Exception):
     """1つの失敗を記録して次へ進む。台帳の失敗（ロックなど）は回ごとやり直すので、そのまま上げる。"""
     if isinstance(exc, sqlite3.Error):
@@ -456,19 +474,23 @@ def _settle(led, inputs: dict, state: dict, root: Path, now: datetime | None = N
     for rk in sorted(void):
         try:
             for (m, ver) in sorted({(k[2], k[3]) for k in preds if k[0] == rk}):
-                p = preds.get((rk, "15m", m, ver)) or preds.get((rk, "1h", m, ver))
-                if not p:
-                    continue
-                for a in ALLOC_METHODS:
-                    if (rk, p["time_point"], m, ver, a) in settled:
+                try:
+                    p = preds.get((rk, "15m", m, ver)) or preds.get((rk, "1h", m, ver))
+                    if not p:
                         continue
-                    stakes = p["allocation"][a]["stakes"]
-                    st = settle_trio(stakes, 0, set(), None) if stakes else None
-                    led.add_settlement(rk, p["time_point"], m, ver, a,
-                                       {"status": st.status if st else p["allocation"][a]["status"],
-                                        "stake": st.stake if st else 0, "returned": st.returned if st else 0,
-                                        "hits": [], "cancelled": True})
-                    n_set += 1
+                    todo = []   # 3配分を全部計算できてから、まとめて書く
+                    for a in ALLOC_METHODS:
+                        if (rk, p["time_point"], m, ver, a) in settled:
+                            continue
+                        stakes = p["allocation"][a]["stakes"]
+                        st = settle_trio(stakes, 0, set(), None) if stakes else None
+                        todo.append((rk, p["time_point"], m, ver, a,
+                                     {"status": st.status if st else p["allocation"][a]["status"],
+                                      "stake": st.stake if st else 0, "returned": st.returned if st else 0,
+                                      "hits": [], "cancelled": True}))
+                    n_set += _write_together(led, todo)
+                except Exception as exc:
+                    _failed(failed, f"{rk}|{m}|{ver} の取りやめの返還", exc)
         except Exception as exc:
             _failed(failed, f"{rk} の取りやめの返還", exc)
     for (rk, tp), res in inputs.items():
@@ -484,23 +506,27 @@ def _settle(led, inputs: dict, state: dict, root: Path, now: datetime | None = N
                                           (state["races"].get(rk) or {}).get("field_size"), [r["horse_number"] for r in rows]):
                 continue   # 結果を一部しか読めていない：不成立の返還などを書かず、次の回で完全な結果を待つ
             for (m, ver) in sorted({(k[2], k[3]) for k in preds if k[0] == rk}):
-                p = preds.get((rk, "15m", m, ver)) or preds.get((rk, "1h", m, ver))
-                if not p:
-                    continue
-                for a in ALLOC_METHODS:
-                    if (rk, p["time_point"], m, ver, a) in settled:
+                try:
+                    p = preds.get((rk, "15m", m, ver)) or preds.get((rk, "1h", m, ver))
+                    if not p:
                         continue
-                    stakes = p["allocation"][a]["stakes"]
-                    if stakes and missing_payouts(stakes, finished, scratched, payouts):
-                        continue   # 買った的中組の払戻が読めていない（同着の一部欠けなど）：0円で確定させず、次の回を待つ
-                    st = settle_trio(stakes, finishers, scratched, payouts) if stakes else None
-                    if st and st.status == "unsettled_no_payout":
-                        continue   # 払戻が分からない：台帳は書き直せないので「未精算」を確定行にせず、払戻が読めた回に精算する
-                    led.add_settlement(rk, p["time_point"], m, ver, a,
-                                       {"status": st.status if st else p["allocation"][a]["status"],
-                                        "stake": st.stake if st else 0, "returned": st.returned if st else 0,
-                                        "hits": st.hits if st else []})
-                    n_set += 1
+                    todo = []   # 3配分を全部計算できてから、まとめて書く
+                    for a in ALLOC_METHODS:
+                        if (rk, p["time_point"], m, ver, a) in settled:
+                            continue
+                        stakes = p["allocation"][a]["stakes"]
+                        if stakes and missing_payouts(stakes, finished, scratched, payouts):
+                            continue   # 買った的中組の払戻が読めていない（同着の一部欠けなど）：0円で確定させず、次の回を待つ
+                        st = settle_trio(stakes, finishers, scratched, payouts) if stakes else None
+                        if st and st.status == "unsettled_no_payout":
+                            continue   # 払戻が分からない：台帳は書き直せないので「未精算」を確定行にせず、払戻が読めた回に精算する
+                        todo.append((rk, p["time_point"], m, ver, a,
+                                     {"status": st.status if st else p["allocation"][a]["status"],
+                                      "stake": st.stake if st else 0, "returned": st.returned if st else 0,
+                                      "hits": st.hits if st else []}))
+                    n_set += _write_together(led, todo)
+                except Exception as exc:
+                    _failed(failed, f"{rk}|{m}|{ver} の精算", exc)
         except Exception as exc:
             _failed(failed, f"{rk} の精算", exc)
     return n_set
