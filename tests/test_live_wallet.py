@@ -1232,3 +1232,13 @@ def test_saved_row_without_horses_still_checks_numbers():
     assert prediction_problem(p) is None
     assert prediction_problem({**p, "trios": [{"combo": "1-2-3", "p": NAN}]})
     assert prediction_problem({**p, "allocation": {"kelly": {"stakes": {"1-2-3": -100}}}})
+
+
+def test_money_check_needs_no_display_fields_but_still_checks_values():
+    """精算に表示用の項目は要らない（PR #15 の精算の試験）。入っている値が壊れていれば、精算でも弾く。"""
+    from keiba.live.saved import prediction_problem as bad
+    ok = {"allocation": {"kelly": {"status": "allocated", "stakes": {"1-2-3": 500}}}}
+    assert bad(ok, for_money=True) is None and bad(ok)
+    for change in ({"allocation": {"kelly": {"stakes": {"1-2-3": -100}}}}, {"trios_all": {"1-2-3": NAN}},
+                   {"trios": [{"combo": "1-2-3", "p": INF}]}, {"horses": None}, {"race_date": None}):
+        assert bad({**ok, **change}, for_money=True)

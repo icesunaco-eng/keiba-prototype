@@ -41,8 +41,11 @@ def probs_problem(probs, roster: set | None = None) -> str | None:
     return None
 
 
-def prediction_problem(p) -> str | None:
+def prediction_problem(p, for_money: bool = False) -> str | None:
+    """for_money：精算・仮想財布用。表示用の項目は無くてもよい（入っていれば検査する）。金額と確率はどちらでも検査する。"""
     try:
+        if for_money:
+            p = {"horses": [], "trios": [], "race_date": "", **p}
         horses = p.get("horses")
         if not isinstance(horses, list) or not all(isinstance(h, dict) and type(h.get("n")) is int for h in horses):
             return "馬の一覧が読めない"

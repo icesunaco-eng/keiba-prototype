@@ -390,7 +390,7 @@ def run_live(paths, log=print) -> dict:
                 todo = [a for a in ALLOC_METHODS if (rk, m, ver, a) not in settled]
                 if not todo:
                     continue
-                bad = saved.prediction_problem(p)
+                bad = saved.prediction_problem(p, for_money=True)
                 if bad:
                     held[f"{rk}|{p['time_point']}|{m}|{ver}"] = f"保存済みの予想を精算に使わない：{bad}"
                     continue
@@ -523,7 +523,7 @@ def odds_check(paths) -> pd.DataFrame:
 def wallet_summary(paths) -> pd.DataFrame:
     led = Ledger(paths.ledger_path, read_only=True)
     broken = {(p["race_key"], p["time_point"], p["method"], p["version"])
-              for p in led.predictions(live=True) if saved.prediction_problem(p)}
+              for p in led.predictions(live=True) if saved.prediction_problem(p, for_money=True)}
     rows = [s for s in led.settlements() if s["version"].startswith("live-") and not saved.settlement_problem(s)
             and (s["race_key"], s["time_point"], s["method"], s["version"]) not in broken]
     led.close()
