@@ -568,7 +568,7 @@ class Cache:
         if mode == "live":
             root = self.paths.data_dir / "live"
             files += [root / "state.json", root / "snapshots.jsonl", root / "races_archive.jsonl",
-                      root / "cancellations.jsonl"]
+                      root / "cancellations.jsonl", root / "post_times.jsonl"]
         else:
             files += [self.paths.tables_dir / f for f in ("races.parquet", "runners.parquet", "payouts.parquet")]
         return tuple(os.stat(f).st_mtime_ns if f.exists() else 0 for f in files)

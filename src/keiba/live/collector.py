@@ -43,6 +43,7 @@ REFRESH_MINUTES = 30
 ARCHIVE_FILE = "races_archive.jsonl"   # 予定表から外したレースの記録（追記だけ）
 KEEP_FIELDS = ("post_time", "field_size", "race_name", "surface", "distance_m")   # 一覧の再取得で欠けても前の値を残す欄
 ARCHIVE_FIELDS = ("race_date", "venue", "race_number", "race_name", "post_time", "field_size", "surface", "distance_m")
+POST_FILE = "post_times.jsonl"   # 発走時刻がいつ分かった・変わったか（追記だけ）。締切はこの記録で決める
 CANCEL_FILE = "cancellations.jsonl"   # JRAが発表したレースの取りやめ（追記だけ）
 LIVE_RETRY_MINUTES = 30   # 同じ精算の失敗が続くときに、やり直す間隔
 NOTICE_MINUTES = 30   # 取りやめのお知らせ（ニュースの月別一覧）を見に行く間隔
@@ -426,14 +427,38 @@ class Collector:
             self._live_needed()
         self.state["deadline_marked"] = sorted(due)
 
+    def record_post_times(self):
+        """発走時刻が初めて分かった・変わったときに post_times.jsonl へ足す。
+        記録を始めた回は、それまでに保存した出馬表の分も足す。"""
+        from .. import official
+        now = self.now()
+        seen = official.recorded_posts(self.root)
+        new = []
+        if not self.state.get("post_history_filled"):
+            lack = {rk for rk, _ in official.capture_records(self.root) if rk not in seen}
+            for rk, obs in sorted(official.card_observations(self.root, lack).items()):
+                kept: list = []
+                for at, post in obs:
+                    if not kept or kept[-1][1] != post:
+                        kept.append((at, post))
+                        new.append({"race_key": rk, "post_time": post, "seen_at": at.isoformat(timespec="seconds")})
+                seen[rk] = kept
+        for rk, r in self.state["races"].items():
+            post = r.get("post_time")
+            if post and (not seen.get(rk) or seen[rk][-1][1] != post):
+                new.append({"race_key": rk, "post_time": post, "seen_at": now.isoformat(timespec="seconds")})
+        if new:
+            append_lines(self.root / POST_FILE, [json.dumps(x, ensure_ascii=False) for x in new])
+        self.state["post_history_filled"] = True
+
     def _live_needed(self):
         """予想・精算をすぐ動かす（新しい材料・締切・取りやめ）。やり直しの待ちは取り消す。"""
         self.state["live_pending"] = True
         self.state.pop("live_retry_at", None)
 
     def live_pending(self) -> bool:
-        if not self.state.get("live_pending"):
-            return False
+        if not self.state.get("live_pending") or self.state.get("post_unrecorded"):
+            return False   # 発走時刻の変更を記録できていない間は予想を作らない（作る側と数える側の締切がずれる）
         wait = self.state.get("live_retry_at")
         return not wait or self.now() >= datetime.fromisoformat(wait)
 
@@ -475,6 +500,13 @@ class Collector:
             except Exception as exc:  # 1レースの失敗で全体を止めない
                 errors.append(f"{rk} {tp}: {exc!r}")
                 log(errors[-1])
+        try:
+            self.record_post_times()
+            self.state["post_unrecorded"] = False
+        except Exception as exc:
+            self.state["post_unrecorded"] = True
+            errors.append(f"発走時刻の記録: {exc!r}"[:300])
+            log(errors[-1])
         self.check_notices(log)
         missed = self.missed()
         notified = self.state.setdefault("missed_notified", [])

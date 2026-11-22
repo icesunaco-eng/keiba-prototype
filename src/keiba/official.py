@@ -5,6 +5,9 @@
   - 期限：その時点の締切（24h・1h・15m）＋10分。どちらも台帳に書いた時刻（created_at）で見る。発走時刻が分からなければ使わない
   - 表示：レース × 方式 × 時点ごとに、材料の後、期限までに最初に保存した版
   - 集計・精算：レース × 方式ごとに1つ。15分前（無ければ1時間前）の正式な版
+発走時刻が変わったとき（2026-11-23 たかむね決定）：
+  - 締切は、予想を保存した時点で分かっていた発走時刻で決める。後から動かさない（記録は post_times.jsonl、追記だけ）
+  - ただし、最終の発走時刻より後に保存したものは、どの場合も数えない
 成績は見ない（時刻だけで選ぶ）。
 """
 from __future__ import annotations
@@ -113,6 +116,70 @@ def material_time(records, dl: datetime) -> datetime | None:
     return min((t for k, t in got if k in MATERIAL_ODDS and t >= start), default=None)
 
 
+def card_observations(root: Path, keys) -> dict[str, list]:
+    """発走時刻の記録が無いレースの（分かった時刻, 発走時刻）を、保存した出馬表から読む（取得した順）。"""
+    from .app.data import card_post_time
+    from .live.wallet import _read, _snapshots
+
+    out: dict[str, list] = {}
+    if not keys or not (root / "snapshots.jsonl").exists():
+        return out
+    try:
+        snaps = _snapshots(root)
+        cards = snaps[(snaps["kind"] == "card") & snaps["race_key"].isin(list(keys))]
+        for _, rec in cards.iterrows():
+            at = _moment(rec.get("fetched_at"))
+            if not at:
+                continue
+            try:
+                post = card_post_time(_read(root, rec))
+            except (OSError, ValueError, TypeError):
+                continue
+            if post and _HHMM.fullmatch(post):
+                out.setdefault(rec["race_key"], []).append((at, post))
+    except (OSError, KeyError):
+        return out
+    for seen in out.values():
+        seen.sort(key=lambda x: x[0])
+    return out
+
+
+def recorded_posts(root: Path) -> dict[str, list]:
+    """収集が残した発走時刻の記録：レース → （分かった時刻, 発走時刻）の並び。"""
+    from .live.collector import POST_FILE, read_jsonl
+
+    out: dict[str, list] = {}
+    try:
+        rows = read_jsonl(root / POST_FILE)[0]
+    except OSError:
+        return out
+    for x in rows:
+        rk, post, at = x.get("race_key"), x.get("post_time"), _moment(x.get("seen_at"))
+        if isinstance(rk, str) and isinstance(post, str) and _HHMM.fullmatch(post) and at:
+            out.setdefault(rk, []).append((at, post))
+    for seen in out.values():
+        seen.sort(key=lambda x: x[0])
+    return out
+
+
+def post_history(root: Path, keys) -> dict[str, list]:
+    out = recorded_posts(root)
+    out.update(card_observations(root, set(keys) - set(out)))   # 記録を始める前のレースは原本から
+    return out
+
+
+def known_post(seen: list | None, at: datetime, final: str | None) -> str | None:
+    """その時刻に分かっていた発走時刻。それより前の記録が無ければ最初の記録、記録が無ければ最終の発走時刻。"""
+    if not seen:
+        return final
+    out = seen[0][1]
+    for when, post in seen:
+        if when > at:
+            break
+        out = post
+    return out
+
+
 def capture_records(root: Path) -> dict[tuple, list]:
     """(レース, 時点) → （種類, 取得時刻）の並び。目録が読めなければ空（＝材料は締切までそろわなかった扱い）。"""
     from .live.wallet import _snapshots
@@ -130,20 +197,25 @@ def capture_records(root: Path) -> dict[tuple, list]:
     return out
 
 
-def select(rows: list[tuple], posts: dict[str, str], records: dict[tuple, list]) -> Selection:
+def select(rows: list[tuple], posts: dict[str, str], records: dict[tuple, list],
+           history: dict[str, list] | None = None) -> Selection:
+    from .live.collector import race_post
+
     sel, first, start = Selection(), {}, {}
     for i, (rk, tp, m, v, created) in enumerate(rows):
-        limit, at = save_limit(rk, tp, posts.get(rk)), _moment(created)
-        if not limit or not at:
+        at, final = _moment(created), posts.get(rk)
+        known = known_post((history or {}).get(rk), at, final) if at and final else None
+        limit, ended = save_limit(rk, tp, known), race_post(rk, {"post_time": final})
+        if not limit or not at or not ended:
             sel.unknown.add((rk, tp, m, v))
             continue
-        if (rk, tp) not in start:
+        if (rk, tp, known) not in start:
             dl = limit - timedelta(minutes=GRACE_MINUTES)
             # 台帳の時刻は秒まで。材料の時刻も秒にそろえる
-            start[(rk, tp)] = (material_time(records.get((rk, tp), []), dl) or dl).replace(microsecond=0)
-        if at > limit:
+            start[(rk, tp, known)] = (material_time(records.get((rk, tp), []), dl) or dl).replace(microsecond=0)
+        if at > limit or at >= ended:
             sel.late.add((rk, tp, m, v))
-        elif at < start[(rk, tp)]:
+        elif at < start[(rk, tp, known)]:
             sel.early.add((rk, tp, m, v))
         else:
             sel.valid.add((rk, tp, m, v))
@@ -160,4 +232,7 @@ def select(rows: list[tuple], posts: dict[str, str], records: dict[tuple, list])
 
 def load(conn, root: Path) -> Selection:
     rows = prediction_rows(conn)
-    return select(rows, post_times(root, {r[0] for r in rows}), capture_records(root) if rows else {})
+    if not rows:
+        return select(rows, {}, {})
+    keys = {r[0] for r in rows}
+    return select(rows, post_times(root, keys), capture_records(root), post_history(root, keys))
