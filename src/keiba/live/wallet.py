@@ -337,7 +337,11 @@ def run_live(paths, log=print, now: datetime | None = None) -> dict:
     version = f"live-{code_hash()[:8]}"
     led = Ledger(paths.ledger_path)
     done = {(p["race_key"], p["time_point"], p["method"]) for p in led.predictions(version)}
-    mam_preds = {(p["race_key"], p["time_point"]): p for p in led.predictions() if p["method"] == "text_ai"}
+    from .. import official
+    sel = official.load(led.conn, root)
+    done |= {(rk, tp, m) for rk, m, tp in sel.shown}   # 正式な版を保存ずみの時点は、版が変わっても作らない
+    mam_preds = {(p["race_key"], p["time_point"]): p for p in led.predictions()
+                 if p["method"] == "text_ai" and sel.is_shown(p["race_key"], p["time_point"], "text_ai", p["version"])}
     n_pred = n_set = 0
     from .collector import race_started
     clock = now or prediction_clock()
@@ -346,6 +350,8 @@ def run_live(paths, log=print, now: datetime | None = None) -> dict:
             continue
         if race_started(rk, state["races"].get(rk), clock):
             continue   # 発走後は予想を作らない（コードの版が変わっても、結果を見た後の予想を台帳に足さない）
+        if clock > official.save_limit(rk, tp, state["races"][rk].get("post_time")):
+            continue   # 締切＋10分より後は作らない
         if not input_ready(rk, tp, inp, state["races"][rk], clock):
             continue   # この時点の取得を待つ
         g = feat[feat["race_key"] == rk].sort_values("horse_number")
@@ -404,11 +410,11 @@ def _settle(led, inputs: dict, state: dict, root: Path, now: datetime | None = N
     from .. import official
     sel = official.load(led.conn, root)
     for p in led.predictions():
-        if (p["race_key"], p["time_point"], p["method"], p["version"]) not in sel.valid:
-            continue   # 発走後に作られた予想は精算しない
+        if not sel.is_counted(p["race_key"], p["time_point"], p["method"], p["version"]):
+            continue   # 精算するのは正式な版だけ
         if p["version"].startswith("live-") and isinstance(p.get("allocation"), dict) and "kelly" in p["allocation"]:
             preds[(p["race_key"], p["time_point"], p["method"], p["version"])] = p
-    settled = {(s["race_key"], s["method"], s["version"], s["wallet"]) for s in led.settlements()}
+    settled = {(s["race_key"], s["time_point"], s["method"], s["version"], s["wallet"]) for s in led.settlements()}
     # JRAが取りやめを発表し、結果の行が無いレース：全額返還（不成立）として精算する
     from .collector import CANCEL_FILE, JST as _JST, cancelled_result, load_cancellations, race_started
     cancels = load_cancellations(root / CANCEL_FILE)
@@ -423,7 +429,7 @@ def _settle(led, inputs: dict, state: dict, root: Path, now: datetime | None = N
             if not p:
                 continue
             for a in ALLOC_METHODS:
-                if (rk, m, ver, a) in settled:
+                if (rk, p["time_point"], m, ver, a) in settled:
                     continue
                 stakes = p["allocation"][a]["stakes"]
                 st = settle_trio(stakes, 0, set(), None) if stakes else None
@@ -448,7 +454,7 @@ def _settle(led, inputs: dict, state: dict, root: Path, now: datetime | None = N
             if not p:
                 continue
             for a in ALLOC_METHODS:
-                if (rk, m, ver, a) in settled:
+                if (rk, p["time_point"], m, ver, a) in settled:
                     continue
                 stakes = p["allocation"][a]["stakes"]
                 if stakes and missing_payouts(stakes, finished, scratched, payouts):

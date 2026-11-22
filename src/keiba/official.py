@@ -1,9 +1,9 @@
 """これからのレースの予想のうち、どれを表示・精算・集計に使うか（2026-11-22 たかむね決定）。
 
-「発走前に作られた最後の版」だけを使う。台帳の行は消さず、読むときに選ぶ。
-  - 発走前：台帳に書いた時刻（created_at）が発走時刻より前。発走時刻が分からなければ発走前と言えないので使わない
-  - 表示：レース × 方式 × 時点ごとに、発走前に作られた最後の版
-  - 集計：レース × 方式ごとに1つ。15分前（無ければ1時間前）の、表示と同じ版。買う時に画面で見えていた予想
+「締切＋10分までに最初に保存した版」だけが正式。台帳の行は消さず、読むときに選ぶ。
+  - 期限：その時点の締切（24h・1h・15m）＋10分。台帳に書いた時刻（created_at）で見る。発走時刻が分からなければ使わない
+  - 表示：レース × 方式 × 時点ごとに、期限までに最初に保存した版
+  - 集計・精算：レース × 方式ごとに1つ。15分前（無ければ1時間前）の正式な版
 成績は見ない（時刻だけで選ぶ）。
 """
 from __future__ import annotations
@@ -11,17 +11,18 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+GRACE_MINUTES = 10   # 締切のあと、ここまでに保存したものだけが正式
 COUNT_TIME_POINTS = ("15m", "1h")   # 精算に使う時点（先にある方）。24時間前の予想は精算しない
 _HHMM = re.compile(r"\d{2}:\d{2}")
 
 
 @dataclass
 class Selection:
-    valid: set = field(default_factory=set)      # 発走前に作られた (レース, 時点, 方式, 版)
-    late: set = field(default_factory=set)       # 発走後に作られた
+    valid: set = field(default_factory=set)      # 期限までに保存した (レース, 時点, 方式, 版)
+    late: set = field(default_factory=set)       # 期限より後に保存した
     unknown: set = field(default_factory=set)    # 発走時刻が分からない
     shown: dict = field(default_factory=dict)    # (レース, 方式, 時点) → 版
     counted: dict = field(default_factory=dict)  # (レース, 方式) → (時点, 版)
@@ -90,21 +91,27 @@ def post_times(root: Path, keys) -> dict[str, str]:
     return found
 
 
-def select(rows: list[tuple], posts: dict[str, str]) -> Selection:
-    from .live.collector import race_post
+def save_limit(rk: str, tp: str, post_time: str | None) -> datetime | None:
+    """正式になる期限（締切＋10分）。発走時刻が分からなければ None。"""
+    from .live.collector import DEADLINE_MIN, race_post
 
-    sel, last = Selection(), {}
+    post = race_post(rk, {"post_time": post_time}) if post_time and tp in DEADLINE_MIN else None
+    return post - timedelta(minutes=DEADLINE_MIN[tp] - GRACE_MINUTES) if post else None
+
+
+def select(rows: list[tuple], posts: dict[str, str]) -> Selection:
+    sel, first = Selection(), {}
     for i, (rk, tp, m, v, created) in enumerate(rows):
-        post, at = race_post(rk, {"post_time": posts.get(rk)}) if posts.get(rk) else None, _moment(created)
-        if not post or not at:
+        limit, at = save_limit(rk, tp, posts.get(rk)), _moment(created)
+        if not limit or not at:
             sel.unknown.add((rk, tp, m, v))
-        elif at >= post:
+        elif at > limit:
             sel.late.add((rk, tp, m, v))
         else:
             sel.valid.add((rk, tp, m, v))
-            if (rk, m, tp) not in last or (at, i) > last[(rk, m, tp)][0]:   # 同じ秒なら、後に書いた行
-                last[(rk, m, tp)] = ((at, i), v)
-    sel.shown = {k: v for k, (_, v) in last.items()}
+            if (rk, m, tp) not in first or (at, i) < first[(rk, m, tp)][0]:   # 同じ秒なら、先に書いた行
+                first[(rk, m, tp)] = ((at, i), v)
+    sel.shown = {k: v for k, (_, v) in first.items()}
     for rk, m, _ in sel.shown:
         for tp in COUNT_TIME_POINTS:
             if (rk, m, tp) in sel.shown:

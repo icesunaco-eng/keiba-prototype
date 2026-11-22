@@ -836,3 +836,11 @@ def test_clock_skew_tolerance_across_midnight(fetched, odds_time, ok):
     from keiba.live.wallet import time_reasons
     race = {"race_date": "2025-09-01", "post_time": "15:40"}
     assert (not time_reasons(odds_time, fetched, race, "24h")) == ok
+
+
+def test_known_scratch_marked_only_in_odds_line(tmp_path):
+    """確認アプリ側の試験から：馬番が残り、馬名の横のオッズ欄だけに取消の印がある形。"""
+    card = card_html([f"H{h:04d}" for h in range(N)]).replace(
+        'ウマ7</a></div>', 'ウマ7</a></div><div class="odds"><div class="odds_line"><span class="num"><strong>取消</strong></span></div></div>')
+    r = _gate(tmp_path, card=card)
+    assert r["scratched_known"] == "8" and r["trio"] == "56/35" and not r["pass"]

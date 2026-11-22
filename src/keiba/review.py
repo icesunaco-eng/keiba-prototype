@@ -110,8 +110,8 @@ def build_review(paths, month: str | None, start: str | None = None, end: str | 
     review = {"month": month or f"{start}〜{end}", "races_predicted": len({p["race_key"] for p in preds}),
               "races_with_result": len({p["race_key"] for p in preds if p["race_key"] in results}),
               "versions": sorted({p["version"] for p in preds}),
-              "counting": "発走前に作られた最後の版だけを数える（2026-11-22 決定）",
-              "excluded": {"after_post": late, "post_unknown": unknown},
+              "counting": "締切＋10分までに最初に保存した版だけを数える（2026-11-22 決定）",
+              "excluded": {"after_limit": late, "post_unknown": unknown},
               "judgement": "回収率の達成判定はしない（取り決め：初週は判定しない。数週たまるまで参考）。実購入はしない"}
 
     review["comparison"] = comparison(preds, setts, results)
@@ -183,7 +183,7 @@ def write_review(paths, month: str | None, start: str | None = None, end: str | 
 
     parts = [f"<h1>月次の振り返り {html.escape(month)}</h1>",
              f"<p class='muted'>予想したレース {r['races_predicted']}・結果が分かったレース {r['races_with_result']}・版 {html.escape(', '.join(r['versions']) or '–')}</p>",
-             f"<p class='muted'>{html.escape(r['counting'])}。数えていない予想：発走後に作成 {r['excluded']['after_post']}件・"
+             f"<p class='muted'>{html.escape(r['counting'])}。数えていない予想：締切＋10分より後に保存 {r['excluded']['after_limit']}件・"
              f"発走時刻が不明 {r['excluded']['post_unknown']}件</p>",
              f"<p class='warn'>{html.escape(r['judgement'])}</p>",
              "<h2>比較：市場のみ・学習のみ・統合（同じレース・同じ時点）</h2>",

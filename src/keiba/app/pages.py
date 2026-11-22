@@ -973,9 +973,9 @@ def counting_note(src) -> str:
     """仮想の成績の数え方と、数えていない件数。"""
     if src.mode != "live":
         return ""
-    late, unknown = src.excluded["after_post"], src.excluded["post_unknown"]
-    return ('<p class="muted small">仮想は、発走前に作られた最後の版だけを数えるよ'
-            + (f"。発走後に作られた予想 {late:,}件は数えていない" if late else "")
+    late, unknown = src.excluded["after_limit"], src.excluded["post_unknown"]
+    return ('<p class="muted small">仮想は、締切＋10分までに最初に保存した版だけを数えるよ'
+            + (f"。締切＋10分より後に保存した予想 {late:,}件は数えていない" if late else "")
             + (f"。発走時刻が分からない予想 {unknown:,}件も数えていない" if unknown else "") + "</p>")
 
 
@@ -1108,7 +1108,7 @@ def improve_page(ctx, src, store, q) -> str:
         label = ("今の版", "運用中") if src.mode == "live" else ("検証の版", "検証データ")
         body.append(f'<div class="card"><div class="row"><h2>{label[0]}</h2><span class="chip ok">{label[1]}</span></div>'
                     f'<div style="font-weight:700">{h(cur["version"])}</div><p class="muted small" style="margin:2px 0 0">'
-                    f'{h(cur["first"][:10])} から・{cur.get("races_before_post", cur["races"]):,}R の発走前の予想</p></div>')
+                    f'{h(cur["first"][:10])} から・{cur.get("races_official", cur["races"]):,}R の正式な予想</p></div>')
     else:
         body.append(empty("今の版はまだ無いよ", "これからのレースの予想が保存されると表示するよ。"))
     body.append('<div class="card"><div class="row"><h2>くらべている候補</h2><span class="chip warn">並行して記録中</span></div>'
@@ -1208,7 +1208,7 @@ def improve_history_page(ctx, src, store, q) -> str:
         now_tag = ' <span class="chip ok">今の版</span>'
         rows = "".join(f'<div style="display:block"><b>{h(v["version"])}</b>{now_tag if v["version"] == src.version else ""}'
                        f'<div class="muted small">{h(v["first"][:10])}〜{h(v["last"][:10])}・{v["races"]:,}R・{v["predictions"]:,}件'
-                       + (f'（発走前は {v["races_before_post"]:,}R）' if v.get("races_before_post", v["races"]) != v["races"] else "")
+                       + (f'（正式は {v["races_official"]:,}R）' if v.get("races_official", v["races"]) != v["races"] else "")
                        + '</div></div>' for v in vs)
         body.append(f'<div class="card list tl" style="border-left:0;padding-left:14px">{rows}</div>')
     return layout(ctx, "変更履歴", "".join(body), "improve", "/improve", "変更履歴")

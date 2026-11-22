@@ -241,7 +241,7 @@ class Source:
         self.race_meta: dict = {}
         self.past_keys: set[str] = set()                    # 収集の予定表（7日で整理）から外れた、過去14日のレース（原本の記録から）
         self.settlements: list[dict] = []
-        self.excluded = {"after_post": 0, "post_unknown": 0}   # 数えていない予想の件数（発走後に作成・発走時刻が不明）
+        self.excluded = {"after_limit": 0, "post_unknown": 0}   # 数えていない予想の件数（期限より後に保存・発走時刻が不明）
         self.versions: list[dict] = []
         self.version = None
         self.loaded_at = time.time()
@@ -277,13 +277,13 @@ class Source:
             self._version_list(conn)
             from .. import official
             sel = official.load(conn, root)
-            self.excluded = {"after_post": len(sel.late), "post_unknown": len(sel.unknown)}
+            self.excluded = {"after_limit": len(sel.late), "post_unknown": len(sel.unknown)}
             usable: dict = defaultdict(set)
-            for rk, _, _, v in sel.valid:
+            for (rk, _, _), v in sel.shown.items():
                 usable[v].add(rk)
             for x in self.versions:
                 if x["version"].startswith("live-"):
-                    x["races_before_post"] = len(usable[x["version"]])
+                    x["races_official"] = len(usable[x["version"]])
             for rk, tp, m, v, created, payload in conn.execute(
                     "SELECT race_key,time_point,method,version,created_at,payload FROM predictions "
                     "WHERE version LIKE 'live-%' OR method='text_ai'"):

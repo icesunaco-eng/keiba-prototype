@@ -1,4 +1,4 @@
-"""数え方：発走前に作られた最後の版だけ（2026-11-22 決定）。別実装の答えと、画面・仮想財布・月次の3つを照らす。"""
+"""数え方：締切＋10分までに最初に保存した版だけ（2026-11-22 決定）。別実装の答えと、画面・仮想財布・月次の3つを照らす。"""
 import json
 import random
 import threading
@@ -17,6 +17,7 @@ from keiba.live.wallet import ALLOC_METHODS, _settle, wallet_summary
 DAY = "2026-11-21"
 RK = f"{DAY}|京都|1"
 POST = datetime(2026, 11, 21, 10, 1, tzinfo=JST)
+LIMIT_BEFORE_POST = {"24h": 1430, "1h": 50, "15m": 5}   # 締切＋10分は発走の何分前か
 
 
 def world(tmp_path, preds, posts=None, settle=True):
@@ -73,14 +74,15 @@ def test_random_ledgers_match_independent_answer(tmp_path, seed):
         seen.add(key)
         hhmm = posts[rk] or "12:00"
         post = datetime.fromisoformat(f"{DAY}T{hhmm}:00+09:00")
-        at = post + timedelta(seconds=rnd.choice([-90000, -3600, -900, -60, -1, -1, 0, 1, 60, 7200]))
+        limit = post - timedelta(minutes=LIMIT_BEFORE_POST[key[1]])
+        at = limit + timedelta(seconds=rnd.choice([-90000, -3600, -900, -60, -1, -1, 0, 0, 1, 60, 7200]))
         preds.append((*key, at, rnd.randint(1, 90) * 100, rnd.choice([0, 0, 1200, 45600])))
     paths = world(tmp_path, preds, posts)
 
-    shown = {}                                  # 別実装：書いた順に上書きしながら、一番遅い時刻を残す
+    shown = {}                                  # 別実装：書いた順に見て、期限内で一番早い時刻を残す
     for rk, tp, m, v, at, stake, back in preds:
-        if posts[rk] and at < datetime.fromisoformat(f"{DAY}T{posts[rk]}:00+09:00"):
-            if (rk, m, tp) not in shown or at >= shown[(rk, m, tp)][0]:
+        if posts[rk] and at <= datetime.fromisoformat(f"{DAY}T{posts[rk]}:00+09:00") - timedelta(minutes=LIMIT_BEFORE_POST[tp]):
+            if (rk, m, tp) not in shown or at < shown[(rk, m, tp)][0]:
                 shown[(rk, m, tp)] = (at, v, stake, back)
     want = defaultdict(lambda: [0, 0, 0, 0])
     for rk, m in {(rk, m) for rk, m, _ in shown}:
@@ -100,15 +102,15 @@ def test_random_ledgers_match_independent_answer(tmp_path, seed):
 
 
 def test_seventeen_versions_count_as_one_race(tmp_path):
-    preds = [(RK, "15m", "ml_lgbm", f"live-{i:08d}", POST + timedelta(minutes=i - 3), 100 * (i + 1), 0) for i in range(17)]
+    preds = [(RK, "15m", "ml_lgbm", f"live-{i:08d}", POST + timedelta(minutes=i - 12), 100 * (i + 1), 0) for i in range(17)]
     app, wallet, review, src = totals_everywhere(world(tmp_path, preds))
-    assert app == wallet == review and app[("ml_lgbm", "kelly")] == (1, 1, 300, 0)   # 発走1分前の版（3番目）
-    assert src.excluded == {"after_post": 14, "post_unknown": 0}
+    assert app == wallet == review and app[("ml_lgbm", "kelly")] == (1, 1, 100, 0)   # 期限内で最初の版（1番目）
+    assert src.excluded == {"after_limit": 9, "post_unknown": 0}
 
 
 def test_newer_24h_only_version_does_not_displace_15m(tmp_path):
     preds = [(RK, "15m", "ml_lgbm", "live-aaaaaaaa", POST - timedelta(minutes=10), 700, 0),
-             (RK, "24h", "ml_lgbm", "live-bbbbbbbb", POST - timedelta(minutes=2), 900, 0)]
+             (RK, "24h", "ml_lgbm", "live-bbbbbbbb", POST - timedelta(hours=25), 900, 0)]
     app, wallet, review, _ = totals_everywhere(world(tmp_path, preds))
     assert app == wallet == review and app[("ml_lgbm", "kelly")][2] == 700
 
@@ -174,7 +176,7 @@ def test_http_screens_say_how_many_were_not_counted(tmp_path):
                 body = r.read().decode()
             assert r.status == 200
             if path.startswith("/results"):
-                assert "発走後に作られた予想 1件は数えていない" in body and "10000%" not in body
+                assert "締切＋10分より後に保存した予想 1件は数えていない" in body and "10000%" not in body
     finally:
         srv.shutdown()
         srv.server_close()
@@ -189,4 +191,20 @@ def test_unknown_post_time_is_not_settled(tmp_path):
     sel = official.load(led.conn, paths.data_dir / "live")
     assert not sel.valid and sel.unknown
     assert _settle(led, {(RK, "result"): res}, {"races": {RK: {"field_size": 8}}}, paths.data_dir / "live", POST + timedelta(hours=1)) == 0
+    led.close()
+
+
+def test_same_version_settles_official_1h_even_if_late_15m_was_settled(tmp_path):
+    """期限後の15分前がすでに精算ずみでも、正式な1時間前を精算する（鍵に時点を入れる）。"""
+    preds = [(RK, "15m", "ml_lgbm", "live-aaaaaaaa", POST + timedelta(minutes=2), 900, 0)]
+    paths = world(tmp_path, preds)
+    led = Ledger(paths.ledger_path)
+    led._now = lambda: (POST - timedelta(minutes=55)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    alloc = {a: {"status": "allocated", "stakes": {"1-2-3": 500}, "total": 500} for a in ALLOC_METHODS}
+    led.add_prediction(RK, "1h", "ml_lgbm", "live-aaaaaaaa", {"allocation": alloc}, "i", "m", "c")
+    live = paths.data_dir / "live"
+    res = {"rows": [{"horse_number": n, "finish_position": n, "status": "finished"} for n in range(1, 9)],
+           "trio_payouts": [{"combo": "1-2-3", "payout_yen": 1000}]}
+    state = json.loads((live / "state.json").read_text())
+    assert _settle(led, {(RK, "result"): res}, state, live, POST + timedelta(hours=1)) == 3
     led.close()

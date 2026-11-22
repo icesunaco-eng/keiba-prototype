@@ -157,11 +157,13 @@ def test_L_truncated_notice_list_is_retried(tmp_path):
     col.client=Cl(); col.check_notices(lambda *_:None)
     assert "notices_at" not in col.state
 
-def test_M_no_prediction_after_post_even_for_new_code_version(env, monkeypatch):
+def test_M_no_second_prediction_for_saved_time_point_or_after_limit(env, monkeypatch):
     paths, col = env
     monkeypatch.setattr(wallet, "code_hash", lambda: "ffffffff00000000")
-    assert wallet.run_live(paths, now=datetime(2025,8,30,15,41,tzinfo=JST))["predicted"] == 0
-    assert wallet.run_live(paths, now=datetime(2025,8,30,15,20,tzinfo=JST))["predicted"] > 0
+    assert wallet.run_live(paths, now=datetime(2025,8,30,14,45,tzinfo=JST))["predicted"] == 0   # 正式な版を保存ずみ
+    paths.ledger_path.unlink()
+    assert wallet.run_live(paths, now=datetime(2025,8,30,14,51,tzinfo=JST))["predicted"] == 0   # 締切＋10分（14:50）を過ぎた
+    assert wallet.run_live(paths, now=datetime(2025,8,30,14,50,tzinfo=JST))["predicted"] > 0    # ちょうどは可
 
 
 def _reread_card(monkeypatch):

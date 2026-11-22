@@ -83,6 +83,9 @@ def _validate(pred: dict, state: dict, inputs: dict) -> tuple[dict, list]:
         raise Rejected("generated_at（タイムゾーン付き）が無い・読めない")
     if gen.tzinfo is None:
         raise Rejected("generated_at にタイムゾーンが無い")
+    from .. import official
+    if wallet.prediction_clock() > official.save_limit(rk, tp, r["post_time"]):
+        raise Rejected(f"受付の期限（締切＋{official.GRACE_MINUTES}分）を過ぎて届いた")
     if gen > dl:
         raise Rejected(f"締切後の予想（締切 {dl:%H:%M}・作成 {gen.astimezone(dl.tzinfo):%H:%M}）")
     nums = {c["horse_number"] for c in inputs[(rk, tp)]["card"]}
