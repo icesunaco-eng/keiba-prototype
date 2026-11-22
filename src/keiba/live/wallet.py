@@ -207,14 +207,20 @@ def _features(paths, lr, lrun):
     return feat, ev.eligible_features(feat[~feat["race_key"].isin(pending)], all_races, 5)
 
 
-def run_live(paths, log=print) -> dict:
+def prediction_clock() -> datetime:
+    """予想を作ってよいか（発走前か）を見る時計。"""
+    from .collector import JST as _JST
+    return datetime.now(_JST)
+
+
+def run_live(paths, log=print, now: datetime | None = None) -> dict:
     root = paths.data_dir / "live"
     state = json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {"races": {}}
     snaps = _snapshots(root)
     lr, lrun, inputs = live_tables(root, state, snaps)
     if lrun.empty:   # 予想を作る馬がいない回も、精算（取りやめの返還など）は行う
         led = Ledger(paths.ledger_path)
-        n_set = _settle(led, inputs, state, root)
+        n_set = _settle(led, inputs, state, root, now)
         led.commit()
         led.close()
         return {"predicted": 0, "settled": n_set}
@@ -224,9 +230,13 @@ def run_live(paths, log=print) -> dict:
     done = {(p["race_key"], p["time_point"], p["method"]) for p in led.predictions(version)}
     mam_preds = {(p["race_key"], p["time_point"]): p for p in led.predictions() if p["method"] == "text_ai"}
     n_pred = n_set = 0
+    from .collector import race_started
+    clock = now or prediction_clock()
     for (rk, tp), inp in sorted(inputs.items()):
         if tp == "result":
             continue
+        if race_started(rk, state["races"].get(rk), clock):
+            continue   # 発走後は予想を作らない（コードの版が変わっても、結果を見た後の予想を台帳に足さない）
         g = feat[feat["race_key"] == rk].sort_values("horse_number")
         g = g[g["horse_number"].isin([c["horse_number"] for c in inp["card"]])]
         if len(g) < 3:
@@ -269,13 +279,13 @@ def run_live(paths, log=print) -> dict:
         # ---- あいす統合（別枠の参考予想）----
         if tp in INT_TIME_POINTS:
             n_pred += _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state)
-    n_set = _settle(led, inputs, state, root)
+    n_set = _settle(led, inputs, state, root, now)
     led.commit()
     led.close()
     return {"predicted": n_pred, "settled": n_set, "version": version}
 
 
-def _settle(led, inputs: dict, state: dict, root: Path) -> int:
+def _settle(led, inputs: dict, state: dict, root: Path, now: datetime | None = None) -> int:
     """精算を書く（予想を作らない回でも行う）。書いた行の数を返す。"""
     n_set = 0
     # 精算（財布を持つ方式だけ。まむ（text_ai）など、ほかの live 版の予想もまとめて精算する）
@@ -285,9 +295,13 @@ def _settle(led, inputs: dict, state: dict, root: Path) -> int:
             preds[(p["race_key"], p["time_point"], p["method"], p["version"])] = p
     settled = {(s["race_key"], s["method"], s["version"], s["wallet"]) for s in led.settlements()}
     # JRAが取りやめを発表し、結果の行が無いレース：全額返還（不成立）として精算する
-    from .collector import CANCEL_FILE, cancelled_result, load_cancellations
+    from .collector import CANCEL_FILE, JST as _JST, cancelled_result, load_cancellations, race_started
     cancels = load_cancellations(root / CANCEL_FILE)
-    void = {rk for rk in {k[0] for k in preds} if cancelled_result(rk, cancels, inputs.get((rk, "result")))}
+    now = now or datetime.now(_JST)
+    races = state.get("races", {})
+    void = {rk for rk in {k[0] for k in preds}
+            if race_started(rk, races.get(rk), now)
+            and cancelled_result(rk, cancels, inputs.get((rk, "result")), races.get(rk), now)}
     for rk in sorted(void):
         for (m, ver) in sorted({(k[2], k[3]) for k in preds if k[0] == rk}):
             p = preds.get((rk, "15m", m, ver)) or preds.get((rk, "1h", m, ver))

@@ -1241,7 +1241,8 @@ def purchases_page(ctx, src, store, q) -> str:
         for e in es[:100]:
             st = settle_purchase(e, src.results.get(e["race_key"]))
             cell = {"settled": lambda: yen(st["returned"]) + (f'<br><span class="muted small">うち返還 {yen(st["refund"])}</span>' if st["refund"] else ""),
-                    "refunded_void": lambda: yen(st["returned"]) + '<br><span class="muted small">返還（不成立）</span>',
+                    "refunded_void": lambda: yen(st["returned"]) + '<br><span class="muted small">返還（'
+                    + ("取りやめ" if st.get("cancelled") else "不成立") + '）</span>',
                     "pending": lambda: '<span class="muted">結果待ち</span>',
                     "partial_result": lambda: '<span class="muted">保留（結果の一部だけ）</span>',
                     "unsettled_no_payout": lambda: '<span class="muted">払戻待ち</span>'}.get(st["status"], lambda: "—")()

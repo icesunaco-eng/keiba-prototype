@@ -370,7 +370,7 @@ class Source:
             from ..live.collector import CANCEL_FILE, cancelled_result, load_cancellations
             cancels = load_cancellations(root / CANCEL_FILE)
             for rk in self.races:
-                notice = cancelled_result(rk, cancels, results.get(rk))
+                notice = cancelled_result(rk, cancels, results.get(rk), self.races[rk])
                 if notice:
                     self.results[rk] = cancelled_res(notice)
             self._resettle_unsettled()

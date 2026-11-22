@@ -145,16 +145,49 @@ def cancel_notice(rk: str, cancels: list[dict]) -> dict | None:
     return None
 
 
-def cancelled_result(rk: str, cancels: list[dict], parsed: dict | None) -> dict | None:
-    """取りやめとして全額返還にしてよいなら、そのお知らせ。条件は2つとも：
+def race_post(rk: str, race: dict | None) -> datetime | None:
+    """発走の日時。分からなければ None。"""
+    try:
+        return datetime.fromisoformat(f"{rk[:10]}T{(race or {})['post_time']}:00+09:00")
+    except (KeyError, ValueError):
+        return None
+
+
+def race_started(rk: str, race: dict | None, now: datetime) -> bool:
+    """発走時刻を過ぎたか（時刻が分からなければ、その日が終わったか）。仮想財布の返還は、ここから書く
+    （精算は書き直せないので、15分前の最後の配分が決まる前には書かない）。"""
+    post = race_post(rk, race)
+    return now >= post if post else now.date().isoformat() > rk[:10]
+
+
+def cancelled_result(rk: str, cancels: list[dict], parsed: dict | None, race: dict | None = None,
+                     now: datetime | None = None) -> dict | None:
+    """取りやめとして全額返還にしてよいなら、そのお知らせ。条件は3つとも：
     1. JRAのお知らせがこのレースの取りやめを発表している
-    2. 結果のページが無いか、最後まで届いたページに結果の行が1つも無い（行があれば、本当の結果を使う）"""
+    2. 結果のページが無いか、最後まで届いたページに結果の行が1つも無い（行があれば、本当の結果を使う）
+    3. このレースが行われていないと言える。次のどれか：
+       - お知らせに取りやめのレースの番号がある（第8レース以降・第4レース）
+       - 発走時刻より前にお知らせを見つけた
+       - 結果の窓（発走の6時間後）が過ぎても、最後まで届いた結果のページに行が無い
+       「開催を中止」は途中のレースの後にも出るので、それだけでは発走ずみのレースを返還にしない"""
     notice = cancel_notice(rk, cancels)
     if not notice:
         return None
     if parsed is not None and (parsed.get("page_incomplete") or parsed.get("rows")):
         return None
-    return notice
+    if notice["from_race"] > 1 or notice["to_race"] is not None:
+        return notice
+    post = race_post(rk, race)
+    if not post:
+        return None
+    try:
+        if datetime.fromisoformat(notice["found_at"]) < post:
+            return notice
+    except (KeyError, TypeError, ValueError):
+        pass
+    if parsed is not None and (now or datetime.now(JST)) >= post + timedelta(minutes=WINDOWS["result"][1]):
+        return notice
+    return None
 
 
 def archived_keys(path: Path) -> set[str]:
@@ -197,6 +230,8 @@ class Collector:
                "path": str((d / name).relative_to(self.root)), "sha256": hashlib.sha256(body).hexdigest(),
                "source": jra.BASE + path, "cname": cname}
         append_lines(self.root / "snapshots.jsonl", [json.dumps(rec, ensure_ascii=False)])
+        if race_key:
+            self.state["live_pending"] = True   # 予想・精算がまだ（成功するまで毎回やり直す）
         return rec
 
     def _write_state(self):
@@ -221,31 +256,39 @@ class Collector:
         if not months:
             return
         known = {(c["race_date"], c["venue"], c["from_race"], c["to_race"]) for c in load_cancellations(self.root / CANCEL_FILE)}
-        new = []
-        try:
-            for ym in months:
+        seen = self.state.setdefault("notice_pages", {})
+        read_any = False
+        for ym in months:   # 月ごと：来月の一覧がまだ無くても、今月のお知らせは記録する
+            try:
                 path = f"/news/{ym.replace('-', '')}/"
                 page = self.client.get_url(jra.BASE + path)
-                rec = self._save(None, "notice", None, path, "", page)
+                if not jra.page_complete(page):
+                    raise ValueError("一覧のページが最後まで届いていない")
+                sha = hashlib.sha256(page.encode("utf-8")).hexdigest()
+                if seen.get(ym) != sha:   # 中身が変わったときだけ保存する
+                    self._save(None, "notice", None, path, "", page)
+                    seen[ym] = sha
+                new = []
                 for c in jra.parse_cancellations(page, int(ym[:4]), int(ym[5:7])):
                     if c["race_date"] is None:   # 日付の無い形：回次・日次が同じ予定表のレースから日付を決める（無ければ次の回）
-                        days = {r["race_date"] for r in self.state["races"].values()
-                                if r.get("venue") == c["venue"] and r.get("kai") == c["kai"] and r.get("nichi") == c["nichi"]}
-                        if len(days) != 1:
+                        dates = {r["race_date"] for r in self.state["races"].values()
+                                 if r.get("venue") == c["venue"] and r.get("kai") == c["kai"] and r.get("nichi") == c["nichi"]}
+                        if len(dates) != 1:
                             continue
-                        c = {**c, "race_date": days.pop()}
+                        c = {**c, "race_date": dates.pop()}
                     key = (c["race_date"], c["venue"], c["from_race"], c["to_race"])
                     if key in known:
                         continue
                     known.add(key)
                     new.append(json.dumps({**c, "found_at": now.isoformat(timespec="seconds"), "source": jra.BASE + path,
-                                           "sha256": rec["sha256"]}, ensure_ascii=False))
-            if new:
-                append_lines(self.root / CANCEL_FILE, new)
-        except Exception as exc:
-            log(f"取りやめのお知らせを見られなかった（次の回にもう一度）：{exc!r}")
-            return
-        self.state["notices_at"] = now.isoformat(timespec="seconds")
+                                           "sha256": sha}, ensure_ascii=False))
+                if new:
+                    append_lines(self.root / CANCEL_FILE, new)
+                read_any = True
+            except Exception as exc:
+                log(f"{ym} の取りやめのお知らせを見られなかった（次の回にもう一度）：{exc!r}")
+        if read_any:
+            self.state["notices_at"] = now.isoformat(timespec="seconds")
 
     # ---- 開催とレースの更新 ----
     def refresh(self, force: bool = False):
@@ -298,7 +341,7 @@ class Collector:
                 page = self.client.get(path, cname)
                 saved.append(self._save(rk, "result", tp, path, cname, page))
                 issue = result_issue(page, r.get("field_size"))
-                if issue and cancelled_result(rk, load_cancellations(self.root / CANCEL_FILE), jra.parse_result(page)):
+                if issue and cancelled_result(rk, load_cancellations(self.root / CANCEL_FILE), jra.parse_result(page), r, self.now()):
                     issue = None   # JRAが取りやめを発表し、結果の行も無い：取り直しをやめる（返還は精算の側で行う）
                 if issue:
                     # 途中までの結果（着順の空欄・払戻の欠けなど）：保存はするが「取得済み」にせず、窓の間は次の回に取り直す
@@ -334,7 +377,7 @@ class Collector:
         now = self.now()
         cancels = load_cancellations(self.root / CANCEL_FILE)
         for rk, r in self.state["races"].items():
-            if not r.get("post_time") or cancel_notice(rk, cancels):   # 取りやめのレースは「取れなかった」にしない
+            if not r.get("post_time") or cancelled_result(rk, cancels, None, r, now):   # 取りやめと言えるレースは「取れなかった」にしない
                 continue
             post = datetime.fromisoformat(f"{r['race_date']}T{r['post_time']}:00+09:00")
             known = datetime.fromisoformat(r.get("known_at", self.state.get("refreshed_at") or now.isoformat()))
@@ -343,6 +386,32 @@ class Collector:
                 if key not in self.state["taken"] and now >= post + timedelta(minutes=b) and known <= post + timedelta(minutes=a):
                     out.append(key)
         return out
+
+    def mark_cancellations(self):
+        """取りやめの精算ができるようになったレース（発走時刻を過ぎた・結果の窓が過ぎた）があれば、精算の待ちにする。
+        新しく保存したページが無くても精算が動くように（取りやめたレースは結果のページが出ないことがある）。"""
+        cancels = load_cancellations(self.root / CANCEL_FILE)
+        now = self.now()
+        due = []
+        for rk, r in self.state["races"].items():
+            if not cancel_notice(rk, cancels) or not race_started(rk, r, now):
+                continue
+            closed = not race_post(rk, r) or now >= race_post(rk, r) + timedelta(minutes=WINDOWS["result"][1])
+            due.append(f"{rk}|{'closed' if closed else 'started'}")
+        if set(due) - set(self.state.get("cancel_marked", [])):
+            self.state["live_pending"] = True
+        self.state["cancel_marked"] = sorted(due)
+
+    def live_pending(self) -> bool:
+        return bool(self.state.get("live_pending"))
+
+    def live_finished(self, ok: bool) -> bool:
+        """予想・精算の結果を残す。返すのは、失敗を知らせるか（続けて失敗している間は1回だけ）。"""
+        first = not ok and not self.state.get("live_failed")
+        self.state["live_pending"] = not ok
+        self.state["live_failed"] = not ok
+        self._write_state()
+        return first
 
     def tick(self, log=print, notify=None) -> dict:
         self.refresh()
@@ -378,6 +447,7 @@ class Collector:
             for rk in old:
                 if rk in saved:   # 記録を読み戻せたレースだけ予定表から外す
                     self.state["races"].pop(rk)
+        self.mark_cancellations()
         self._write_state()
         return {"requests": self.client.count, "saved": len(done), "races_known": len(self.state["races"]),
                 "missed": len(missed), "errors": len(errors)}

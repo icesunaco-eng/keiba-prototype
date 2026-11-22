@@ -132,8 +132,9 @@ def cmd_collect(paths, args):
     from .live.collector import Collector
     root = paths.data_dir / "live"
     if args.action == "tick":
-        out = Collector(root).tick(notify=_notify)
-        if out["saved"]:
+        col = Collector(root)
+        out = col.tick(notify=_notify)
+        if col.live_pending():   # 新しいページ・取りやめ・前の回の失敗のどれかがある
             from .live.wallet import run_live
             try:
                 out["live"] = run_live(paths)
@@ -143,9 +144,11 @@ def cmd_collect(paths, args):
                     from datetime import date
                     from .review import write_review
                     write_review(paths, date.today().strftime("%Y-%m"))
-            except Exception as exc:  # 予想の失敗で収集を止めない
+                col.live_finished(True)
+            except Exception as exc:  # 予想の失敗で収集を止めない（次の回にやり直す）
                 out["live_error"] = repr(exc)
-                _notify("予想・精算に失敗", repr(exc)[:120])
+                if col.live_finished(False):
+                    _notify("予想・精算に失敗", repr(exc)[:120])
         print(json.dumps(out, ensure_ascii=False))
     elif args.action == "install":
         import os

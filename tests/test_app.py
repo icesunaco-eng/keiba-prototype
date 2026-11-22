@@ -1371,7 +1371,8 @@ def test_notify_skips_cancelled_race(live_paths, tmp_path, monkeypatch):
     live = live_paths.data_dir / "live"
     (live / "snapshots.jsonl").write_text("")
     (live / "cancellations.jsonl").write_text(json.dumps(
-        {"race_date": "2026-11-22", "venue": "京都", "from_race": 1, "to_race": None, "title": "開催を中止"},
+        {"race_date": "2026-11-22", "venue": "京都", "from_race": 1, "to_race": None, "title": "開催を中止",
+         "found_at": "2026-11-22T08:00:00+09:00"},
         ensure_ascii=False) + "\n")
     app = App(live_paths, tmp_path / "p.sqlite")
     post = checks.post_datetime(app.cache.get("live").races[RK])

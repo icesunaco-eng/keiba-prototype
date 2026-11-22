@@ -3,6 +3,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def before_post_clock(monkeypatch):
+    """合成のレース（2025-08-30 15:40発走）の発走前として予想を作る。発走後の試験は now を渡す。"""
+    from datetime import datetime, timedelta, timezone
+
+    from keiba.live import wallet
+    at = datetime(2025, 8, 30, 14, 30, tzinfo=timezone(timedelta(hours=9)))
+    monkeypatch.setattr(wallet, "prediction_clock", lambda: at)
+
 VENUES = ["東京", "京都"]
 
 
