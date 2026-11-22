@@ -144,7 +144,9 @@ def cmd_collect(paths, args):
                     from datetime import date
                     from .review import write_review
                     write_review(paths, date.today().strftime("%Y-%m"))
-                col.live_finished(True)
+                failed = out["live"].get("failed")   # 一部のレース・方式だけの失敗：ほかは書けている。次の回にやり直す
+                if col.live_finished(not failed):
+                    _notify("予想・精算の一部に失敗", "; ".join(failed)[:120])
             except Exception as exc:  # 予想の失敗で収集を止めない（次の回にやり直す）
                 out["live_error"] = repr(exc)
                 if col.live_finished(False):
