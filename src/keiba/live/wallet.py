@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import pickle
-import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -31,7 +30,7 @@ from ..models import rule_v1
 from ..models.trio import fit_calibration
 from ..integrate import pool
 from ..settle import settle_trio
-from . import jra, saved
+from . import jra
 from .collector import DEADLINE_MIN, deadline
 
 WALLET_METHODS = ("ml_lgbm", "ml_market")
@@ -317,59 +316,51 @@ def run_live(paths, log=print) -> dict:
     done = {(p["race_key"], p["time_point"], p["method"]) for p in led.predictions(version)}
     mam_preds = {(p["race_key"], p["time_point"]): p for p in led.predictions() if p["method"] == "text_ai"}
     n_pred = n_set = 0
-    failed: list[str] = []
     for (rk, tp), inp in sorted(inputs.items()):
         if tp == "result":
             continue
-        try:  # 最後の砦：想定外の失敗でも、ほかのレース・時点は続ける
-            g = feat[feat["race_key"] == rk].sort_values("horse_number")
-            g = g[g["horse_number"].isin([c["horse_number"] for c in inp["card"]])]
-            if len(g) < 3:
+        g = feat[feat["race_key"] == rk].sort_values("horse_number")
+        g = g[g["horse_number"].isin([c["horse_number"] for c in inp["card"]])]
+        if len(g) < 3:
+            continue
+        g = g.assign(live_win_odds=g["horse_number"].map(inp["win"]["odds"]) if inp["win"]["ok"] else np.nan)
+        models = _models(paths, hist, "1h" if tp == "15m" else tp, str(g["race_date"].iloc[0].date()))
+        for m in (*WALLET_METHODS, *RULE_METHODS):
+            if (rk, tp, m) in done:
                 continue
-            if sorted(g["horse_number"].astype(int)) != sorted(int(c["horse_number"]) for c in inp["card"]):
-                # 結果で除外と分かった馬は特徴から抜ける。頭数の違う確率と倍率を混ぜた予想を作らない
-                held[f"{rk}|{tp}"] = "出馬表の出走馬と、予想に使える馬が合わない"
-                continue
-            g = g.assign(live_win_odds=g["horse_number"].map(inp["win"]["odds"]) if inp["win"]["ok"] else np.nan)
-            models = _models(paths, hist, "1h" if tp == "15m" else tp, str(g["race_date"].iloc[0].date()))
-            for m in (*WALLET_METHODS, *RULE_METHODS):
-                if (rk, tp, m) in done:
+            model, cal = models[m]
+            if m == "ml_market":
+                if not inp["win"]["ok"]:
                     continue
-                model, cal = models[m]
-                if m == "ml_market":
-                    if not inp["win"]["ok"]:
-                        continue
-                    model.odds_col = "live_win_odds"
-                sc = np.asarray(model.score(g), dtype=float)
-                if m in RULE_METHODS:
-                    v = RULE_METHODS[m]
-                    rg = rule_v1.score_frame(g, tp, rule_v1.VARIANTS[v]["prefix"])
-                    payload = ev.predict_race(g, sc, cal, "rule", tp, version, rg)
-                    payload["notes"] = [f"ルール {v}（役割A・比較用。配分しない）"]
-                    payload["allocation"] = {"status": "not_allocated_role_a"}
-                else:
-                    payload = ev.predict_race(g, sc, cal, m, tp, version, None)
-                    nums = g["horse_number"].astype(int).tolist()
-                    probs = {"-".join(map(str, sorted(nums[i] for i in c))): p
-                             for c, p in ev.trio_probs(cal.strength(sc), cal.gamma).items()}
-                    gate = inp["gate"]
-                    odds = inp["trio"]["odds"] if gate["pass"] else None
-                    payload["allocation"] = {a: (lambda x: {"status": x.status if gate["pass"] else "not_allocated_gate",
-                                                            "stakes": x.stakes, "total": x.total})(
-                        allocate(probs, odds, a, calibrated=cal.n_races >= 30)) for a in ALLOC_METHODS}
-                    payload["odds_gate"] = gate
-                    payload["trio_probs_full"] = {c: round(p, 7) for c, p in probs.items()}
-                payload["inputs"] = {"snapshots": inp["snapshots"], "card_fetched_at": inp["card_fetched_at"],
-                                     "scratched_known": inp["scratched"], "win_odds_ok": inp["win"]["ok"]}
-                payload["period"] = "live"
-                led.add_prediction(rk, tp, m, version, payload, sha(canonical(inp["snapshots"]))[:16],
-                                   sha(model.fingerprint() + canonical(cal.__dict__))[:16], code_hash())
-                n_pred += 1
-            # ---- あいす統合（別枠の参考予想）----
-            if tp in INT_TIME_POINTS:
-                n_pred += _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state)
-        except Exception as exc:
-            _race_failed(held, failed, f"{rk}|{tp}", "予想", exc)
+                model.odds_col = "live_win_odds"
+            sc = np.asarray(model.score(g), dtype=float)
+            if m in RULE_METHODS:
+                v = RULE_METHODS[m]
+                rg = rule_v1.score_frame(g, tp, rule_v1.VARIANTS[v]["prefix"])
+                payload = ev.predict_race(g, sc, cal, "rule", tp, version, rg)
+                payload["notes"] = [f"ルール {v}（役割A・比較用。配分しない）"]
+                payload["allocation"] = {"status": "not_allocated_role_a"}
+            else:
+                payload = ev.predict_race(g, sc, cal, m, tp, version, None)
+                nums = g["horse_number"].astype(int).tolist()
+                probs = {"-".join(map(str, sorted(nums[i] for i in c))): p
+                         for c, p in ev.trio_probs(cal.strength(sc), cal.gamma).items()}
+                gate = inp["gate"]
+                odds = inp["trio"]["odds"] if gate["pass"] else None
+                payload["allocation"] = {a: (lambda x: {"status": x.status if gate["pass"] else "not_allocated_gate",
+                                                        "stakes": x.stakes, "total": x.total})(
+                    allocate(probs, odds, a, calibrated=cal.n_races >= 30)) for a in ALLOC_METHODS}
+                payload["odds_gate"] = gate
+                payload["trio_probs_full"] = {c: round(p, 7) for c, p in probs.items()}
+            payload["inputs"] = {"snapshots": inp["snapshots"], "card_fetched_at": inp["card_fetched_at"],
+                                 "scratched_known": inp["scratched"], "win_odds_ok": inp["win"]["ok"]}
+            payload["period"] = "live"
+            led.add_prediction(rk, tp, m, version, payload, sha(canonical(inp["snapshots"]))[:16],
+                               sha(model.fingerprint() + canonical(cal.__dict__))[:16], code_hash())
+            n_pred += 1
+        # ---- あいす統合（別枠の参考予想）----
+        if tp in INT_TIME_POINTS:
+            n_pred += _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state)
     # 精算（財布を持つ方式だけ。まむ（text_ai）など、ほかの live 版の予想もまとめて精算する）
     preds = {}
     for p in led.predictions():
@@ -379,47 +370,27 @@ def run_live(paths, log=print) -> dict:
     for (rk, tp), res in inputs.items():
         if tp != "result":
             continue
-        try:
-            rows = res["rows"]
-            finishers = sum(r["status"] == "finished" for r in rows)
-            scratched = {r["horse_number"] for r in rows if r["status"] in ("withdrawn", "excluded")}
-            payouts = {p["combo"]: p["payout_yen"] for p in res["trio_payouts"]} or None
-            for (m, ver) in sorted({(k[2], k[3]) for k in preds if k[0] == rk}):
-                p = preds.get((rk, "15m", m, ver)) or preds.get((rk, "1h", m, ver))
-                if not p:
+        rows = res["rows"]
+        finishers = sum(r["status"] == "finished" for r in rows)
+        scratched = {r["horse_number"] for r in rows if r["status"] in ("withdrawn", "excluded")}
+        payouts = {p["combo"]: p["payout_yen"] for p in res["trio_payouts"]} or None
+        for (m, ver) in sorted({(k[2], k[3]) for k in preds if k[0] == rk}):
+            p = preds.get((rk, "15m", m, ver)) or preds.get((rk, "1h", m, ver))
+            if not p:
+                continue
+            for a in ALLOC_METHODS:
+                if (rk, m, ver, a) in settled:
                     continue
-                todo = [a for a in ALLOC_METHODS if (rk, m, ver, a) not in settled]
-                if not todo:
-                    continue
-                bad = saved.prediction_problem(p, for_money=True)
-                if bad:
-                    held[f"{rk}|{p['time_point']}|{m}|{ver}"] = f"保存済みの予想を精算に使わない：{bad}"
-                    continue
-                for a in todo:
-                    stakes = p["allocation"][a]["stakes"]
-                    st = settle_trio(stakes, finishers, scratched, payouts) if stakes else None
-                    led.add_settlement(rk, p["time_point"], m, ver, a,
-                                       {"status": st.status if st else p["allocation"][a]["status"],
-                                        "stake": st.stake if st else 0, "returned": st.returned if st else 0,
-                                        "hits": st.hits if st else []})
-                    n_set += 1
-        except Exception as exc:
-            _race_failed(held, failed, f"{rk}|result", "精算", exc)
+                stakes = p["allocation"][a]["stakes"]
+                st = settle_trio(stakes, finishers, scratched, payouts) if stakes else None
+                led.add_settlement(rk, p["time_point"], m, ver, a,
+                                   {"status": st.status if st else p["allocation"][a]["status"],
+                                    "stake": st.stake if st else 0, "returned": st.returned if st else 0,
+                                    "hits": st.hits if st else []})
+                n_set += 1
     led.commit()
     led.close()
-    _write_held(root, held)
-    out = {"predicted": n_pred, "settled": n_set, "version": version, "held": len(held)}
-    if failed:
-        out["failed"] = failed
-    return out
-
-
-def _race_failed(held: dict, failed: list, key: str, what: str, exc: Exception):
-    if isinstance(exc, sqlite3.Error):
-        raise exc  # 台帳の失敗（ロックなど）はレースのせいではない。飛ばさずに回ごとやり直す（PR #15 と同じ決まり）
-    held[key] = f"{what}に失敗：{type(exc).__name__}: {exc}"[:200]
-    failed.append(key)
-    print(f"{key} の{what}に失敗したので、そこだけ飛ばした：{exc!r}"[:300])
+    return {"predicted": n_pred, "settled": n_set, "version": version, "held": len(held)}
 
 
 def market_probs(trio_odds: dict) -> dict:
@@ -456,25 +427,16 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) ->
         else:
             reasons.append("市場推定確率：三連複オッズが合格していない（" + " / ".join(gate.get("reasons", [])) + "）")
         if "ml" in w:
-            bad = saved.probs_problem(ml, set(nums))
-            if bad or not ml:
-                formal = False
-                reasons.append(f"学習：確率を使えない（{bad or '確率なし'}）")
-            else:
-                sources["ml"] = ml
+            sources["ml"] = ml
         if "mam" in w:
             mp = mam_preds.get((rk, tp))
             if mp is None:
                 if now <= dl:
                     continue  # 締切まではまむの予想を待つ
                 reasons.append("まむ：締切までに予想が無い")
-            elif bad := (saved.prediction_problem(mp) or saved.probs_problem(mp.get("trios_all") or {}, set(nums))):
-                # 検査のゆるかった版が受け付けた非数など・取消で出走馬が変わった予想。台帳は直さず、ここで使わない
-                formal = False
-                reasons.append(f"まむ：保存済みの予想を使えない（{bad}）")
             else:
                 sources["mam"] = mp.get("trios_all") or {}
-                if not mp.get("complete") or len(sources["mam"]) != len(ml):
+                if not mp.get("complete"):
                     formal = False
                     reasons.append("まむ：全組の確率がそろっていない（足りない組を埋めて正式な確率にはしない。参考表示）")
         missing = [k for k in w if k not in sources]
@@ -525,10 +487,7 @@ def odds_check(paths) -> pd.DataFrame:
 
 def wallet_summary(paths) -> pd.DataFrame:
     led = Ledger(paths.ledger_path, read_only=True)
-    broken = {(p["race_key"], p["time_point"], p["method"], p["version"])
-              for p in led.predictions(live=True) if saved.prediction_problem(p, for_money=True)}
-    rows = [s for s in led.settlements() if s["version"].startswith("live-") and not saved.settlement_problem(s)
-            and (s["race_key"], s["time_point"], s["method"], s["version"]) not in broken]
+    rows = [s for s in led.settlements() if s["version"].startswith("live-")]
     led.close()
     if not rows:
         return pd.DataFrame(columns=["method", "wallet", "races", "bet_races", "stake", "returned", "roi"])

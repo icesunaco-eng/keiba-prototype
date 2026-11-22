@@ -21,7 +21,6 @@ import numpy as np
 import pandas as pd
 
 from .ledger import Ledger
-from .live import saved
 from .live.wallet import _snapshots, live_tables, odds_check
 from .report.html import _page
 
@@ -90,16 +89,8 @@ def comparison(preds: list, setts: list, results: dict) -> list:
 
 def build_review(paths, month: str | None, start: str | None = None, end: str | None = None) -> dict:
     led = Ledger(paths.ledger_path, read_only=True) if paths.ledger_path.exists() else None
-    preds, broken = [], set()
-    for p in (led.predictions(live=True) if led else []):
-        if saved.prediction_problem(p, for_money=True):  # 保存済みの壊れた予想（非数など）は、その精算も成績に数えない
-            broken.add((p["race_key"], p["time_point"], p["method"], p["version"]))
-        if saved.prediction_problem(p):
-            continue
-        if _in_range(p["race_date"], month, start, end):
-            preds.append(p)
-    setts = [s for s in (led.settlements() if led else []) if s["version"].startswith("live-") and _in_range(s["race_key"][:10], month, start, end)
-             and not saved.settlement_problem(s) and (s["race_key"], s["time_point"], s["method"], s["version"]) not in broken]
+    preds = [p for p in (led.predictions() if led else []) if p["version"].startswith("live-") and _in_range(p["race_date"], month, start, end)]
+    setts = [s for s in (led.settlements() if led else []) if s["version"].startswith("live-") and _in_range(s["race_key"][:10], month, start, end)]
     if led:
         led.close()
     results, state = _results(paths)
