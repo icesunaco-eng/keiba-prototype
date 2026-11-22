@@ -225,7 +225,11 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                     page = _read(root, trio_rec)
                     t = jra.parse_trio_odds(page, active)
                     t["odds_time"] = jra.parse_odds_time(page)
-                inputs[(rk, tp)] = {"card": card, "scratched": scratched, "win": w, "trio": t,
+                at_tp = set(s[(s["time_point"] == tp) & before]["kind"])
+                # この時点の取得が終わったか（出馬表は取れてオッズの途中で失敗、はまだ）
+                captured = f"{rk}|{tp}" in (state.get("taken") or {}) or (
+                    "card" in at_tp and bool(at_tp & {"odds_trio", "odds_unavailable"}))
+                inputs[(rk, tp)] = {"card": card, "scratched": scratched, "win": w, "trio": t, "captured": captured,
                                     "gate": _with_card_issue(odds_gate(t, trio_rec, r, tp) if tp != "24h" or trio_rec is not None else
                                                              {"pass": False, "reasons": ["前日はオッズを使わない（未発売のことが多い）"]},
                                                              card_issue),
@@ -310,6 +314,12 @@ def prediction_clock() -> datetime:
     return datetime.now(_JST)
 
 
+def input_ready(rk: str, tp: str, inp: dict, race: dict, now: datetime) -> bool:
+    """その時点の入力で確定してよいか：その時点の取得が終わったか、締切を過ぎた（取れなかったので、ある材料で作る）。
+    前の時点の出馬表しか無いうちに作ると、馬体重もオッズも無いまま固定される（台帳・まむへの入力は書き直さない）。"""
+    return inp["captured"] or now >= deadline(race["race_date"], race["post_time"], tp)
+
+
 def run_live(paths, log=print, now: datetime | None = None) -> dict:
     root = paths.data_dir / "live"
     state = json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {"races": {}}
@@ -336,6 +346,8 @@ def run_live(paths, log=print, now: datetime | None = None) -> dict:
             continue
         if race_started(rk, state["races"].get(rk), clock):
             continue   # 発走後は予想を作らない（コードの版が変わっても、結果を見た後の予想を台帳に足さない）
+        if not input_ready(rk, tp, inp, state["races"][rk], clock):
+            continue   # この時点の取得を待つ
         g = feat[feat["race_key"] == rk].sort_values("horse_number")
         g = g[g["horse_number"].isin([c["horse_number"] for c in inp["card"]])]
         if len(g) < 3:
@@ -377,7 +389,7 @@ def run_live(paths, log=print, now: datetime | None = None) -> dict:
             n_pred += 1
         # ---- あいす統合（別枠の参考予想）----
         if tp in INT_TIME_POINTS:
-            n_pred += _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state)
+            n_pred += _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state, clock)
     n_set = _settle(led, inputs, state, root, now)
     led.commit()
     led.close()
@@ -389,7 +401,11 @@ def _settle(led, inputs: dict, state: dict, root: Path, now: datetime | None = N
     n_set = 0
     # 精算（財布を持つ方式だけ。まむ（text_ai）など、ほかの live 版の予想もまとめて精算する）
     preds = {}
+    from .. import official
+    sel = official.load(led.conn, root)
     for p in led.predictions():
+        if (p["race_key"], p["time_point"], p["method"], p["version"]) not in sel.valid:
+            continue   # 発走後に作られた予想は精算しない
         if p["version"].startswith("live-") and isinstance(p.get("allocation"), dict) and "kelly" in p["allocation"]:
             preds[(p["race_key"], p["time_point"], p["method"], p["version"])] = p
     settled = {(s["race_key"], s["method"], s["version"], s["wallet"]) for s in led.settlements()}
@@ -456,13 +472,12 @@ def market_probs(trio_odds: dict) -> dict:
     return {c: v / total for c, v in inv.items()}
 
 
-def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) -> int:
+def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state, now: datetime) -> int:
     """統合の3版を記録する。入力が欠けたら黙って外さず、理由を残して未配分にする。"""
     from datetime import timezone
     added = 0
     r = state["races"][rk]
     dl = deadline(r["race_date"], r["post_time"], tp)
-    now = datetime.now(dl.tzinfo)
     gate = inp["gate"]
     nums = g["horse_number"].astype(int).tolist()
     model, cal = models["ml_lgbm"]
@@ -523,8 +538,9 @@ def odds_check(paths) -> pd.DataFrame:
     state = json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {"races": {}}
     _, _, inputs = live_tables(root, state, _snapshots(root))
     rows = []
+    now = prediction_clock()
     for (rk, tp), inp in sorted(inputs.items()):
-        if tp == "result":
+        if tp == "result" or not input_ready(rk, tp, inp, state["races"][rk], now):
             continue
         g = inp["gate"]
         rows.append({"race_key": rk, "time_point": tp, "deadline": g.get("deadline"), "pass": g["pass"], "reasons": " / ".join(g["reasons"]),
@@ -536,7 +552,10 @@ def odds_check(paths) -> pd.DataFrame:
 
 def wallet_summary(paths) -> pd.DataFrame:
     led = Ledger(paths.ledger_path, read_only=True)
-    rows = [s for s in led.settlements() if s["version"].startswith("live-")]
+    from .. import official
+    sel = official.load(led.conn, paths.data_dir / "live")
+    rows = [s for s in led.settlements() if s["version"].startswith("live-")
+            and sel.is_counted(s["race_key"], s["time_point"], s["method"], s["version"])]
     led.close()
     if not rows:
         return pd.DataFrame(columns=["method", "wallet", "races", "bet_races", "stake", "returned", "roi"])

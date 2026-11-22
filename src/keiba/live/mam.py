@@ -19,6 +19,7 @@ from pathlib import Path
 from ..allocate import allocate
 from ..ledger import Ledger, canonical, code_hash, sha
 from .collector import deadline
+from . import wallet
 from .wallet import ALLOC_METHODS, _snapshots, live_tables
 
 MAM_VERSION = "live-mam-v1"
@@ -42,8 +43,8 @@ def export_packets(paths) -> list[Path]:
             continue
         r = state["races"][rk]
         f = out_dir / f"{rk.replace('|', '_')}_{tp}.json"
-        if f.exists():
-            continue
+        if f.exists() or not wallet.input_ready(rk, tp, inp, r, wallet.prediction_clock()):
+            continue   # その時点の取得を待つ（一度書いた入力は書き直さない）
         gate = inp["gate"]
         packet = {
             "schema": SCHEMA_IN, "race_key": rk, "time_point": tp,

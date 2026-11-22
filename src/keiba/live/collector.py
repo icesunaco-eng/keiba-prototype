@@ -406,6 +406,18 @@ class Collector:
             self.state["live_pending"] = True
         self.state["cancel_marked"] = sorted(due)
 
+    def mark_deadlines(self):
+        """締切を過ぎた時点があれば予想の待ちにする（取れなかった時点・まむの予想が届かなかった時点は、締切で作る）。"""
+        now = self.now()
+        due = []
+        for rk, r in self.state["races"].items():
+            post = race_post(rk, r)
+            if post and now < post:
+                due += [f"{rk}|{tp}" for tp, m in DEADLINE_MIN.items() if now >= post - timedelta(minutes=m)]
+        if set(due) - set(self.state.get("deadline_marked", [])):
+            self.state["live_pending"] = True
+        self.state["deadline_marked"] = sorted(due)
+
     def live_pending(self) -> bool:
         return bool(self.state.get("live_pending"))
 
@@ -452,6 +464,7 @@ class Collector:
                 if rk in saved:   # 記録を読み戻せたレースだけ予定表から外す
                     self.state["races"].pop(rk)
         self.mark_cancellations()
+        self.mark_deadlines()
         self._write_state()
         return {"requests": self.client.count, "saved": len(done), "races_known": len(self.state["races"]),
                 "missed": len(missed), "errors": len(errors)}

@@ -969,6 +969,16 @@ def _real(src, store, keys: set[str] | None = None) -> dict:
     return tot
 
 
+def counting_note(src) -> str:
+    """仮想の成績の数え方と、数えていない件数。"""
+    if src.mode != "live":
+        return ""
+    late, unknown = src.excluded["after_post"], src.excluded["post_unknown"]
+    return ('<p class="muted small">仮想は、発走前に作られた最後の版だけを数えるよ'
+            + (f"。発走後に作られた予想 {late:,}件は数えていない" if late else "")
+            + (f"。発走時刻が分からない予想 {unknown:,}件も数えていない" if unknown else "") + "</p>")
+
+
 def results_page(ctx, src, store, q) -> str:
     n = q.get("n") if q.get("n") in dict(N_CHOICES) else "100"
     wallet = MAIN_WALLET[src.mode]
@@ -992,6 +1002,7 @@ def results_page(ctx, src, store, q) -> str:
         body.append('<p class="muted small">初週は回収率の判定をしない取り決め。数週たまるまでは参考として見てね</p>')
     else:
         body.append('<p class="muted small">検証データの「仮想」は、オッズを見ずに上位10組を100円ずつ買ったと仮定した参考の数字</p>')
+    body.append(counting_note(src))
     body.append(link_list([("方式ごと", "学習・まむ・統合・基準をくらべる", url("/results/methods", n=n)),
                            ("条件別", "距離・馬場・クラスごと", url("/results/conditions", n=n)),
                            ("見送りの振り返り", "見送ったレースはどうだった？", url("/results/skips", n=n)),
@@ -1018,6 +1029,7 @@ def results_methods_page(ctx, src, store, q) -> str:
     body.append(f'<div class="card"><table><tr><th>方式</th><th>R</th><th>買った</th><th>的中</th><th>回収率</th></tr>{rows}</table></div>'
                 f'<p class="muted small">R＝精算したレース、買った・的中＝レース数。{h(WALLET_LABEL.get(wallet, wallet))}。まむは予想が届いたレースだけ。基準と比べて上回るかを見るよ'
                 + (f'。払戻が分からない {waiting}件は入れていない' if waiting else "") + '</p>')
+    body.append(counting_note(src))
     return layout(ctx, "方式ごと", "".join(body), "results", url("/results", n=n), "方式ごと")
 
 
@@ -1052,6 +1064,7 @@ def results_conditions_page(ctx, src, store, q) -> str:
     body.append(f'<div class="card"><table><tr><th>{ {"dist": "距離", "surface": "芝・ダート", "class": "クラス", "month": "月"}[dim]}</th>'
                 f'<th>R</th><th>的中率</th><th>回収率</th></tr>{rows or "<tr><td colspan=4 class=muted>—</td></tr>"}</table></div>'
                 f'<p class="muted small">件数が少ない条件は、たまたまの差が大きいよ（20R未満は参考）</p>')
+    body.append(counting_note(src))
     return layout(ctx, "条件別", "".join(body), "results", url("/results", n=n), "条件別")
 
 
@@ -1095,7 +1108,7 @@ def improve_page(ctx, src, store, q) -> str:
         label = ("今の版", "運用中") if src.mode == "live" else ("検証の版", "検証データ")
         body.append(f'<div class="card"><div class="row"><h2>{label[0]}</h2><span class="chip ok">{label[1]}</span></div>'
                     f'<div style="font-weight:700">{h(cur["version"])}</div><p class="muted small" style="margin:2px 0 0">'
-                    f'{h(cur["first"][:10])} から・{cur["races"]:,}R の予想</p></div>')
+                    f'{h(cur["first"][:10])} から・{cur.get("races_before_post", cur["races"]):,}R の発走前の予想</p></div>')
     else:
         body.append(empty("今の版はまだ無いよ", "これからのレースの予想が保存されると表示するよ。"))
     body.append('<div class="card"><div class="row"><h2>くらべている候補</h2><span class="chip warn">並行して記録中</span></div>'
@@ -1194,7 +1207,9 @@ def improve_history_page(ctx, src, store, q) -> str:
     else:
         now_tag = ' <span class="chip ok">今の版</span>'
         rows = "".join(f'<div style="display:block"><b>{h(v["version"])}</b>{now_tag if v["version"] == src.version else ""}'
-                       f'<div class="muted small">{h(v["first"][:10])}〜{h(v["last"][:10])}・{v["races"]:,}R・{v["predictions"]:,}件</div></div>' for v in vs)
+                       f'<div class="muted small">{h(v["first"][:10])}〜{h(v["last"][:10])}・{v["races"]:,}R・{v["predictions"]:,}件'
+                       + (f'（発走前は {v["races_before_post"]:,}R）' if v.get("races_before_post", v["races"]) != v["races"] else "")
+                       + '</div></div>' for v in vs)
         body.append(f'<div class="card list tl" style="border-left:0;padding-left:14px">{rows}</div>')
     return layout(ctx, "変更履歴", "".join(body), "improve", "/improve", "変更履歴")
 

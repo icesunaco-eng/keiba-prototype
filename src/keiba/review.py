@@ -20,7 +20,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from . import official
 from .ledger import Ledger
+from .live.collector import ARCHIVE_FILE, read_jsonl
 from .live.wallet import _snapshots, live_tables, odds_check
 from .report.html import _page
 
@@ -31,7 +33,12 @@ MARKS = ("食い違い", "食い違いなし", "判定できず")
 def _results(paths) -> dict:
     root = paths.data_dir / "live"
     state = json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {"races": {}}
-    _, _, inputs = live_tables(root, state, _snapshots(root))
+    races = {}
+    for x in read_jsonl(root / ARCHIVE_FILE)[0]:   # 予定表から外した（7日より前の）レースの結果も数える
+        if all(x.get(k) is not None for k in ("race_key", "race_date", "venue", "race_number")):
+            races[x["race_key"]] = {k: v for k, v in x.items() if k != "race_key"}
+    races.update(state.get("races", {}))
+    _, _, inputs = live_tables(root, {**state, "races": races}, _snapshots(root))
     out = {}
     for (rk, tp), res in inputs.items():
         if tp != "result":
@@ -79,7 +86,7 @@ def comparison(preds: list, setts: list, results: dict) -> list:
                 actual = results[rk]["actual"]
                 ll.append(-np.log(max(p["trio_probs_full"].get(actual, 0.0), 1e-6)))
                 hit.append(actual in [t["combo"] for t in p["trios"][:10]])
-            st = [x for rk, _ in keys for x in roi.get((rk, m), []) if x["wallet"] == "ev_weighted"]
+            st = [x for rk in {rk for rk, _ in keys} for x in roi.get((rk, m), []) if x["wallet"] == "ev_weighted"]
             stake = sum(x["stake"] for x in st)
             out.append({"set": "まむ入り" if "int_market_ml_mam" in group else "基本", "method": CMP_LABELS[m], "races": len(keys),
                         "logloss": round(float(np.mean(ll)), 4), "hit10": round(float(np.mean(hit)), 4),
@@ -91,12 +98,20 @@ def build_review(paths, month: str | None, start: str | None = None, end: str | 
     led = Ledger(paths.ledger_path, read_only=True) if paths.ledger_path.exists() else None
     preds = [p for p in (led.predictions() if led else []) if p["version"].startswith("live-") and _in_range(p["race_date"], month, start, end)]
     setts = [s for s in (led.settlements() if led else []) if s["version"].startswith("live-") and _in_range(s["race_key"][:10], month, start, end)]
+    late = unknown = 0
     if led:
+        sel = official.load(led.conn, paths.data_dir / "live")
+        key = lambda x: (x["race_key"], x["time_point"], x["method"], x["version"])
+        late, unknown = sum(key(p) in sel.late for p in preds), sum(key(p) in sel.unknown for p in preds)
+        preds = [p for p in preds if sel.is_shown(*key(p))]
+        setts = [s for s in setts if sel.is_counted(*key(s))]
         led.close()
     results, state = _results(paths)
     review = {"month": month or f"{start}〜{end}", "races_predicted": len({p["race_key"] for p in preds}),
               "races_with_result": len({p["race_key"] for p in preds if p["race_key"] in results}),
               "versions": sorted({p["version"] for p in preds}),
+              "counting": "発走前に作られた最後の版だけを数える（2026-11-22 決定）",
+              "excluded": {"after_post": late, "post_unknown": unknown},
               "judgement": "回収率の達成判定はしない（取り決め：初週は判定しない。数週たまるまで参考）。実購入はしない"}
 
     review["comparison"] = comparison(preds, setts, results)
@@ -168,10 +183,12 @@ def write_review(paths, month: str | None, start: str | None = None, end: str | 
 
     parts = [f"<h1>月次の振り返り {html.escape(month)}</h1>",
              f"<p class='muted'>予想したレース {r['races_predicted']}・結果が分かったレース {r['races_with_result']}・版 {html.escape(', '.join(r['versions']) or '–')}</p>",
+             f"<p class='muted'>{html.escape(r['counting'])}。数えていない予想：発走後に作成 {r['excluded']['after_post']}件・"
+             f"発走時刻が不明 {r['excluded']['post_unknown']}件</p>",
              f"<p class='warn'>{html.escape(r['judgement'])}</p>",
              "<h2>比較：市場のみ・学習のみ・統合（同じレース・同じ時点）</h2>",
              table(r["comparison"], ["set", "method", "races", "logloss", "hit10", "roi_ev", "bet_races"],
-                   ["組", "方式", "対象", "対数損失（主）", "上位10組", "仮想回収率（期待値配分）", "賭けたレース"]),
+                   ["組", "方式", "対象（レース×時点）", "対数損失（主）", "上位10組", "仮想回収率（期待値配分）", "賭けたレース"]),
              "<p class='muted'>対数損失は小さいほど良い。全組の確率が正式なものだけで計算。8週ごとの点検は --from/--to で期間を指定。"
              "市場推定確率＝発走前の三連複オッズの逆数を合計1に直したもの（比較の基準。的中確率としての正確さは未確認。補正なし）</p>",
              "<h2>仮想の財布</h2>", table(r["wallets"], ["method", "wallet", "races", "bet_races", "stake", "returned", "roi", "hit_races"],

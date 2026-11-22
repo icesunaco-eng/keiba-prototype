@@ -139,7 +139,9 @@ def test_K_no_link_cancel_triggers_again_at_post(env, monkeypatch):
     paths, col = env
     col.state["races"][RK].update(list_cname="L"); col.state["live_pending"]=False; col._write_state()
     title=news("本日【8月30日（土曜）】の東京競馬は開催を中止します")
-    cli_tick(paths, monkeypatch, datetime(2025,8,30,15,30,tzinfo=JST), {}, title)
+    real_run, before = wallet.run_live, datetime(2025,8,30,15,30,tzinfo=JST)
+    monkeypatch.setattr(wallet, "run_live", lambda p: real_run(p, now=before))   # 精算の時計も発走前にそろえる
+    cli_tick(paths, monkeypatch, before, {}, title)
     assert not rows(paths)
     monkeypatch.undo(); orig=jra.parse_card
     monkeypatch.setattr(jra, "parse_card", lambda p: [dict(x, horse_id=f"H{int(x['horse_number'])-1:04d}") for x in orig(p)])
@@ -160,3 +162,67 @@ def test_M_no_prediction_after_post_even_for_new_code_version(env, monkeypatch):
     monkeypatch.setattr(wallet, "code_hash", lambda: "ffffffff00000000")
     assert wallet.run_live(paths, now=datetime(2025,8,30,15,41,tzinfo=JST))["predicted"] == 0
     assert wallet.run_live(paths, now=datetime(2025,8,30,15,20,tzinfo=JST))["predicted"] > 0
+
+
+def _reread_card(monkeypatch):
+    monkeypatch.undo()
+    orig = jra.parse_card
+    monkeypatch.setattr(jra, "parse_card", lambda p: [dict(x, horse_id=f"H{int(x['horse_number'])-1:04d}") for x in orig(p)])
+
+
+def test_N_1h_waits_for_its_own_capture(tmp_path, monkeypatch):
+    """前日の出馬表しか無いうちに、1時間前の予想とまむへの入力を作って固定しない。"""
+    _reread_card(monkeypatch)
+    paths, col = _setup(tmp_path, at=(9, 0), tp="24h")
+    early = datetime(2025, 8, 30, 9, 5, tzinfo=JST)
+    monkeypatch.setattr(wallet, "prediction_clock", lambda: early)
+    wallet.run_live(paths, now=early)
+    mam.export_packets(paths)
+    led = Ledger(paths.ledger_path, read_only=True)
+    assert "1h" not in {p["time_point"] for p in led.predictions()}
+    led.close()
+    assert not list((paths.data_dir / "mam" / "outbox").glob("*_1h.json"))
+
+    at = datetime(2025, 8, 30, 14, 30, tzinfo=JST)
+    col.now = lambda: at
+    col._save(RK, "card", "1h", "/x", "c", card_html([f"H{h:04d}" for h in range(8)]))
+    wallet.run_live(paths, now=at)                          # オッズの途中で失敗：まだ固定しない
+    led = Ledger(paths.ledger_path, read_only=True)
+    assert "1h" not in {p["time_point"] for p in led.predictions()}
+    led.close()
+
+    col._save(RK, "odds_trio", "1h", "/x", "c", trio_html())
+    monkeypatch.setattr(wallet, "prediction_clock", lambda: at)
+    wallet.run_live(paths, now=at)
+    mam.export_packets(paths)
+    led = Ledger(paths.ledger_path, read_only=True)
+    one = [p for p in led.predictions() if p["time_point"] == "1h" and p["method"] == "ml_lgbm"]
+    led.close()
+    assert one and one[0]["odds_gate"]["pass"]
+    assert json.loads(next((paths.data_dir / "mam" / "outbox").glob("*_1h.json")).read_text())["trio_odds"]
+
+
+def test_O_missed_capture_is_predicted_at_deadline(tmp_path, monkeypatch):
+    _reread_card(monkeypatch)
+    paths, col = _setup(tmp_path, at=(9, 0), tp="24h")
+    col.state["live_pending"] = False
+    col.state["taken"][f"{RK}|1h"] = "x"
+    del col.state["taken"][f"{RK}|1h"]
+    col.state["races"][RK]["list_cname"] = "L"
+    col._write_state()
+    late = datetime(2025, 8, 30, 14, 42, tzinfo=JST)
+    monkeypatch.setattr(wallet, "prediction_clock", lambda: late)
+    cli_tick(paths, monkeypatch, late, {}, news("お知らせ"))
+    led = Ledger(paths.ledger_path, read_only=True)
+    assert "1h" in {p["time_point"] for p in led.predictions()}
+    led.close()
+
+
+def test_P_review_reads_results_of_archived_races(env):
+    from keiba.review import _results
+    paths, col = env
+    col._save(RK, "result", "result", "/x", "c", FULL)
+    race = col.state["races"].pop(RK)
+    col._write_state()
+    (col.root / "races_archive.jsonl").write_text(json.dumps({"race_key": RK, **race}, ensure_ascii=False) + "\n")
+    assert _results(paths)[0][RK]["actual"] == "1-2-3"

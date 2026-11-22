@@ -241,6 +241,7 @@ class Source:
         self.race_meta: dict = {}
         self.past_keys: set[str] = set()                    # 収集の予定表（7日で整理）から外れた、過去14日のレース（原本の記録から）
         self.settlements: list[dict] = []
+        self.excluded = {"after_post": 0, "post_unknown": 0}   # 数えていない予想の件数（発走後に作成・発走時刻が不明）
         self.versions: list[dict] = []
         self.version = None
         self.loaded_at = time.time()
@@ -274,20 +275,26 @@ class Source:
         conn = self._ledger()
         if conn is not None:
             self._version_list(conn)
-            latest: dict = {}
+            from .. import official
+            sel = official.load(conn, root)
+            self.excluded = {"after_post": len(sel.late), "post_unknown": len(sel.unknown)}
+            usable: dict = defaultdict(set)
+            for rk, _, _, v in sel.valid:
+                usable[v].add(rk)
+            for x in self.versions:
+                if x["version"].startswith("live-"):
+                    x["races_before_post"] = len(usable[x["version"]])
             for rk, tp, m, v, created, payload in conn.execute(
                     "SELECT race_key,time_point,method,version,created_at,payload FROM predictions "
                     "WHERE version LIKE 'live-%' OR method='text_ai'"):
-                key = (rk, m, tp)
-                if key not in latest or created > latest[key][0]:
-                    latest[key] = (created, v, payload)
-            for (rk, m, tp), (created, v, payload) in latest.items():
-                self.preds[rk][(m, tp)] = {**json.loads(payload), "version": v, "_created_at": created}
+                if sel.is_shown(rk, tp, m, v):
+                    self.preds[rk][(m, tp)] = {**json.loads(payload), "version": v, "_created_at": created}
             for rk, tp, m, v, w, payload in conn.execute(
                     "SELECT race_key,time_point,method,version,wallet,payload FROM settlements WHERE version LIKE 'live-%' "
                     "OR method='text_ai'"):
-                self.settlements.append({"race_key": rk, "time_point": tp, "method": m, "version": v, "wallet": w,
-                                         **json.loads(payload)})
+                if sel.is_counted(rk, tp, m, v):
+                    self.settlements.append({"race_key": rk, "time_point": tp, "method": m, "version": v, "wallet": w,
+                                             **json.loads(payload)})
             conn.close()
             live_versions = [v["version"] for v in self.versions if v["version"].startswith("live-")]
             self.version = live_versions[-1] if live_versions else None

@@ -6,12 +6,14 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def before_post_clock(monkeypatch):
-    """合成のレース（2025-08-30 15:40発走）の発走前として予想を作る。発走後の試験は now を渡す。"""
+    """合成のレース（2025-08-30 15:40発走）の1時間前の締切の後・発走前として予想を作る。発走後の試験は now を渡す。"""
     from datetime import datetime, timedelta, timezone
 
     from keiba.live import wallet
-    at = datetime(2025, 8, 30, 14, 30, tzinfo=timezone(timedelta(hours=9)))
+    at = datetime(2025, 8, 30, 14, 41, tzinfo=timezone(timedelta(hours=9)))
     monkeypatch.setattr(wallet, "prediction_clock", lambda: at)
+    from keiba.ledger import Ledger
+    monkeypatch.setattr(Ledger, "_now", lambda self: at.astimezone(timezone.utc).isoformat(timespec="seconds"))
 
 VENUES = ["東京", "京都"]
 
