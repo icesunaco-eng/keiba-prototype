@@ -12,6 +12,15 @@ from tests.test_live_wallet import RK, card_html, result_html
 FULL = result_html([3, 1, 2, 4, 5, 6, 7, 8])      # 三連複 1-2-3・4,560円
 
 
+def empty_result(rk: str) -> str:
+    """JRAが取りやめたレースに出す、見出しだけの空の結果ページ（2026-02-07 東京8Rの実物の形）。"""
+    d, venue, num = rk.split("|")
+    y, m, day = d.split("-")
+    return ('<html><body><h1><span class="inner"><span class="txt">レース結果'
+            f'<span class="opt">{int(y)}年{int(m)}月{int(day)}日（土曜）1回{venue}3日 {int(num)}レース</span></span></span></h1>'
+            '</body></html>')
+
+
 def cut_in_payout(page: str) -> str:
     """払戻の数字の途中（4,5）で切れたページ。"""
     return page[:page.index("4,560円") + 3]
@@ -131,8 +140,19 @@ def test_cancel_notice_ranges():
     assert not cancel_notice("2026-02-07|東京|7", cancels)            # 第7レースまでは行われた
     assert cancel_notice("2026-02-08|小倉|4", cancels) and not cancel_notice("2026-02-08|小倉|5", cancels)
     # 結果の行があれば本当の結果を使う。途中で切れたページも使わない
-    assert cancelled_result("2026-02-07|東京|8", cancels, None)
-    assert cancelled_result("2026-02-07|東京|8", cancels, jra.parse_result("<html><body></body></html>"))
+    race = {"post_time": "13:50"}
+    after_post, closed = datetime(2026, 2, 7, 14, 0, tzinfo=JST), datetime(2026, 2, 7, 20, 0, tzinfo=JST)
+    assert cancelled_result("2026-02-07|東京|8", cancels, jra.parse_result(empty_result("2026-02-07|東京|8")), race, after_post)
+    assert not cancelled_result("2026-02-07|東京|8", cancels, jra.parse_result(empty_result("2026-02-07|東京|8")), race,
+                                datetime(2026, 2, 7, 13, 0, tzinfo=JST))          # 発走前は返還にしない
+    assert cancelled_result("2026-02-07|東京|8", cancels, None, race, after_post)       # 「以降」の取りやめ：ページが無くても返還
+    kokura = "2026-02-08|小倉|4"                                                         # 1レースだけ：お知らせだけでは決めない
+    k_mid, k_closed = datetime(2026, 2, 8, 14, 0, tzinfo=JST), datetime(2026, 2, 8, 20, 0, tzinfo=JST)
+    assert not cancelled_result(kokura, cancels, None, race, k_closed)
+    assert not cancelled_result(kokura, cancels, jra.parse_result(empty_result(kokura)), race, k_mid)
+    assert not cancelled_result(kokura, cancels, jra.parse_result("<html><body></body></html>"), race, k_closed)   # 見出しの無い空ページは使わない
+    assert not cancelled_result(kokura, cancels, jra.parse_result(empty_result("2026-02-08|小倉|5")), race, k_closed)  # 別のレースのページ
+    assert cancelled_result(kokura, cancels, jra.parse_result(empty_result(kokura)), race, k_closed)
     assert not cancelled_result("2026-02-07|東京|8", cancels, jra.parse_result(FULL))
     assert not cancelled_result("2026-02-07|東京|8", cancels, jra.parse_result("<html><body>"))
 
@@ -150,7 +170,7 @@ def test_collector_records_notices_and_stops_refetching(tmp_path, monkeypatch):
         count = 0
 
         def get(self, path, cname):
-            return "<html><body>公開結果ページ（結果の行も払戻も無い）</body></html>"
+            return empty_result(rk)
 
         def get_url(self, url):
             asked.append(url)
@@ -192,7 +212,7 @@ def _write_cancel(root, race_date, venue, start):
                             "title": f"本日の{venue}競馬は第{start}レース以降を取りやめ"}, ensure_ascii=False) + "\n")
 
 
-@pytest.mark.parametrize("page", [None, "<html><body>結果の行が無い</body></html>"])
+@pytest.mark.parametrize("page", [None, empty_result(RK)])
 def test_wallet_refunds_cancelled_race(tmp_path, page):
     from keiba.live.wallet import run_live
     orig, (paths, col) = _wallet_setup(tmp_path)
@@ -243,7 +263,7 @@ def _app_paths(tmp_path, result_page=None):
     return paths, live, rk
 
 
-@pytest.mark.parametrize("page", [None, "<html><body>結果の行が無い</body></html>"])
+@pytest.mark.parametrize("page", [None, empty_result("2026-02-07|東京|8")])
 def test_app_refunds_purchase_on_cancelled_race(tmp_path, page):
     from keiba.app.data import Source
     from keiba.app.pages import money_text

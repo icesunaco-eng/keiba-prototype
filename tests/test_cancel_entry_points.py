@@ -7,6 +7,7 @@ from keiba.live import jra, collector as c, wallet, mam
 from keiba.live.collector import Collector, JST
 from keiba.ledger import Ledger
 from tests.test_live_wallet import RK, _setup, result_html, card_html, win_html, trio_html
+from tests.test_cancel_and_truncation import empty_result
 
 FULL = result_html([3,1,2,4,5,6,7,8])
 def news(title): return f'<html><body><ul><li><div class="news_line"><a href="/n"><div class="txt">{title}</div></a></div></li></ul></body></html>'
@@ -129,7 +130,7 @@ def test_I_meeting_cancel_found_before_post_is_refunded(env):
 def test_J_meeting_cancel_after_post_refunds_after_window_with_empty_page(env):
     paths, col = env
     cancel(col.root)
-    col._save(RK,"result","result","/x","c","<html><body>空</body></html>")
+    col._save(RK,"result","result","/x","c",empty_result(RK))
     wallet.run_live(paths, now=datetime(2025,8,30,21,0,tzinfo=JST))
     assert not rows(paths)
     wallet.run_live(paths, now=datetime(2025,8,30,21,41,tzinfo=JST))
@@ -277,3 +278,56 @@ def test_S_mam_prediction_before_material_is_rejected(tmp_path, monkeypatch):
                              "generated_at": early.isoformat()}, ensure_ascii=False))
     out = mam.import_predictions(paths, f)
     assert not out["accepted"] and "材料" in out["rejected"][0]["reason"]
+
+
+# ---- 💚20261124-2 止める①：同じ番号の枠に別の競走を組んだとき（2026-08-15 中京2Rの形） ----
+
+def test_L_single_race_notice_with_substitute_settles_on_real_result(env):
+    """「第2回中京競馬第7日第2競走の取りやめ」のように1つのレースだけのお知らせは、発走前に見つけていても返還にしない。
+    同じ番号で別の競走を行い、本当の結果が出たらそれで精算する。"""
+    paths, col = env
+    with open(col.root / "cancellations.jsonl", "w") as f:
+        f.write(json.dumps(dict(race_date="2025-08-30", venue="東京", from_race=11, to_race=11, kai=2, nichi=7,
+                                title="第2回東京競馬第7日第11競走の取りやめ",
+                                found_at="2025-08-30T09:00:00+09:00"), ensure_ascii=False) + "\n")
+    wallet.run_live(paths, now=datetime(2025, 8, 30, 15, 41, tzinfo=JST))   # 発走直後・結果のリンクはまだ無い
+    assert not rows(paths)
+    wallet.run_live(paths, now=datetime(2025, 8, 30, 21, 41, tzinfo=JST))   # 窓が閉じても、ページが無いだけでは返還にしない
+    assert not rows(paths)
+    col._save(RK, "result", "result", "/x", "c", FULL)
+    wallet.run_live(paths, now=datetime(2025, 8, 30, 21, 45, tzinfo=JST))
+    got = rows(paths)
+    assert got and not [s for s in got if s["status"] == "refunded_void"]
+    assert [s for s in got if s.get("hits")]
+
+
+def test_M_single_race_notice_app_waits_without_page(env):
+    from keiba.app.data import Source
+    paths, col = env
+    cancel(col.root, 11, 11)
+    assert not (Source(paths, "live").results.get(RK) or {}).get("cancelled")
+
+
+def test_N_single_race_empty_page_is_not_reported_missed(env):
+    """1つのレースの取りやめで、このレースの空の結果が出ているなら「取れなかった」に数えない（窓が閉じてから返還）。"""
+    paths, col = env
+    cancel(col.root, 11, 11)
+    col.state["races"][RK].update(list_cname="L", result_links=[["/x", "R"]], known_at="2025-08-30T09:00:00+09:00")
+    col.state["taken"].update({f"{RK}|1h": "x", f"{RK}|15m": "x"})
+
+    class Cl:
+        count = 0
+        def get(self, path, cname): return empty_result(RK) if cname == "R" else "<html></html>"
+    col.client = Cl()
+    import keiba.live.jra as j
+    orig = j.parse_race_list
+    j.parse_race_list = lambda p: {"races": []}
+    try:
+        col.now = lambda: datetime(2025, 8, 30, 16, 0, tzinfo=JST)
+        assert col.capture(RK, "result")[-1].get("incomplete")             # 窓の間は取り直す
+        col.now = lambda: datetime(2025, 8, 30, 21, 41, tzinfo=JST)
+        assert not [k for k in col.missed() if k.startswith(RK)]
+    finally:
+        j.parse_race_list = orig
+    wallet.run_live(paths, now=datetime(2025, 8, 30, 21, 41, tzinfo=JST))
+    assert [s for s in rows(paths) if s["status"] == "refunded_void"]

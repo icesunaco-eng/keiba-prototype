@@ -260,6 +260,10 @@ def parse_result(page: str) -> dict:
         return {"rows": [], "trio_payouts": [], "page_incomplete": True}
     doc = lxml_html.fromstring(page)
     rows = []
+    # 見出し「レース結果 2026年2月7日（土曜）1回東京3日 8レース」：どのレースのページかを確かめるのに使う
+    head = _t(doc.xpath('//h1//span[contains(@class,"opt")]')[0]) if doc.xpath('//h1//span[contains(@class,"opt")]') else ""
+    hm = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日.*?\d+回(" + "|".join(VENUES) + r")\d+日\s*(\d{1,2})レース", head)
+    race_id = (f"{hm.group(1)}-{int(hm.group(2)):02d}-{int(hm.group(3)):02d}|{hm.group(4)}|{int(hm.group(5))}" if hm else None)
     for tr in doc.xpath('//table[contains(@class,"striped")]/tbody/tr'):
         cell = lambda c: _t(tr.xpath(f'./td[contains(@class,"{c}")]')[0]) if tr.xpath(f'./td[contains(@class,"{c}")]') else ""
         num = cell("num")
@@ -288,7 +292,7 @@ def parse_result(page: str) -> dict:
         nums = [int(x) for x in re.findall(r"\d+", combo)]
         if len(nums) == 3 and yen:
             trio.append({"combo": "-".join(map(str, sorted(nums))), "payout_yen": int(yen)})
-    return {"rows": rows, "trio_payouts": trio}
+    return {"rows": rows, "trio_payouts": trio, "race_id": race_id}
 
 
 VENUES = ("札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉")

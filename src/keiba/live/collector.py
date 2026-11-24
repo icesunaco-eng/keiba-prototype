@@ -164,32 +164,48 @@ def race_started(rk: str, race: dict | None, now: datetime) -> bool:
 
 def cancelled_result(rk: str, cancels: list[dict], parsed: dict | None, race: dict | None = None,
                      now: datetime | None = None) -> dict | None:
-    """取りやめとして全額返還にしてよいなら、そのお知らせ。条件は3つとも：
+    """取りやめとして全額返還にしてよいなら、そのお知らせ。条件：
     1. JRAのお知らせがこのレースの取りやめを発表している
     2. 結果のページが無いか、最後まで届いたページに結果の行が1つも無い（行があれば、本当の結果を使う）
-    3. このレースが行われていないと言える。次のどれか：
-       - お知らせに取りやめのレースの番号がある（第8レース以降・第4レース）
-       - 発走時刻より前にお知らせを見つけた
-       - 結果の窓（発走の6時間後）が過ぎても、最後まで届いた結果のページに行が無い
-       「開催を中止」は途中のレースの後にも出るので、それだけでは発走ずみのレースを返還にしない"""
+    3. 発走時刻を過ぎている
+    4. お知らせの形で分ける：
+       - はっきり言えるお知らせ＝「第8レース以降」のように番号から後を全部やめるもの、または発走前に見つけた「開催を中止」。
+         後ろを全部やめるときは別の競走を組まないので、これだけで返還にする
+       - それ以外（1つのレースだけの取りやめ・発走のあとに見つけた「開催を中止」）は、お知らせだけでは決めない。
+         同じ番号の枠に別の競走を組み直すことがあり（例：2026-08-15 中京2R。2歳未勝利を取りやめ、同じ第2競走で
+         3歳未勝利を実施した）、「開催を中止」は途中のレースの後にも出るため。
+         結果の窓（発走の6時間後）が過ぎても、このレースの結果のページ（見出しの日付・場・番号が一致）が空のときだけ返還にする"""
     notice = cancel_notice(rk, cancels)
     if not notice:
         return None
     if parsed is not None and (parsed.get("page_incomplete") or parsed.get("rows")):
         return None
-    if notice["from_race"] > 1 or notice["to_race"] is not None:
-        return notice
+    now = now or datetime.now(JST)
     post = race_post(rk, race)
-    if not post:
+    if not race_started(rk, race, now):
         return None
-    try:
-        if datetime.fromisoformat(notice["found_at"]) < post:
-            return notice
-    except (KeyError, TypeError, ValueError):
-        pass
-    if parsed is not None and (now or datetime.now(JST)) >= post + timedelta(minutes=WINDOWS["result"][1]):
+    if clear_notice(notice, post):
         return notice
-    return None
+    closed = post is not None and now >= post + timedelta(minutes=WINDOWS["result"][1])
+    return notice if closed and empty_page_of(rk, parsed) else None
+
+
+def clear_notice(notice: dict, post: datetime | None) -> bool:
+    """番号から後を全部取りやめる、はっきりしたお知らせか（1つのレースだけ・発走後に見つけた「開催を中止」は違う）。"""
+    if notice.get("to_race") is not None:
+        return False
+    if notice["from_race"] > 1:
+        return True
+    try:
+        return post is not None and datetime.fromisoformat(notice["found_at"]) < post
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def empty_page_of(rk: str, parsed: dict | None) -> bool:
+    """最後まで届いた、このレースの結果のページ（見出しで確かめる）で、結果の行が1つも無い。"""
+    return (parsed is not None and not parsed.get("page_incomplete") and not parsed.get("rows")
+            and parsed.get("race_id") == rk)
 
 
 def archived_keys(path: Path) -> set[str]:
@@ -354,7 +370,11 @@ class Collector:
                 page = self.client.get(path, cname)
                 saved.append(self._save(rk, "result", tp, path, cname, page))
                 issue = result_issue(page, r.get("field_size"))
-                if issue and cancelled_result(rk, load_cancellations(self.root / CANCEL_FILE), jra.parse_result(page), r, self.now()):
+                cancels = load_cancellations(self.root / CANCEL_FILE)
+                parsed = jra.parse_result(page)
+                if issue and cancel_notice(rk, cancels) and empty_page_of(rk, parsed):
+                    r["cancel_empty_page"] = True   # 取りやめのお知らせがあり、このレースの空の結果が出ている（「取れなかった」にしない）
+                if issue and cancelled_result(rk, cancels, parsed, r, self.now()):
                     issue = None   # JRAが取りやめを発表し、結果の行も無い：取り直しをやめる（返還は精算の側で行う）
                 if issue:
                     # 途中までの結果（着順の空欄・払戻の欠けなど）：保存はするが「取得済み」にせず、窓の間は次の回に取り直す
@@ -390,7 +410,8 @@ class Collector:
         now = self.now()
         cancels = load_cancellations(self.root / CANCEL_FILE)
         for rk, r in self.state["races"].items():
-            if not r.get("post_time") or cancelled_result(rk, cancels, None, r, now):   # 取りやめと言えるレースは「取れなかった」にしない
+            if not r.get("post_time") or cancelled_result(rk, cancels, None, r, now) or (
+                    r.get("cancel_empty_page") and cancel_notice(rk, cancels)):   # 取りやめと言えるレースは「取れなかった」にしない
                 continue
             post = datetime.fromisoformat(f"{r['race_date']}T{r['post_time']}:00+09:00")
             known = datetime.fromisoformat(r.get("known_at", self.state.get("refreshed_at") or now.isoformat()))
