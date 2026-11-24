@@ -403,11 +403,13 @@ def market_probs(trio_odds: dict) -> dict:
 
 def _usable_probs(probs, combos) -> bool:
     """台帳に保存済みのまむの確率を、統合に渡せるか（検査のゆるかった版の非数などが残っている）。
-    受付は合計1に直して7桁に丸めて保存するので、正しい値は 0 か 1e-7〜1 だけ。確率なし（順位だけの予想）は空。"""
+    受付は合計1に直して7桁に丸めて保存するので、正しい値は 0 か 1e-7〜1 だけで、合計は丸めの幅の中で1。
+    確率なし（順位だけの予想）は空。"""
     if probs is None or probs == {}:
         return True
-    return isinstance(probs, dict) and any(probs.values()) and all(
-        c in combos and type(v) in (int, float) and (v == 0 or 1e-7 <= v <= 1) for c, v in probs.items())
+    return (isinstance(probs, dict) and any(probs.values())
+            and all(c in combos and type(v) in (int, float) and (v == 0 or 1e-7 <= v <= 1) for c, v in probs.items())
+            and abs(sum(probs.values()) - 1) <= len(probs) * 5e-8 + 1e-9)
 
 
 def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) -> int:
@@ -448,9 +450,10 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) ->
                 reasons.append("まむ：保存済みの確率を使えない（数でない・範囲外・出走馬と合わない）")
             else:
                 sources["mam"] = mp.get("trios_all") or {}
-                if not mp.get("complete"):
+                if set(sources["mam"]) != set(ml):  # 保存した時の印ではなく、今の出走馬の全組と照らす
                     formal = False
-                    reasons.append("まむ：全組の確率がそろっていない（足りない組を埋めて正式な確率にはしない。参考表示）")
+                    reasons.append("まむ：今の出走馬の全組の確率がそろっていない（足りない組を埋めて正式な確率にはしない。参考表示）"
+                                   + ("。保存した時と出走馬が違う" if mp.get("complete") else ""))
         missing = [k for k in w if k not in sources]
         if missing:
             formal = False

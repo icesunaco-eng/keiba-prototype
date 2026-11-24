@@ -1099,3 +1099,54 @@ def test_odds_digits_are_explicit(text):
 def test_displayed_odds_round_trip_exactly(text, value):
     from fractions import Fraction
     assert jra._num(text) == value and Fraction(str(jra._num(text))) == Fraction(text.replace(",", ""))
+
+
+# ---- みに💚20261124-1（PR #18）の指摘
+def _combos(n):
+    from itertools import combinations
+    return ["-".join(map(str, c)) for c in combinations(range(1, n + 1), 3)]
+
+
+def _mam_row(paths, probs, complete):
+    from keiba.ledger import Ledger
+    _stored_mam(paths, trios_all=probs, complete=complete)
+    run_live(paths)
+    led = Ledger(paths.ledger_path, read_only=True)
+    it = next(p for p in led.predictions() if p["race_key"] == RK and p["method"] == "int_market_ml_mam")
+    led.close()
+    return it
+
+
+def test_mam_from_a_smaller_roster_is_not_formal(tmp_path, monkeypatch):
+    """重大1：出走馬が少ない時に全組そろったまむの予想は、今の出走馬では全組ではない。正式にせず配分しない。"""
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    small = _combos(N - 1)
+    it = _mam_row(paths, {c: (0.8 if i == 0 else round(0.2 / (len(small) - 1), 7)) for i, c in enumerate(small)}, True)
+    assert "mam" in it["inputs_used"] and not it["formal_probability"] and it["trio_probs_full"] is None
+    assert any("保存した時と出走馬が違う" in r for r in it["reasons"])
+    assert all(not a["stakes"] for a in it["allocation"].values())
+
+
+@pytest.mark.parametrize("label,probs,complete", [
+    ("合計56", {c: 1.0 for c in _combos(N)}, True),
+    ("合計が1より大きい", {c: (0.9 if i == 0 else 0.125) for i, c in enumerate(_combos(N))}, True),
+    ("合計が1より小さい", {c: 0.001 for c in _combos(N)}, True),
+    ("確率なしでそろい印", None, True),
+    ("空でそろい印", {}, True),
+])
+def test_saved_mam_mass_and_completeness_are_checked(tmp_path, monkeypatch, label, probs, complete):
+    """要修正1：保存済みの確率の合計・そろい印の矛盾を通さない。"""
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    it = _mam_row(paths, probs, complete)
+    assert not it["formal_probability"] and it["trio_probs_full"] is None, label
+    assert all(not a["stakes"] for a in it["allocation"].values())
+
+
+def test_full_seven_digit_mam_is_still_formal(tmp_path, monkeypatch):
+    """正常対照：今の全組・7桁丸めの合計1（丸めの誤差あり）は、今までどおり正式。"""
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    full = _combos(N)
+    probs = {c: round(1 / len(full), 7) for c in full}
+    assert sum(probs.values()) != 1
+    it = _mam_row(paths, probs, True)
+    assert "mam" in it["inputs_used"] and it["formal_probability"]
