@@ -166,6 +166,18 @@ def _write_held(root: Path, held: dict):
         pass
 
 
+def result_ready(res: dict, field_size) -> bool:
+    """結果のページがそろっていて、精算・的中の集計に使えるか（仮想財布と月次の振り返りが同じ判定を使う）。"""
+    rows = res.get("rows") or []
+    if not rows or res.get("page_incomplete"):
+        return False
+    finished = [(r["horse_number"], r["finish_position"]) for r in rows if r["status"] == "finished"]
+    scratched = {r["horse_number"] for r in rows if r["status"] in ("withdrawn", "excluded")}
+    payouts = {p["combo"]: p["payout_yen"] for p in res.get("trio_payouts") or []} or None
+    return result_problem(finished, len(finished), scratched, payouts, len(rows), field_size,
+                          [r["horse_number"] for r in rows]) is None
+
+
 def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """集めたページから、正規の表と同じ形の races / runners と、時点ごとの入力を作る。
     held に辞書を渡すと、読み取りで保留にしたレースと理由を入れて返す（ファイルには書かない）。"""
@@ -505,8 +517,7 @@ def _settle(led, inputs: dict, state: dict, root: Path, now: datetime | None = N
             scratched = {r["horse_number"] for r in rows if r["status"] in ("withdrawn", "excluded")}
             payouts = {p["combo"]: p["payout_yen"] for p in res["trio_payouts"]} or None
             finished = [(r["horse_number"], r["finish_position"]) for r in rows if r["status"] == "finished"]
-            if not rows or result_problem(finished, finishers, scratched, payouts, len(rows),
-                                          (state["races"].get(rk) or {}).get("field_size"), [r["horse_number"] for r in rows]):
+            if not result_ready(res, (state["races"].get(rk) or {}).get("field_size")):
                 continue   # 結果を一部しか読めていない：不成立の返還などを書かず、次の回で完全な結果を待つ
             for (m, ver) in sorted({(k[2], k[3]) for k in preds if k[0] == rk}):
                 try:

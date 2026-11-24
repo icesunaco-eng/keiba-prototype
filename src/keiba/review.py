@@ -23,7 +23,7 @@ import pandas as pd
 from . import official
 from .ledger import Ledger
 from .live.collector import ARCHIVE_FILE, read_jsonl
-from .live.wallet import _snapshots, live_tables, odds_check
+from .live.wallet import _snapshots, live_tables, odds_check, result_ready
 from .report.html import _page
 
 HIT_K = (5, 10, 20)
@@ -43,6 +43,8 @@ def _results(paths) -> dict:
     for (rk, tp), res in inputs.items():
         if tp != "result":
             continue
+        if not result_ready(res, (races.get(rk) or {}).get("field_size")):
+            continue   # 公表の途中・一部しか読めていない結果は的中の集計に使わない（仮想財布の精算と同じ判定）
         fin = sorted((r for r in res["rows"] if r["status"] == "finished" and r["finish_position"]), key=lambda r: r["finish_position"])
         top = [r["horse_number"] for r in fin if r["finish_position"] <= 3]
         out[rk] = {"actual": "-".join(map(str, sorted(top))) if len(top) == 3 else None,
@@ -133,6 +135,8 @@ def build_review(paths, month: str | None, start: str | None = None, end: str | 
     for p in preds:
         res = results.get(p["race_key"])
         if not res or not res["actual"]:
+            continue
+        if p.get("formal_probability") is False:   # 正式な確率にならなかった統合（参考表示）は的中率に入れない（アプリと同じ）
             continue
         ranked = [t["combo"] for t in p["trios"]]
         rank = ranked.index(res["actual"]) + 1 if res["actual"] in ranked else None
