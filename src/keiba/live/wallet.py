@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import pickle
 from datetime import datetime, timedelta
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -401,15 +402,27 @@ def market_probs(trio_odds: dict) -> dict:
     return {c: v / total for c, v in inv.items()}
 
 
-def _usable_probs(probs, combos) -> bool:
-    """台帳に保存済みのまむの確率を、統合に渡せるか（検査のゆるかった版の非数などが残っている）。
-    受付は合計1に直して7桁に丸めて保存するので、正しい値は 0 か 1e-7〜1 だけで、合計は丸めの幅の中で1。
-    確率なし（順位だけの予想）は空。"""
+def _mam_use(mp: dict, roster: list) -> tuple[bool, bool, str | None]:
+    """保存済みのまむの予想を統合にどう使うか：(使う, 正式にしてよい, 理由)。
+    取り決め（docs/requests/aisu-integration-reply.md）：正式は「同じ時点・同じ出走馬」で全組がそろったときだけ。
+    保存した時の出走馬・全組の印と、今の出走馬（出馬表）の全組の3つで決める。受付は合計1に直して7桁に丸めて保存する。"""
+    probs = mp.get("trios_all")
     if probs is None or probs == {}:
-        return True
-    return (isinstance(probs, dict) and any(probs.values())
-            and all(c in combos and type(v) in (int, float) and (v == 0 or 1e-7 <= v <= 1) for c, v in probs.items())
-            and abs(sum(probs.values()) - 1) <= len(probs) * 5e-8 + 1e-9)
+        return True, False, "まむ：確率が無い（順位だけ）。正式な確率にしない（参考表示）"
+    now = {"-".join(map(str, c)) for c in combinations(sorted(roster), 3)}
+    if not isinstance(probs, dict) or not any(probs.values()) or not all(
+            c in now and type(v) in (int, float) and (v == 0 or 1e-7 <= v <= 1) for c, v in probs.items()):
+        return False, False, "まむ：保存済みの確率を使えない（数でない・範囲外・今の出走馬にない組）"
+    if abs(sum(probs.values()) - 1) > len(probs) * 5e-8 + 1e-9:
+        return False, False, f"まむ：保存済みの確率の合計が1でない（{sum(probs.values()):.7g}）"
+    saved = mp.get("horses")
+    ok_rows = isinstance(saved, list) and all(isinstance(h, dict) and type(h.get("n")) is int for h in saved)
+    saved = sorted(h["n"] for h in saved) if ok_rows else None
+    if saved != sorted(roster):
+        return True, False, "まむ：予想した時と今の出走馬が違う（同じ出走馬の予想ではないので参考表示）"
+    if not mp.get("complete") or set(probs) != now:
+        return True, False, "まむ：全組の確率がそろっていない（足りない組を埋めて正式な確率にはしない。参考表示）"
+    return True, True, None
 
 
 def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) -> int:
@@ -445,16 +458,13 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) ->
                 if now <= dl:
                     continue  # 締切まではまむの予想を待つ
                 reasons.append("まむ：締切までに予想が無い")
-            elif not _usable_probs(mp.get("trios_all"), ml):
-                formal = False
-                reasons.append("まむ：保存済みの確率を使えない（数でない・範囲外・出走馬と合わない）")
             else:
-                sources["mam"] = mp.get("trios_all") or {}
-                if set(sources["mam"]) != set(ml):  # 保存した時の印ではなく、今の出走馬の全組と照らす
+                use, ok, why = _mam_use(mp, [c["horse_number"] for c in inp["card"]])
+                if use:
+                    sources["mam"] = mp.get("trios_all") or {}
+                if not ok:
                     formal = False
-                    reasons.append("まむ：今の出走馬の全組の確率がそろっていない（足りない組を埋めて正式な確率にはしない。参考表示）"
-                                   + ("" if not mp.get("complete") else "。保存した時と出走馬が違う" if sources["mam"]
-                                      else "。全組そろいの印なのに確率が無い"))
+                    reasons.append(why)
         missing = [k for k in w if k not in sources]
         if missing:
             formal = False

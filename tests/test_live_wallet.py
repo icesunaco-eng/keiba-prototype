@@ -1107,9 +1107,9 @@ def _combos(n):
     return ["-".join(map(str, c)) for c in combinations(range(1, n + 1), 3)]
 
 
-def _mam_row(paths, probs, complete):
+def _mam_row(paths, probs, complete, **change):
     from keiba.ledger import Ledger
-    _stored_mam(paths, trios_all=probs, complete=complete)
+    _stored_mam(paths, trios_all=probs, complete=complete, **change)
     run_live(paths)
     led = Ledger(paths.ledger_path, read_only=True)
     it = next(p for p in led.predictions() if p["race_key"] == RK and p["method"] == "int_market_ml_mam")
@@ -1121,9 +1121,10 @@ def test_mam_from_a_smaller_roster_is_not_formal(tmp_path, monkeypatch):
     """重大1：出走馬が少ない時に全組そろったまむの予想は、今の出走馬では全組ではない。正式にせず配分しない。"""
     paths, _ = _two_races(tmp_path, monkeypatch)
     small = _combos(N - 1)
-    it = _mam_row(paths, {c: (0.8 if i == 0 else round(0.2 / (len(small) - 1), 7)) for i, c in enumerate(small)}, True)
+    it = _mam_row(paths, {c: (0.8 if i == 0 else round(0.2 / (len(small) - 1), 7)) for i, c in enumerate(small)}, True,
+                  horses=[{"n": n, "rank": None} for n in range(1, N)])
     assert "mam" in it["inputs_used"] and not it["formal_probability"] and it["trio_probs_full"] is None
-    assert any("保存した時と出走馬が違う" in r for r in it["reasons"])
+    assert any("予想した時と今の出走馬が違う" in r for r in it["reasons"])
     assert all(not a["stakes"] for a in it["allocation"].values())
 
 
@@ -1139,7 +1140,9 @@ def test_saved_mam_mass_and_completeness_are_checked(tmp_path, monkeypatch, labe
     paths, _ = _two_races(tmp_path, monkeypatch)
     it = _mam_row(paths, probs, complete)
     assert not it["formal_probability"] and it["trio_probs_full"] is None, label
-    assert not any("保存した時と出走馬が違う" in r for r in it["reasons"]), label
+    assert not any("出走馬が違う" in r for r in it["reasons"]), label
+    if label.startswith("合計"):
+        assert any("合計が1でない" in r for r in it["reasons"]), label
     assert all(not a["stakes"] for a in it["allocation"].values())
 
 
@@ -1151,3 +1154,71 @@ def test_full_seven_digit_mam_is_still_formal(tmp_path, monkeypatch):
     assert sum(probs.values()) != 1
     it = _mam_row(paths, probs, True)
     assert "mam" in it["inputs_used"] and it["formal_probability"]
+
+
+# ---- みに💚20261125-2（PR #18）の指摘
+def _uniform(keys):
+    return {c: round(1 / len(keys), 7) for c in keys}
+
+
+@pytest.mark.parametrize("saved", [tuple(range(1, 9)), tuple(range(1, 8)), (1, 2, 3, 4, 5, 6, 8)])
+@pytest.mark.parametrize("now", [tuple(range(1, 9)), tuple(range(1, 8)), (1, 2, 3, 4, 5, 6, 8)])
+@pytest.mark.parametrize("keys", ["all8", "all7", "all7b", "one"])
+def test_mam_formal_only_with_same_roster_and_all_combos(saved, now, keys):
+    """重大：正式は「予想した時と今の出走馬が同じ」かつ「今の全組がそろう」ときだけ（頭数が増えても減っても）。"""
+    from itertools import combinations
+    from keiba.live.wallet import _mam_use
+    combos = lambda r: ["-".join(map(str, c)) for c in combinations(r, 3)]
+    k = {"all8": combos(range(1, 9)), "all7": combos(range(1, 8)), "all7b": combos((1, 2, 3, 4, 5, 6, 8)),
+         "one": ["1-2-3"]}[keys]
+    probs = _uniform(k)
+    mp = {"horses": [{"n": n, "rank": None} for n in saved], "trios_all": probs,
+          "complete": set(k) == set(combos(saved))}  # 受付（mam.py）と同じ決め方
+    use, ok, why = _mam_use(mp, list(now))
+    assert use == (set(k) <= set(combos(now)))
+    assert ok == (saved == now and set(k) == set(combos(now)))
+    assert (why is None) == ok
+
+
+def test_partial_mam_does_not_become_formal_after_a_scratch(tmp_path, monkeypatch):
+    """重大：8頭の時の一部の予想（1〜7の35組）は、8番が取り消されて7頭になっても正式にしない。"""
+    from keiba.ledger import Ledger
+    paths, col = _two_races(tmp_path, monkeypatch)
+    seven = _combos(N - 1)
+    _stored_mam(paths, trios_all=_uniform(seven), complete=False)
+    col._save(RK, "card", "1h", "/JRADB/x", "c", _scratch_card([N]))
+    col._save(RK, "odds_win", "1h", "/JRADB/x", "c", win_html(n=N - 1))
+    col._save(RK, "odds_trio", "1h", "/JRADB/x", "c", trio_html(n=N - 1))
+    col._write_state()
+    run_live(paths)
+    led = Ledger(paths.ledger_path, read_only=True)
+    it = next(p for p in led.predictions() if p["race_key"] == RK and p["method"] == "int_market_ml_mam")
+    led.close()
+    assert it["odds_gate"]["pass"], it["odds_gate"]["reasons"]
+    assert not it["formal_probability"] and any("予想した時と今の出走馬が違う" in r for r in it["reasons"])
+    assert all(not a["stakes"] for a in it["allocation"].values())
+
+
+def test_mam_from_the_same_seven_is_formal(tmp_path, monkeypatch):
+    """正常対照：最初から7頭で、7頭の全組がそろった予想は正式。"""
+    from keiba.ledger import Ledger
+    paths, col = _two_races(tmp_path, monkeypatch)
+    col._save(RK, "card", "1h", "/JRADB/x", "c", _scratch_card([N]))
+    col._save(RK, "odds_win", "1h", "/JRADB/x", "c", win_html(n=N - 1))
+    col._save(RK, "odds_trio", "1h", "/JRADB/x", "c", trio_html(n=N - 1))
+    col._write_state()
+    _stored_mam(paths, trios_all=_uniform(_combos(N - 1)), complete=True, horses=[{"n": n, "rank": None} for n in range(1, N)])
+    run_live(paths)
+    led = Ledger(paths.ledger_path, read_only=True)
+    it = next(p for p in led.predictions() if p["race_key"] == RK and p["method"] == "int_market_ml_mam")
+    led.close()
+    assert it["odds_gate"]["pass"] and it["formal_probability"] and "mam" in it["inputs_used"]
+
+
+@pytest.mark.parametrize("horses", [None, "1-8", [], [{"rank": 1}], [{"n": None}], [{"n": "1"}], [{"n": True}], [1, 2, 3],
+                                    [{"n": n} for n in [1, 1, 2, 3, 4, 5, 6, 7]], [{"n": n} for n in range(1, 10)]])
+def test_broken_saved_roster_is_reference_not_a_crash(horses):
+    """保存した馬の一覧が壊れていても止まらず、正式にしない。"""
+    from keiba.live.wallet import _mam_use
+    use, ok, why = _mam_use({"horses": horses, "trios_all": _uniform(_combos(N)), "complete": True}, list(range(1, N + 1)))
+    assert use and not ok and "出走馬が違う" in why
