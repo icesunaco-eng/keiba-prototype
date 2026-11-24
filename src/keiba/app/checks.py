@@ -69,6 +69,10 @@ def material_timing(p: dict, race: dict | None, tp: str | None) -> tuple[str, st
 
     例：1時間前の枠でも、前日の出馬表から作った予想は「1時間前の予想」ではなく早めの参考。
     """
+    known = p.get("_known_post")
+    now_post = (race or {}).get("post_time")
+    if known and race:   # 正式の判定と同じく、予想を保存した時点で分かっていた発走時刻で決める（後から動かさない）
+        race = {**race, "post_time": known}
     post = post_datetime(race or {})
     raw = (p.get("inputs") or {}).get("card_fetched_at")
     if tp not in TP_LEAD_MIN:
@@ -89,7 +93,9 @@ def material_timing(p: dict, race: dict | None, tp: str | None) -> tuple[str, st
         gap = (nominal - fetched).total_seconds() / 60
         return "early", (f"出馬表は {fetched:%m/%d %H:%M} 取得（{_lead_text(tp)}の締切 {nominal:%m/%d %H:%M} より"
                          + (f"{gap / 60:.1f}時間" if gap >= 60 else f"{gap:.0f}分") + "早い）")
-    return "ok", f"この時点の材料で作った予想（出馬表 {fetched:%m/%d %H:%M} 取得）"
+    note = (f"（予想を保存した時点の発走 {known} で判定。今の発走は {now_post}）"
+            if known and now_post and known != now_post else "")
+    return "ok", f"この時点の材料で作った予想（出馬表 {fetched:%m/%d %H:%M} 取得）{note}"
 
 
 def early_prediction(p: dict, race: dict | None, tp: str | None) -> str | None:
@@ -169,7 +175,8 @@ def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: di
         add({"ok": True, "early": False, "late": False}.get(state), "時点の材料",
             ("早めに作った参考の予想：" + text) if state == "early" else text)
     fetched = inp.get("card_fetched_at")
-    post = post_datetime(race or {})
+    # 時点の材料と同じく、予想を保存した時点で分かっていた発走時刻で見る（あとで発走時刻が変わっても判定を動かさない）
+    post = post_datetime({**(race or {}), **({"post_time": p["_known_post"]} if p.get("_known_post") and race else {})})
     if fetched and post:
         try:
             f = datetime.fromisoformat(fetched)
