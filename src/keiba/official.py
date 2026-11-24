@@ -32,6 +32,7 @@ class Selection:
     unknown: set = field(default_factory=set)    # 発走時刻が分からない
     shown: dict = field(default_factory=dict)    # (レース, 方式, 時点) → 版
     counted: dict = field(default_factory=dict)  # (レース, 方式) → (時点, 版)
+    known: dict = field(default_factory=dict)    # (レース, 時点, 方式, 版) → 保存した時点で分かっていた発走時刻（判定に使ったもの）
 
     def is_shown(self, rk, tp, m, v) -> bool:
         return self.shown.get((rk, m, tp)) == v
@@ -106,9 +107,13 @@ def save_limit(rk: str, tp: str, post_time: str | None) -> datetime | None:
 
 
 def material_time(records, dl: datetime) -> datetime | None:
-    """その時点の材料がそろった時刻。records：その時点の（種類, 取得時刻）。締切までにそろわなければ None。
+    """その時点の材料がそろった時刻。records：その時点の（種類, 取得時刻）。取得の時間帯の中でそろわなければ None。
     予想を作ってよいか（wallet.input_ready）と、正式に数えるかの両方がこの関数を使う。"""
-    got = [(k, t) for k, t in ((k, _moment(at)) for k, at in records) if t and t <= dl]
+    from .live.collector import CAPTURE_LEAD_MIN
+
+    # 取得の時間帯（締切の15分前〜締切）の材料だけ。時間帯より前に取ったもの（発走時刻が後で変わったときなど）は早めの参考
+    opens = dl - timedelta(minutes=CAPTURE_LEAD_MIN)
+    got = [(k, t) for k, t in ((k, _moment(at)) for k, at in records) if t and opens <= t <= dl]
     cards = [t for k, t in got if k == "card"]
     if not cards:
         return None
@@ -206,6 +211,8 @@ def select(rows: list[tuple], posts: dict[str, str], records: dict[tuple, list],
         at, final = _moment(created), posts.get(rk)
         known = known_post((history or {}).get(rk), at, final) if at and final else None
         limit, ended = save_limit(rk, tp, known), race_post(rk, {"post_time": final})
+        if known:
+            sel.known[(rk, tp, m, v)] = known
         if not limit or not at or not ended:
             sel.unknown.add((rk, tp, m, v))
             continue

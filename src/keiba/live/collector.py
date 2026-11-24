@@ -208,6 +208,13 @@ def empty_page_of(rk: str, parsed: dict | None) -> bool:
             and parsed.get("race_id") == rk)
 
 
+def _earlier(stamp, than: datetime) -> bool:
+    try:
+        return datetime.fromisoformat(stamp) < than
+    except (TypeError, ValueError):
+        return False
+
+
 def archived_keys(path: Path) -> set[str]:
     return {x["race_key"] for x in read_jsonl(path)[0] if isinstance(x.get("race_key"), str)}
 
@@ -352,8 +359,9 @@ class Collector:
                 continue
             post = datetime.fromisoformat(f"{r['race_date']}T{r['post_time']}:00+09:00")
             for tp, (a, b) in WINDOWS.items():
-                if f"{rk}|{tp}" in self.state["taken"]:
-                    continue
+                taken = self.state["taken"].get(f"{rk}|{tp}")
+                if taken and not (tp != "result" and _earlier(taken, post + timedelta(minutes=a))):
+                    continue   # 取ったのが今の時間帯より前（あとで発走時刻が遅くなった）なら、新しい時間帯で取り直す
                 if post + timedelta(minutes=a) <= now < post + timedelta(minutes=b):
                     out.append((rk, tp))
         return sorted(out, key=lambda x: (self.state["races"][x[0]]["post_time"], x[0]))
@@ -365,6 +373,10 @@ class Collector:
         page = self.client.get("/JRADB/accessD.html", r["list_cname"])
         fresh = {x["race_number"]: x for x in jra.parse_race_list(page)["races"]}.get(r["race_number"], {})
         r.update({k: v for k, v in fresh.items() if v})
+        if tp != "result" and not self._in_window(rk, r, tp):
+            # 取り直した一覧で発走時刻が変わり、今はこの時点の取得の時間帯の外になった：取らずに、新しい時間帯で取る
+            self._write_state()
+            return saved
         if tp == "result":
             for path, cname in (r.get("result_links") or [])[:1]:
                 page = self.client.get(path, cname)
@@ -403,6 +415,11 @@ class Collector:
         self.state["taken"][f"{rk}|{tp}"] = self.now().isoformat(timespec="seconds")
         self._write_state()
         return saved
+
+    def _in_window(self, rk: str, r: dict, tp: str) -> bool:
+        post = race_post(rk, r)
+        a, b = WINDOWS[tp]
+        return post is not None and post + timedelta(minutes=a) <= self.now() < post + timedelta(minutes=b)
 
     def missed(self) -> list[str]:
         """窓が過ぎたのに取れていない（Macが寝ていた・失敗したなど）。結果は6時間の窓が過ぎたら。"""
@@ -456,14 +473,18 @@ class Collector:
         seen = official.recorded_posts(self.root)
         new = []
         if not self.state.get("post_history_filled"):
-            lack = {rk for rk, _ in official.capture_records(self.root) if rk not in seen}
-            for rk, obs in sorted(official.card_observations(self.root, lack).items()):
+            # 観測ごとに埋める（レースごとではない）：前回の穴埋めが途中で止まって一部の行だけ書けていても、
+            # 欠けた観測を出馬表から足す。書けた行はもう一度書かない
+            keys = {rk for rk, _ in official.capture_records(self.root)}
+            for rk, obs in sorted(official.card_observations(self.root, keys).items()):
+                have = set(seen.get(rk, []))
                 kept: list = []
                 for at, post in obs:
                     if not kept or kept[-1][1] != post:
                         kept.append((at, post))
-                        new.append({"race_key": rk, "post_time": post, "seen_at": at.isoformat(timespec="seconds")})
-                seen[rk] = kept
+                        if (at, post) not in have:
+                            new.append({"race_key": rk, "post_time": post, "seen_at": at.isoformat(timespec="seconds")})
+                seen[rk] = sorted(have | set(kept), key=lambda x: x[0])
         for rk, r in self.state["races"].items():
             post = r.get("post_time")
             if post and (not seen.get(rk) or seen[rk][-1][1] != post):
