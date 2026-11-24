@@ -1139,6 +1139,7 @@ def test_saved_mam_mass_and_completeness_are_checked(tmp_path, monkeypatch, labe
     paths, _ = _two_races(tmp_path, monkeypatch)
     it = _mam_row(paths, probs, complete)
     assert not it["formal_probability"] and it["trio_probs_full"] is None, label
+    assert not any("保存した時と出走馬が違う" in r for r in it["reasons"]), label
     assert all(not a["stakes"] for a in it["allocation"].values())
 
 

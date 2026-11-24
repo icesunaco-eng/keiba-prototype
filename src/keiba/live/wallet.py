@@ -453,7 +453,8 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) ->
                 if set(sources["mam"]) != set(ml):  # 保存した時の印ではなく、今の出走馬の全組と照らす
                     formal = False
                     reasons.append("まむ：今の出走馬の全組の確率がそろっていない（足りない組を埋めて正式な確率にはしない。参考表示）"
-                                   + ("。保存した時と出走馬が違う" if mp.get("complete") else ""))
+                                   + ("" if not mp.get("complete") else "。保存した時と出走馬が違う" if sources["mam"]
+                                      else "。全組そろいの印なのに確率が無い"))
         missing = [k for k in w if k not in sources]
         if missing:
             formal = False
