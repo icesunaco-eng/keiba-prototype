@@ -1,6 +1,5 @@
 """これからのレースの予想・配分・精算（合成のページで端から端まで。ネットにはつながない）。"""
 import json
-import os
 from datetime import datetime
 from itertools import combinations
 
@@ -1527,6 +1526,7 @@ def test_packet_permissions_match_a_plain_write(tmp_path, monkeypatch):
 # ---- みに💚20261125-17（PR #18）の指摘：ハードリンクが使えない置き場で途中で止まったとき
 def _child_publish_then_die(data_dir, where):
     """別プロセスで、ハードリンクが使えない置き場をまねて置きに行き、where の所で強制終了する（後片付けは走らない）。"""
+    import os
     from pathlib import Path
     from types import SimpleNamespace
     from keiba.live import mam
