@@ -1333,3 +1333,23 @@ def test_complete_flag_must_be_boolean_true(flag):
     use, ok, why = _mam_use(row, list(range(1, N + 1)))
     assert use and not ok and "真偽値" in why
     assert _mam_use({**row, "complete": True}, list(range(1, N + 1))) == (True, True, None)
+
+
+def test_complete_flag_is_judged_on_the_issued_roster(tmp_path, monkeypatch):
+    """全組そろいの印は、受け付けた時の出馬表ではなく、まむに渡した入力の出走馬で決める。"""
+    from keiba.ledger import Ledger
+    from keiba.live.mam import export_packets, import_predictions
+    paths, col = _two_races(tmp_path, monkeypatch)
+    _scratch_eight(col)
+    export_packets(paths)                                     # 渡したのは7頭の入力
+    col._save(RK, "card", "1h", "/JRADB/x", "c", card_html([f"H{h:04d}" for h in range(N)]))  # 受付の時は出馬表が8頭
+    col._write_state()
+    f = tmp_path / "p.json"
+    f.write_text(json.dumps({"schema": "keiba-mam-prediction-v1", "race_key": RK, "time_point": "1h",
+                             "generated_at": "2025-08-30T14:35:00+09:00",
+                             "trios": [{"combo": c, "p": 1 / 35} for c in _combos(N - 1)]}))
+    assert import_predictions(paths, f)["accepted"] == 1
+    led = Ledger(paths.ledger_path, read_only=True)
+    row = next(p for p in led.predictions() if p["method"] == "text_ai")
+    led.close()
+    assert row["issued_horses"] == list(range(1, N)) and row["complete"] is True

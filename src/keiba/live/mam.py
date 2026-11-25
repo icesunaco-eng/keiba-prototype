@@ -159,14 +159,16 @@ def import_predictions(paths, file: Path) -> dict:
                             key=lambda c: sum(pos[int(x)] for x in c.split("-")))
         gate = inputs[(rk, tp)]["gate"]
         odds = inputs[(rk, tp)]["trio"]["odds"] if gate.get("pass") else None
+        issued = issued_roster(paths, rk, tp)
         payload = {
             "race_date": v["race"]["race_date"], "method_kind": "text_ai", "uses_post_race_odds": False,
             "horses": [{"n": n, "rank": (v["ranking"].index(n) + 1) if n in v["ranking"] else None} for n in nums],
             "trios": [{"combo": c, "p": round(probs[c], 6) if c in probs else None} for c in ranked[:20]],
             "trios_all": {c: round(p, 7) for c, p in probs.items()},
-            "complete": bool(probs) and set(probs) == {"-".join(map(str, c)) for c in combinations(sorted(nums), 3)},
-            # 予想を作った時にまむが見ていた出走馬（渡した入力）。統合で正式にするかは、これと統合の時の出走馬で決める
-            "issued_horses": issued_roster(paths, rk, tp),
+            # 全組そろいは、予想を作った時にまむが見ていた出走馬（渡した入力）で見る。渡した入力が分からなければ受付の時点の出走馬
+            "complete": bool(probs) and set(probs) == {"-".join(map(str, c)) for c in combinations(issued or sorted(nums), 3)},
+            # 統合で正式にするかは、これと統合の時の出走馬で決める
+            "issued_horses": issued,
             "confidence": pred.get("confidence", "Z"),
             "allocation": {a: (lambda x: {"status": x.status if gate.get("pass") else "not_allocated_gate", "stakes": x.stakes,
                                           "total": x.total})(allocate(probs, odds, a, calibrated=calibrated)) for a in ALLOC_METHODS},
