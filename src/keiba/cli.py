@@ -127,12 +127,22 @@ def cmd_review(paths, args):
     print(f"月次の振り返り → {write_review(paths, month)}")
 
 
-def _clear_mark(mark, mine: int):
+def _set_mark(mark) -> int | None:
+    """印を付けて、付けた時刻を返す。付けられない置き場では None（印のために見回りを止めない）。"""
+    try:
+        mark.parent.mkdir(parents=True, exist_ok=True)
+        mark.touch()
+        return mark.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _clear_mark(mark, mine: int | None):
     """自分の付けた印だけ外す（あとから別の見回りが付け直していたら残す）。"""
     try:
-        if mark.stat().st_mtime_ns == mine:
+        if mine is not None and mark.stat().st_mtime_ns == mine:
             mark.unlink()
-    except FileNotFoundError:
+    except OSError:
         pass
 
 
@@ -144,13 +154,10 @@ def cmd_collect(paths, args):
         # 前の回の印が残っていれば（途中で止まった・失敗した）、新しいページが無い回でも置き直す（締切までに渡すため）
         pending = paths.data_dir / "mam" / "export-pending"
         was_pending = pending.exists()
-        pending.parent.mkdir(parents=True, exist_ok=True)
-        pending.touch()
-        mine = pending.stat().st_mtime_ns
+        mine = _set_mark(pending)
         out = Collector(root).tick(notify=_notify)
         if out["saved"]:
-            pending.touch()   # 取ったページの入力を置くまで印を残す（重なった別の見回りが先に外していても付け直す）
-            mine = pending.stat().st_mtime_ns
+            mine = _set_mark(pending)   # 取ったページの入力を置くまで印を残す（重なった別の見回りが先に外していても付け直す）
             from .live.wallet import run_live
             try:
                 out["live"] = run_live(paths)

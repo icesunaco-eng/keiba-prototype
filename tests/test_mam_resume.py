@@ -191,3 +191,13 @@ def test_mark_set_by_a_later_tick_is_not_removed(tmp_path):
     assert mark.exists()
     cli._clear_mark(mark, mark.stat().st_mtime_ns)
     assert not mark.exists()
+
+
+def test_tick_goes_on_when_the_mark_cannot_be_written(tmp_path):
+    """印を置けない置き場（data/mam がファイルになっているなど）でも、見回りは止めない。"""
+    paths = Paths(data_dir=tmp_path)
+    (tmp_path / "mam").write_text("not a folder")
+    calls, out, _ = _run(paths, 2)
+    assert calls == {"live": 1, "export": 1} and out["saved"] == 2
+    calls, out, _ = _run(paths, 0)
+    assert calls == {"live": 0, "export": 0} and out["saved"] == 0
