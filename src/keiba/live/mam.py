@@ -31,6 +31,7 @@ def _state(root: Path) -> dict:
 
 
 def _packet_path(paths, rk: str, tp: str) -> Path:
+    """まむに渡した入力の置き場所（export_packets が書くファイルと同じ名前）。"""
     return paths.data_dir / "mam" / "outbox" / f"{rk.replace('|', '_')}_{tp}.json"
 
 
@@ -60,7 +61,7 @@ def export_packets(paths) -> list[Path]:
         if tp == "result":
             continue
         r = state["races"][rk]
-        f = out_dir / f"{rk.replace('|', '_')}_{tp}.json"  # issued_roster（_packet_path）と同じ名前
+        f = out_dir / f"{rk.replace('|', '_')}_{tp}.json"
         if f.exists():
             continue
         gate = inp["gate"]
