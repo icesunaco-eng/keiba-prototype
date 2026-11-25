@@ -410,6 +410,8 @@ def _mam_use(mp: dict, roster: list) -> tuple[bool, bool, str | None]:
     受付は合計1に直して7桁に丸めて保存する。"""
     probs = mp.get("trios_all")
     if probs is None or probs == {}:
+        if mp.get("complete") is True:   # 受付は確率が無ければ False を保存する。True なら保存行が書き換わっている
+            return True, False, "まむ：全組の印が True なのに確率が無い（保存行の矛盾。参考表示）"
         return True, False, "まむ：確率が無い（順位だけ）。正式な確率にしない（参考表示）"
     combos_now = {"-".join(map(str, c)) for c in combinations(sorted(roster), 3)}
     if not isinstance(probs, dict) or not any(probs.values()) or not all(

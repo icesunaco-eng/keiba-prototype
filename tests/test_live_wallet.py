@@ -1394,3 +1394,119 @@ def test_mam_integration_matches_the_agreement_in_every_order(tmp_path, monkeypa
     assert bool(it["formal_probability"]) == expected, (it["reasons"], issued, now, learning)
     if not expected:
         assert all(not a["stakes"] for a in it["allocation"].values()) and it["reasons"]
+
+
+# ---- みに💚20261125-9（PR #18）の指摘
+def _race_two_exports(paths, col, monkeypatch, scratch_between=True):
+    """書き出し2つが「まだ無い」を確かめた後に、順に置こうとする（見回りと手動の mam export が重なったとき）。
+    1つ目は8頭の入力、2つ目は8番取消の後の7頭の入力。返り値は (1つ目が置いた, 2つ目が置いた)。"""
+    from pathlib import Path
+    from keiba.live import mam
+    real_exists = Path.exists
+    monkeypatch.setattr(Path, "exists", lambda self, *a, **k: False if self.parent.name == "outbox" else real_exists(self, *a, **k))
+    first = mam.export_packets(paths)          # 8頭の入力を置く
+    if scratch_between:
+        _scratch_eight(col)
+    second = mam.export_packets(paths)         # 2つ目も「まだ無い」と見たまま置こうとする
+    monkeypatch.setattr(Path, "exists", real_exists)
+    return first, second
+
+
+def test_second_export_cannot_replace_the_first_packet(tmp_path, monkeypatch):
+    """重大：書き出しが2つ同時に走っても、先に置いた入力は入れ替わらない（後の書き出しは置かない）。"""
+    from keiba.live.mam import _packet_path, issued_roster
+    paths, col = _two_races(tmp_path, monkeypatch)
+    first, second = _race_two_exports(paths, col, monkeypatch)
+    f = _packet_path(paths, RK, "1h")
+    assert f in first and f not in second
+    assert issued_roster(paths, RK, "1h") == list(range(1, N + 1))
+    assert not list((paths.data_dir / "mam" / "outbox-staging").iterdir())   # 書きかけは残らない
+
+
+def test_stale_answer_after_racing_exports_stays_reference(tmp_path, monkeypatch):
+    """重大の再現：8頭の入力を読んだまむが1〜7の35組で答え、後の書き出しが7頭の入力を置こうとしても、
+    受付は8頭の入力に結び付けて全組の印を False にし、まむ入りの統合は参考・配分0円・精算0円。"""
+    from keiba.live.mam import import_predictions
+    paths, col = _two_races(tmp_path, monkeypatch)
+    _race_two_exports(paths, col, monkeypatch)
+    f = tmp_path / "p.json"
+    f.write_text(json.dumps({"schema": "keiba-mam-prediction-v1", "race_key": RK, "time_point": "1h",
+                             "generated_at": "2025-08-30T14:35:00+09:00",
+                             "trios": [{"combo": c, "p": 1 / 35} for c in _combos(N - 1)]}))
+    assert import_predictions(paths, f)["accepted"] == 1
+    run_live(paths)
+    rows = _int_rows(paths)
+    mam_row = rows[(RK, "1h", "text_ai")]
+    assert mam_row["issued_horses"] == list(range(1, N + 1)) and mam_row["complete"] is False
+    it = rows[(RK, "1h", "int_market_ml_mam")]
+    assert not it["formal_probability"] and any("予想に使った入力と今の出走馬が違う" in r for r in it["reasons"])
+    assert all(not a["stakes"] for a in it["allocation"].values())
+
+
+def test_packet_appears_only_when_complete(tmp_path, monkeypatch):
+    """入力は書き終えてから置く：置く瞬間まで outbox には何も無く、書きかけは outbox の外にある。"""
+    import os
+    from keiba.live import mam
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    real_link, seen = os.link, []
+
+    def watch(src, dst):
+        seen.append((list((paths.data_dir / "mam" / "outbox").iterdir()), json.loads(open(src, encoding="utf-8").read())))
+        return real_link(src, dst)
+    monkeypatch.setattr(mam.os, "link", watch)
+    written = mam.export_packets(paths)
+    assert written and len(seen) == len(written)
+    assert seen[0][0] == [] and seen[0][1]["schema"] == mam.SCHEMA_IN   # 1つ目を置く前の outbox は空・中身はそろっている
+    assert not list((paths.data_dir / "mam" / "outbox-staging").iterdir())
+
+
+def test_publish_without_hard_links_still_never_replaces(tmp_path, monkeypatch):
+    """ハードリンクを作れない置き場でも、無いときだけ作る形で置き、先の入力は上書きしない。"""
+    from keiba.live import mam
+
+    def no_links(src, dst):
+        raise PermissionError("hard links are not supported here")
+    paths, col = _two_races(tmp_path, monkeypatch)
+    monkeypatch.setattr(mam.os, "link", no_links)
+    first, second = _race_two_exports(paths, col, monkeypatch)
+    f = mam._packet_path(paths, RK, "1h")
+    assert f in first and f not in second
+    assert mam.issued_roster(paths, RK, "1h") == list(range(1, N + 1))
+    assert not list((paths.data_dir / "mam" / "outbox-staging").iterdir())
+
+
+def test_failed_write_leaves_no_packet(tmp_path, monkeypatch):
+    """書く途中で失敗したら、outbox に何も置かず、書きかけも残さない（次の回に置き直せる）。"""
+    from keiba.live import mam
+
+    def broken_fsync(fd):
+        raise OSError("disk full")
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    real_fsync = mam.os.fsync
+    monkeypatch.setattr(mam.os, "fsync", broken_fsync)
+    with pytest.raises(OSError):
+        mam.export_packets(paths)
+    assert not list((paths.data_dir / "mam" / "outbox").iterdir())
+    assert not list((paths.data_dir / "mam" / "outbox-staging").iterdir())
+    monkeypatch.setattr(mam.os, "fsync", real_fsync)
+    assert mam.export_packets(paths) and mam.issued_roster(paths, RK, "1h") == list(range(1, N + 1))
+
+
+def test_export_writes_where_the_receipt_reads(tmp_path, monkeypatch):
+    """書き出しの置き場所と、受付で読む置き場所が同じ名前（_packet_path 1か所で決める）。"""
+    from keiba.live import mam
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    written = mam.export_packets(paths)
+    for f in written:
+        body = json.loads(f.read_text(encoding="utf-8"))
+        assert f == mam._packet_path(paths, body["race_key"], body["time_point"])
+        assert mam.issued_roster(paths, body["race_key"], body["time_point"]) is not None
+
+
+def test_true_flag_without_probabilities_is_reported_as_a_broken_row():
+    """提案：全組の印が True なのに確率が空の保存行は「順位だけ」ではなく保存行の矛盾と出す（正式にしない）。"""
+    from keiba.live.wallet import _mam_use
+    use, ok, why = _mam_use({"trios_all": {}, "complete": True, "issued_horses": list(range(1, N + 1))}, list(range(1, N + 1)))
+    assert not ok and "保存行の矛盾" in why
+    use, ok, why = _mam_use({"trios_all": {}, "complete": False, "issued_horses": list(range(1, N + 1))}, list(range(1, N + 1)))
+    assert not ok and "順位だけ" in why

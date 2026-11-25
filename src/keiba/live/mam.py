@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import datetime
 from itertools import combinations
 from pathlib import Path
@@ -35,8 +37,47 @@ def _packet_path(paths, rk: str, tp: str) -> Path:
     return paths.data_dir / "mam" / "outbox" / f"{rk.replace('|', '_')}_{tp}.json"
 
 
+def _publish_once(paths, rk: str, tp: str, text: str) -> Path | None:
+    """入力の束を、書き終えた形で一度だけ outbox に置く。同じ名前がもうあれば置かず None を返す。
+    書き出しが同時に2つ走っても（見回りと手動の mam export など）、先に置いた入力は入れ替わらない。
+    まむが読んだ入力と、受付で確かめる入力（issued_roster）を同じものにするため。
+    書きかけは outbox の外（outbox-staging）で作るので、まむが書きかけを読むことも無い。"""
+    path = _packet_path(paths, rk, tp)
+    stage = paths.data_dir / "mam" / "outbox-staging"   # 同じディスクの outbox の外
+    stage.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=stage, prefix=path.stem + ".", suffix=".part")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.link(tmp, path)   # 同じ名前があれば失敗する（上書きしない）。置いた時には中身がそろっている
+            return path
+        except FileExistsError:
+            return None
+        except OSError:
+            pass   # ハードリンクを作れない置き場（outbox が別のディスクなど）
+        try:
+            fh = open(path, "x", encoding="utf-8")   # 無いときだけ作る（上書きしない）
+        except FileExistsError:
+            return None
+        try:
+            with fh:
+                fh.write(text)
+        except BaseException:
+            path.unlink(missing_ok=True)   # 自分が作った書きかけだけを消す
+            raise
+        return path
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
 def issued_roster(paths, rk: str, tp: str) -> list[int] | None:
-    """そのレース・時点でまむに渡した入力（outbox。一度書いたら上書きしない）の出走馬。
+    """そのレース・時点でまむに渡した入力（outbox。_publish_once が一度だけ置き、上書きしない）の出走馬。
     無い・読めない・別のレースのものは None（予想と出走馬を結び付けられない）。"""
     try:
         packet = json.loads(_packet_path(paths, rk, tp).read_text(encoding="utf-8"))
@@ -79,8 +120,10 @@ def export_packets(paths) -> list[Path]:
             "source_snapshots": inp["snapshots"],
             "note": "締切までに分かっていた情報だけ。予想は締切までに返すこと（形は mam-format.md）",
         }
-        f.write_text(json.dumps(packet, ensure_ascii=False, indent=1), encoding="utf-8")
-        written.append(f)
+        placed = _publish_once(paths, rk, tp, json.dumps(packet, ensure_ascii=False, indent=1))
+        if placed is None:
+            continue   # 同時に動いた別の書き出しが先に置いた。先に置いた入力をそのまま渡す
+        written.append(placed)
     return written
 
 
