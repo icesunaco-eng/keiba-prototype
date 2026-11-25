@@ -419,10 +419,14 @@ class Collector:
                         saved.append(self._save(rk, f"odds_{kind}", tp, p2, c2, self.client.get(p2, c2)))
         if tp == "result" and not saved:
             return saved  # 結果のリンクがまだ無い。次の tick でもう一度
-        if tp != "result" and not any(x.get("kind") == "card" for x in saved):
-            # 出馬表を取れなかった（一覧の出馬表リンクが欠けた等）：オッズだけでは「取得済み」にしない。
-            # 時間帯の間は次の回に取り直し、取れないまま時間帯が過ぎたら「取れなかった」に数える
-            return saved
+        if tp != "result":
+            # その時点の材料（時間帯の中の出馬表と、その後の三連複オッズ・または未発売の印）がそろったかを、正式の判定と
+            # 同じ関数で見る。そろわなければ（出馬表のリンクが欠けた・三連複のタブだけ欠けた・オッズが出馬表より先だった等）
+            # 「取得済み」にせず、時間帯の間は次の回に取り直し、取れないまま時間帯が過ぎたら「取れなかった」に数える
+            from .. import official
+            dl = deadline(r["race_date"], r["post_time"], tp)
+            if official.material_time(official.capture_records(self.root).get((rk, tp), []), dl) is None:
+                return saved
         self.state["taken"][f"{rk}|{tp}"] = self.now().isoformat(timespec="seconds")
         self._write_state()
         return saved

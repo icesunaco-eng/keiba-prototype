@@ -244,6 +244,8 @@ def env(tmp_path, monkeypatch):
 
 
 _REAL_RUN_LIVE = wallet.run_live   # 差し替える前の本物（回ごとに時計だけ変える）
+from keiba import review as _review_module  # noqa: E402
+_REAL_WRITE_REVIEW = _review_module.write_review
 
 
 def _cli_tick(paths, monkeypatch, now, pages=None, months=None):
@@ -342,3 +344,175 @@ def test_post_time_survives_archive_between_reads(tmp_path):
     with patch.object(collector_module, "read_jsonl", archive_meanwhile):
         assert official.post_times(root, {rk}) == {rk: "15:40"}
     assert archive_meanwhile.done
+
+
+# ---- 💚20261125-18 止める：前の月の月次の書き込みが一度失敗しても、次の見回りで書き直す ---------------------------
+
+@pytest.mark.parametrize("stop_after_fail", [False, True])
+def test_previous_month_review_is_retried_until_written(env, monkeypatch, stop_after_fail):
+    """8月のレースを9月の見回りで精算し（返還）、直後の8月の月次の書き込みが一度だけ失敗した。次のふつうの見回りで
+    （予想・精算が動かない回でも）8月の月次を書き直し、保存した月次の金額が台帳と同じになる。
+    stop_after_fail：書き込みの途中で見回りが止まった（状態に残した月を、次の見回りが読む）。"""
+    import keiba.review as review
+    paths, col, rk = env
+    _cancel(col.root, rk)
+    col.state["races"][rk].update(list_cname="L", result_links=[["/x", "R"]], known_at="2025-08-30T09:00:00+09:00")
+    col._write_state()
+    _cli_tick(paths, monkeypatch, datetime(2025, 8, 30, 16, 10, tzinfo=JST), {"R": empty_result(rk)})
+    real_write = _REAL_WRITE_REVIEW
+    month = "2025-08"
+    real_write(paths, month)
+    old_json = (paths.data_dir / "review" / f"{month}.json").read_bytes()   # 精算の前の8月の月次（返還0円）
+    calls = []
+
+    def writer(p, target, *a):
+        calls.append(target)
+        if target == month and calls.count(month) == 1:
+            if stop_after_fail:
+                raise KeyboardInterrupt()              # 見回りがここで止まった（電源・強制終了）
+            raise OSError("一時的に書けない")
+        return real_write(p, target, *a)
+
+    def tick(at):
+        class Cl:
+            count = 0
+            def get(self, path, cname): return "<html></html>"
+            def get_url(self, url): return "<html></html>"
+        real = collector_module.Collector
+        monkeypatch.setattr(collector_module, "Collector", lambda root: real(root, client=Cl(), now=lambda: at))
+        monkeypatch.setattr(real, "refresh", lambda self, force=False: None)
+        monkeypatch.setattr(real, "check_notices", lambda self, log=print: None)
+        monkeypatch.setattr(cli, "_notify", lambda *a, **k: None)
+        monkeypatch.setattr(mam, "export_packets", lambda p: [])
+        monkeypatch.setattr(wallet, "run_live", lambda p, **k: _REAL_RUN_LIVE(p, now=at))
+        monkeypatch.setattr(review, "write_review", writer)
+        out = StringIO()
+        try:
+            with redirect_stdout(out):
+                cli.cmd_collect(paths, types.SimpleNamespace(action="tick"))
+        finally:
+            monkeypatch.setattr(collector_module, "Collector", real)
+        return json.loads(out.getvalue().splitlines()[-1]) if out.getvalue().strip() else None
+
+    if stop_after_fail:
+        with pytest.raises(KeyboardInterrupt):
+            tick(datetime(2025, 9, 7, 16, 0, tzinfo=JST))
+    else:
+        first = tick(datetime(2025, 9, 7, 16, 0, tzinfo=JST))
+        assert first["live"]["settled"] > 0
+    assert _rows(paths, rk)                                         # 精算は台帳に書けている
+    assert month in json.loads((col.root / "state.json").read_text()).get("review_months", [])   # 書けなかった月を残す
+    tick(datetime(2025, 9, 7, 16, 5, tzinfo=JST))                   # 次のふつうの見回り（精算は0件）
+    assert calls.count(month) >= 2
+    assert not json.loads((col.root / "state.json").read_text()).get("review_months")
+    saved = json.loads((paths.data_dir / "review" / f"{month}.json").read_text(encoding="utf-8"))
+    fresh = json.loads(json.dumps(review.build_review(paths, month), ensure_ascii=False, default=str))
+    assert saved["wallets"] == fresh["wallets"] and sum(int(w["returned"]) for w in saved["wallets"]) > 0
+    assert (paths.data_dir / "review" / f"{month}.json").read_bytes() != old_json   # 保存した8月の月次も書き直された
+
+
+# ---- 💚20261125-18 直してから：三連複のタブだけ欠けた回は「取得済み」にしない ----------------------------------
+
+def _replay_trio_tab(directory, missing_until, card_after_odds=False):
+    """15:40発走・1時間前の時間帯14:25〜14:40。missing_until より前の回は、オッズの一覧から三連複のタブだけ欠ける。
+    card_after_odds：14:25の回は出馬表が取れず（一覧の出馬表リンクが欠け）、オッズだけ取れる。"""
+    paths = _paths(directory)
+    root = paths.data_dir / "live"
+    clock = {"now": T("14:00")}
+    told = []
+
+    def fetch(name):
+        if name == ENTRY_INDEX[1] or name.startswith("pw01dli"):
+            return INDEX
+        pages = _pages(clock)
+        if name == LIST:
+            listing = pages[name].replace("15時41分", "15時40分")
+            if card_after_odds and clock["now"] < T("14:30"):
+                listing = listing.replace(f"?CNAME={CARD}", "")
+            return listing
+        if name == "pw15orl10/AA" and missing_until and clock["now"] < T(missing_until):
+            return pages[name].splitlines()[0]   # 三連複のタブだけ、まだ無い
+        return pages[name]
+    client = FakeClient(fetch)
+
+    def tick(hm):
+        clock["now"] = T(hm)
+        out = StringIO()
+        with patch.object(collector_module, "Collector",
+                          lambda folder: Collector(folder, client=client, now=lambda: clock["now"])), \
+                patch.object(Collector, "check_notices", lambda self, log=print: None), \
+                patch.object(cli, "_notify", lambda title, msg: told.append(msg)), \
+                patch.object(wallet, "prediction_clock", lambda: clock["now"]), \
+                patch.object(Ledger, "_now", lambda _: clock["now"].astimezone(timezone.utc).isoformat(timespec="seconds")), \
+                redirect_stdout(out):
+            cli.cmd_collect(paths, SimpleNamespace(action="tick"))
+        return json.loads(out.getvalue().splitlines()[-1])
+    return paths, root, client, tick, told
+
+
+def test_trio_tab_missing_once_is_recaptured(tmp_path):
+    """14:25の回は三連複のタブだけ欠け、14:30から戻る。14:25は取得済みにせず14:30に取り直し、正式の材料がそろう。"""
+    paths, root, client, tick, told = _replay_trio_tab(tmp_path / "once", "14:30")
+    tick("14:00")
+    tick("14:25")
+    assert f"{RK}|1h" not in Collector(root, client=client).state["taken"]
+    tick("14:30")
+    assert client.calls.count("pw156ou1/66") == 1                     # 戻った三連複を取り直した
+    assert f"{RK}|1h" in Collector(root, client=client).state["taken"]
+    assert official.material_time(official.capture_records(root)[(RK, "1h")], T("14:40")) is not None
+    last = tick("14:41")
+    assert last["missed"] == 0 and not any(f"{RK}|1h" in m for m in told)
+
+
+def test_trio_tab_missing_through_the_window_is_reported(tmp_path):
+    """三連複のタブが時間帯の終わりまで欠けたまま：取得済みにせず、時間帯が過ぎたら取り損ねとして知らせる。
+    締切の代わりの予想にはお金を配分しない。"""
+    paths, root, client, tick, told = _replay_trio_tab(tmp_path / "always", "16:00")
+    for hm in ("14:00", "14:25", "14:30", "14:35", "14:41"):
+        last = tick(hm)
+    assert f"{RK}|1h" not in Collector(root, client=client).state["taken"]
+    assert last["missed"] >= 1 and any(f"{RK}|1h" in m for m in told)
+    led = Ledger(paths.ledger_path, read_only=True)
+    preds = [p for p in led.predictions() if p["race_key"] == RK and p["time_point"] == "1h"]
+    led.close()
+    for p in preds:
+        for a, v in (p.get("allocation") or {}).items():
+            if isinstance(v, dict):
+                assert not v.get("stakes"), (p["method"], a, v)
+
+
+def test_card_after_odds_is_not_taken_until_both_are_in_order(tmp_path):
+    """14:25はオッズだけ（出馬表リンクが欠け）、14:30に出馬表もオッズも取れる。正式の判定と同じく、出馬表の後の
+    三連複がそろった回で取得済みにする（14:25のオッズだけでは取得済みにしない）。"""
+    paths, root, client, tick, told = _replay_trio_tab(tmp_path / "order", None, card_after_odds=True)
+    tick("14:00")
+    tick("14:25")
+    assert f"{RK}|1h" not in Collector(root, client=client).state["taken"]
+    tick("14:30")
+    assert f"{RK}|1h" in Collector(root, client=client).state["taken"]
+    got = official.material_time(official.capture_records(root)[(RK, "1h")], T("14:40"))
+    assert got == T("14:30")
+    assert tick("14:41")["missed"] == 0
+
+
+# ---- 同じ種類（書く途中で止まる）：まむへの入力のファイル -----------------------------------------------------
+
+def test_mam_packet_cut_while_writing_is_written_again(env, monkeypatch):
+    """まむへの入力を書く途中で止まっても、半端なファイルを残さない（次の回にもう一度書く）。"""
+    from pathlib import Path as _P
+    paths, col, rk = env
+    real = _P.write_text
+
+    def cut(self, data, *a, **k):
+        if self.name.endswith(".json.tmp") or (self.suffix == ".json" and "outbox" in str(self)):
+            real(self, data[:20], *a, **k)
+            raise KeyboardInterrupt()
+        return real(self, data, *a, **k)
+    monkeypatch.setattr(_P, "write_text", cut)
+    with pytest.raises(KeyboardInterrupt):
+        mam.export_packets(paths)
+    monkeypatch.setattr(_P, "write_text", real)
+    out = paths.data_dir / "mam" / "outbox"
+    assert not [f for f in out.glob("*.json")]                       # 半端な .json は残らない
+    written = mam.export_packets(paths)
+    assert written and all(json.loads(f.read_text(encoding="utf-8"))["race_key"] for f in written)

@@ -128,6 +128,27 @@ def cmd_review(paths, args):
     print(f"月次の振り返り → {write_review(paths, month)}")
 
 
+def _write_reviews(paths, col, months: set) -> list[str]:
+    """月次の振り返りを書く。書く月は先に状態へ残し、書けた月だけ外す（失敗・途中で止まっても、次の見回りで同じ月をやり直す）。
+    返すのは書けなかった月の失敗の文。"""
+    from .review import write_review
+    todo = sorted(set(col.state.get("review_months") or []) | set(months))
+    if not todo:
+        return []
+    col.state["review_months"] = todo
+    col._write_state()
+    failed, left = [], []
+    for month in todo:
+        try:
+            write_review(paths, month)
+        except Exception as exc:   # 1つの月が書けなくても、ほかの月は書く
+            failed.append(f"{month} の月次の振り返り：{exc!r}"[:200])
+            left.append(month)
+    col.state["review_months"] = left
+    col._write_state()
+    return failed
+
+
 def cmd_collect(paths, args):
     from .live.collector import Collector
     root = paths.data_dir / "live"
@@ -150,22 +171,27 @@ def cmd_collect(paths, args):
                     out["live"] = run_live(paths)
                     from .live.mam import export_packets
                     out["mam_packets"] = len(export_packets(paths))
+                    months: set = set()
                     if out["live"].get("settled") or interrupted:
                         # 前の回が精算を書いた後に止まっていると、この回の精算は0件でも月次は古いまま
                         from datetime import date, timedelta
-                        from .review import write_review
                         days = [date.today(), *([date.today() - timedelta(days=1)] if interrupted else [])]
                         # 精算を書いたレースの月も（長く止まった後に予定表から外れたレースなど、前の月のことがある）
-                        for month in sorted({x.strftime("%Y-%m") for x in days} | set(out["live"].get("months") or [])):
-                            write_review(paths, month)
+                        months = {x.strftime("%Y-%m") for x in days} | set(out["live"].get("months") or [])
+                    review_failed = _write_reviews(paths, col, months)
                     failed = out["live"].get("failed")   # 一部のレース・方式だけの失敗：ほかは書けている。次の回にやり直す
-                    new = col.live_finished(failed or [], out["live"].get("retry_now", True))
+                    new = col.live_finished((failed or []) + review_failed, out["live"].get("retry_now", True))
                     if new:
                         _notify("予想・精算の一部に失敗", "; ".join(new)[:120])
                 except Exception as exc:  # 予想の失敗で収集を止めない（次の回にやり直す）
                     out["live_error"] = repr(exc)
                     if col.live_finished([repr(exc)[:200]]):
                         _notify("予想・精算に失敗", repr(exc)[:120])
+            elif col.state.get("review_months"):
+                # 予想・精算は動かさない回でも、前に書けなかった月次はやり直す（書けるまで月を残す）
+                failed = _write_reviews(paths, col, set())
+                if failed:
+                    out["review_error"] = failed
             print(json.dumps(out, ensure_ascii=False))
     elif args.action == "install":
         import os

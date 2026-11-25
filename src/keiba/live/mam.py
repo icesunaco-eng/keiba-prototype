@@ -60,7 +60,10 @@ def export_packets(paths) -> list[Path]:
             "source_snapshots": inp["snapshots"],
             "note": "締切までに分かっていた情報だけ。予想は締切までに返すこと（形は mam-format.md）",
         }
-        f.write_text(json.dumps(packet, ensure_ascii=False, indent=1), encoding="utf-8")
+        # 一時ファイルに書いてから置き換える（書く途中で止まると半端なファイルが残り、「書いた」とみなされて作り直されない）
+        tmp = f.with_name(f".{f.name}.tmp")
+        tmp.write_text(json.dumps(packet, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(f)
         written.append(f)
     return written
 
