@@ -231,8 +231,9 @@ def test_quiet_tick_places_only_the_time_points_still_before_their_deadline(tmp_
     assert mam.issued_roster(paths, *k12) == list(range(1, 9))
     assert not mam._packet_path(paths, *k11).exists()              # 締切後の時点は、同じ回でも置かない
     assert k11 not in mam.unplaced(paths, AT.replace(minute=41))
-    out, _ = _tick(paths, AT.replace(minute=49), another=True)     # 両方の締切の後：置くものが無い
-    assert "mam_packets" not in out and "mam_retry_seconds" not in out
+    out, _ = _tick(paths, AT.replace(minute=49), another=True)     # 両方の締切の後：置くものが無い（置き直しも動かない）
+    assert out.get("mam_packets", 0) == 0 and "mam_retry_seconds" not in out
+    assert not mam._packet_path(paths, *k11).exists()
 
 
 def test_pages_saved_but_not_marked_taken_are_still_placed(tmp_path):
