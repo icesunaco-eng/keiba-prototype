@@ -1353,3 +1353,44 @@ def test_complete_flag_is_judged_on_the_issued_roster(tmp_path, monkeypatch):
     row = next(p for p in led.predictions() if p["method"] == "text_ai")
     led.close()
     assert row["issued_horses"] == list(range(1, N)) and row["complete"] is True
+
+
+@pytest.mark.parametrize("scratch_at", ["none", "before_packet", "before_import", "before_run", "at_15m"])
+@pytest.mark.parametrize("answer", ["all8", "all7", "part"])
+def test_mam_integration_matches_the_agreement_in_every_order(tmp_path, monkeypatch, scratch_at, answer):
+    """取消が起きる時期（5通り）×まむの答え方（3通り）を、入力を渡す→受付→予想のふだんの流れで通し、取り決めと照らす。
+    取り決め：まむ入りの統合が正式になるのは、まむが渡された出走馬の全組に答えていて、それが統合の時の出走馬と同じで、
+    学習の出走馬も同じときだけ。"""
+    from datetime import datetime
+    from keiba.live.collector import JST
+    from keiba.live.mam import export_packets, import_predictions
+    paths, col = _two_races(tmp_path, monkeypatch)
+    if scratch_at == "before_packet":
+        _scratch_eight(col)
+    export_packets(paths)
+    if scratch_at == "before_import":
+        _scratch_eight(col)
+    keys = {"all8": _combos(N), "all7": _combos(N - 1), "part": _combos(N - 2)}[answer]
+    f = tmp_path / "p.json"
+    f.write_text(json.dumps({"schema": "keiba-mam-prediction-v1", "race_key": RK, "time_point": "1h",
+                             "generated_at": "2025-08-30T14:35:00+09:00", "trios": [{"combo": c, "p": 1 / len(keys)} for c in keys]}))
+    accepted = import_predictions(paths, f)["accepted"]
+    if scratch_at == "before_run":
+        _scratch_eight(col)
+    if scratch_at == "at_15m":
+        col.now = lambda: datetime(2025, 8, 30, 15, 20, tzinfo=JST)
+        _scratch_eight(col, "15m")
+    run_live(paths)
+    it = _int_rows(paths)[(RK, "1h", "int_market_ml_mam")]
+
+    issued = N - 1 if scratch_at == "before_packet" else N
+    at_import = N - 1 if scratch_at in ("before_packet", "before_import") else N
+    now = N - 1 if scratch_at in ("before_packet", "before_import", "before_run") else N
+    learning = N if scratch_at == "none" else N - 1
+    asked = set(_combos(issued))
+    should_accept = set(keys) <= set(_combos(at_import))
+    assert bool(accepted) == should_accept
+    expected = should_accept and set(keys) == asked and issued == now and learning == now
+    assert bool(it["formal_probability"]) == expected, (it["reasons"], issued, now, learning)
+    if not expected:
+        assert all(not a["stakes"] for a in it["allocation"].values()) and it["reasons"]
