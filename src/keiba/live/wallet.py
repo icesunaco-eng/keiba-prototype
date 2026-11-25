@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
 import pickle
 import sqlite3
@@ -308,7 +309,10 @@ def _models(paths, feat_hist: pd.DataFrame, tp: str, day: str):
     """学習モデルと市場組み合わせを、その日までのデータで1日1回学習してキャッシュする。ルールは学習しない（較正だけ）。"""
     cache = paths.data_dir / "live" / "models" / f"{day}-{tp}-{code_hash()[:8]}.pkl"
     if cache.exists():
-        return pickle.loads(cache.read_bytes())
+        try:
+            return pickle.loads(cache.read_bytes())
+        except Exception:   # 壊れた控え（前の版が書く途中で止まった等）：使わずに学習し直して書き直す
+            pass
     cache.parent.mkdir(parents=True, exist_ok=True)
     cut = pd.Timestamp(day) - pd.Timedelta(days=ev.CALIB_DAYS)
     train, calib = feat_hist[feat_hist["race_date"] < cut], feat_hist[feat_hist["race_date"] >= cut]
@@ -322,7 +326,12 @@ def _models(paths, feat_hist: pd.DataFrame, tp: str, day: str):
     for m, v in RULE_METHODS.items():
         model = rule_v1.RuleV1Model(tp, v)
         out[m] = (model, fit_calibration(ev._calibration_set(calib, model.score(calib))))
-    cache.write_bytes(pickle.dumps(out))
+    tmp = cache.with_name(f".{cache.name}.{os.getpid()}.tmp")   # 書き終えてから置き換える（途中で止まっても壊れた控えを残さない）
+    try:
+        tmp.write_bytes(pickle.dumps(out))
+        tmp.replace(cache)
+    finally:
+        tmp.unlink(missing_ok=True)
     return out
 
 
@@ -700,6 +709,8 @@ def odds_check(paths) -> pd.DataFrame:
 
 
 def wallet_summary(paths) -> pd.DataFrame:
+    if not paths.ledger_path.exists():   # まだ一度も予想していない（入れた直後）：空の表
+        return pd.DataFrame(columns=["method", "wallet", "races", "bet_races", "stake", "returned", "roi"])
     led = Ledger(paths.ledger_path, read_only=True)
     from .. import official
     sel = official.load(led.conn, paths.data_dir / "live")

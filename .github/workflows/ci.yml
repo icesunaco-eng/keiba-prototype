@@ -13,3 +13,20 @@ jobs:
           python-version: "3.12"
       - run: pip install -e '.[test]'
       - run: python -m pytest -q
+  # 止める試験（全部の点）：ふつうの見回りの1日を、書き込みの1点ごと（前・後）に止めて、結果が崩れないかを確かめる。
+  # 崩れた点があれば落ちる。結果の一覧は crash-sweep.json として残す（tools/crash_sweep.py）
+  crash-sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[test]'
+      - run: python tools/crash_sweep.py --jobs 4 --out crash-sweep.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-sweep
+          path: crash-sweep.json
+          if-no-files-found: ignore
