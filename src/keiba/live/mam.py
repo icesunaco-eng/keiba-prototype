@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
+import uuid
 from datetime import datetime
 from itertools import combinations
 from pathlib import Path
@@ -45,7 +45,8 @@ def _publish_once(paths, rk: str, tp: str, text: str) -> Path | None:
     path = _packet_path(paths, rk, tp)
     stage = paths.data_dir / "mam" / "outbox-staging"   # 同じディスクの outbox の外
     stage.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=stage, prefix=path.stem + ".", suffix=".part")
+    tmp = stage / f"{path.stem}.{os.getpid()}.{uuid.uuid4().hex}.part"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)   # 権限は前の write_text と同じ（umask に従う）
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)

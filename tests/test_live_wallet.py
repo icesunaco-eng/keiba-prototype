@@ -1510,3 +1510,14 @@ def test_true_flag_without_probabilities_is_reported_as_a_broken_row():
     assert not ok and "保存行の矛盾" in why
     use, ok, why = _mam_use({"trios_all": {}, "complete": False, "issued_horses": list(range(1, N + 1))}, list(range(1, N + 1)))
     assert not ok and "順位だけ" in why
+
+
+def test_packet_permissions_match_a_plain_write(tmp_path, monkeypatch):
+    """置き方を変えても、入力ファイルの権限は前（write_text）と同じ（まむが読めなくならない）。"""
+    import stat
+    from keiba.live import mam
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    written = mam.export_packets(paths)
+    plain = paths.data_dir / "mam" / "outbox" / "plain.txt"
+    plain.write_text("x", encoding="utf-8")
+    assert written and all(stat.S_IMODE(f.stat().st_mode) == stat.S_IMODE(plain.stat().st_mode) for f in written)
