@@ -98,8 +98,9 @@ def cmd_live(paths, args):
         print(json.dumps(run_live(paths), ensure_ascii=False))
     elif args.action == "check":
         df = odds_check(paths)
+        from .live.collector import write_atomic
         out = paths.data_dir / "live" / "odds_check.csv"
-        df.to_csv(out, index=False)
+        write_atomic(out, df.to_csv(index=False))   # 確認アプリが書く途中を読まない
         print(df.to_string(index=False) if len(df) else "まだ判定するページがない")
         if len(df):
             print(f"合格 {int(df['pass'].sum())} / {len(df)}（1h・15m）→ {out}")
@@ -128,24 +129,20 @@ def cmd_review(paths, args):
     print(f"月次の振り返り → {write_review(paths, month)}")
 
 
-def _write_reviews(paths, col, months: set) -> list[str]:
-    """月次の振り返りを書く。書く月は先に状態へ残し、書けた月だけ外す（失敗・途中で止まっても、次の見回りで同じ月をやり直す）。
-    返すのは書けなかった月の失敗の文。"""
-    from .review import write_review
-    todo = sorted(set(col.state.get("review_months") or []) | set(months))
-    if not todo:
-        return []
-    col.state["review_months"] = todo
-    col._write_state()
-    failed, left = [], []
-    for month in todo:
+def _write_reviews(paths, months: set) -> list[str]:
+    """月次の振り返りを書く。渡した月に加えて、精算が増えたのに月次が古い月（精算の直後に止まった・書き込みに失敗した等）も
+    台帳の精算の行数と月次の目印を比べて見つけ、書き直す。返すのは書けなかった月の失敗の文（次の見回りでまた見つかる）。"""
+    from .review import stale_months, write_review
+    try:
+        stale = set(stale_months(paths))
+    except Exception:   # 台帳を読めない回（書き込み中の鍵など）は、渡した月だけ書く。食い違いは残るので、次の回に見つける
+        stale = set()
+    failed = []
+    for month in sorted(set(months) | stale):
         try:
             write_review(paths, month)
         except Exception as exc:   # 1つの月が書けなくても、ほかの月は書く
             failed.append(f"{month} の月次の振り返り：{exc!r}"[:200])
-            left.append(month)
-    col.state["review_months"] = left
-    col._write_state()
     return failed
 
 
@@ -178,7 +175,7 @@ def cmd_collect(paths, args):
                         days = [date.today(), *([date.today() - timedelta(days=1)] if interrupted else [])]
                         # 精算を書いたレースの月も（長く止まった後に予定表から外れたレースなど、前の月のことがある）
                         months = {x.strftime("%Y-%m") for x in days} | set(out["live"].get("months") or [])
-                    review_failed = _write_reviews(paths, col, months)
+                    review_failed = _write_reviews(paths, months)
                     failed = out["live"].get("failed")   # 一部のレース・方式だけの失敗：ほかは書けている。次の回にやり直す
                     new = col.live_finished((failed or []) + review_failed, out["live"].get("retry_now", True))
                     if new:
@@ -187,11 +184,19 @@ def cmd_collect(paths, args):
                     out["live_error"] = repr(exc)
                     if col.live_finished([repr(exc)[:200]]):
                         _notify("予想・精算に失敗", repr(exc)[:120])
-            elif col.state.get("review_months"):
-                # 予想・精算は動かさない回でも、前に書けなかった月次はやり直す（書けるまで月を残す）
-                failed = _write_reviews(paths, col, set())
+            else:
+                # 予想・精算は動かさない回でも、精算が増えたのに古いままの月次があれば書き直す
+                failed = _write_reviews(paths, set())
                 if failed:
                     out["review_error"] = failed
+                    told = col.state.get("review_told", [])
+                    new = [f for f in failed if f not in told]
+                    col.state["review_told"] = (told + new)[-50:]
+                    col._write_state()
+                    if new:
+                        _notify("月次の振り返りを書けない", "; ".join(new)[:120])
+                elif col.state.pop("review_told", None) is not None:
+                    col._write_state()
             print(json.dumps(out, ensure_ascii=False))
     elif args.action == "install":
         import os

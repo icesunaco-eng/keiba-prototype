@@ -473,6 +473,28 @@ def parse_trio_odds(page: str, horses) -> dict:
             "extra": len(extra), "missing": len(missing), "extra_examples": extra[:5], "missing_examples": missing[:5]}
 
 
+def trio_page_issue(page: str) -> str | None:
+    """三連複のページが途中（表はあるのに倍率の欄が空・表が無い・発表時刻が無い）なら理由。そろっていれば None。
+    「票数なし」「取消」など文字の入った欄は空ではない（そのページはそろっている。使えるかは parse_trio_odds の判定）。"""
+    doc = lxml_html.fromstring(page)
+    tables = doc.xpath(f"//table[{_has_class('fuku3')}]")
+    if not tables:
+        return "三連複の表が無い"
+    cells = empty = 0
+    for table in tables:
+        for tr in _rows(table):
+            for td in tr.xpath("./td"):
+                cells += 1
+                empty += not _t(td)
+    if not cells:
+        return "三連複の倍率の欄が無い"
+    if empty:
+        return f"三連複の倍率の欄が空（{empty}/{cells}）"
+    if parse_odds_time(page) is None:
+        return "オッズの発表時刻が無い"
+    return None
+
+
 _ODDS_TIME = re.compile(r"(\d{1,2})時(\d{2})分現在オッズ")
 
 

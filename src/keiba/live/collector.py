@@ -66,6 +66,16 @@ def _ends_without_newline(path: Path) -> bool:
         os.close(fd)
 
 
+def write_atomic(path: Path, text: str):
+    """一時ファイル（プロセスごとに別の名前）に書き終えてから置き換える。読む側（確認アプリ）が書く途中の半端な中身を読まない。"""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def append_lines(path: Path, lines: list[str]):
     """1行ずつの記録ファイル（JSON Lines）に追記する。前回の追記が途中で止まって最後が改行で終わっていなければ、
     先に改行を足してその行を閉じる（新しい行がくっつかないように。途中の行は読む側で飛ばす）。"""
@@ -250,7 +260,8 @@ class Collector:
         self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {"races": {}, "taken": {}}
 
     # ---- 保存 ----
-    def _save(self, race_key: str | None, kind: str, tp: str | None, path: str, cname: str, page: str) -> dict:
+    def _save(self, race_key: str | None, kind: str, tp: str | None, path: str, cname: str, page: str,
+              incomplete: str | None = None) -> dict:
         ts = self.now()
         sub = Path(*race_key.split("|")) if race_key else Path("_index")
         d = self.root / "snapshots" / sub
@@ -261,6 +272,8 @@ class Collector:
         rec = {"race_key": race_key, "kind": kind, "time_point": tp, "fetched_at": ts.isoformat(timespec="seconds"),
                "path": str((d / name).relative_to(self.root)), "sha256": hashlib.sha256(body).hexdigest(),
                "source": jra.BASE + path, "cname": cname}
+        if incomplete:
+            rec["incomplete"] = incomplete   # 途中のページ：原本は残すが、正式の材料には数えない（official.capture_records）
         self._append_index(rec)
         if race_key:
             self._live_needed()   # 予想・精算がまだ（成功するまでやり直す）
@@ -405,8 +418,12 @@ class Collector:
                                         self.client.get("/JRADB/accessD.html", r["card_cname"])))
             odds_links = r.get("odds_links") or []
             if not odds_links:
+                status = fresh.get("odds_status") if fresh else r.get("odds_status")   # 今回の一覧の欄（前の回の値を使わない）
                 saved.append({"race_key": rk, "kind": "odds_unavailable", "time_point": tp,
-                              "fetched_at": self.now().isoformat(timespec="seconds"), "odds_status": r.get("odds_status")})
+                              "fetched_at": self.now().isoformat(timespec="seconds"), "odds_status": status})
+                if status != "未発表":
+                    # 一覧のオッズの欄が無い・「未発表」と出ていない：未発売とは言えないので材料に数えず、時間帯の間は取り直す
+                    saved[-1]["incomplete"] = f"オッズの欄が「{status or '無い'}」（未発表と出ていない）"
                 self._append_index(saved[-1])
             else:
                 path, cname = odds_links[0]
@@ -416,7 +433,9 @@ class Collector:
                     tabs = [l for l in _tab_links(first, words) if l[1] != cname]
                     if tabs:
                         p2, c2 = tabs[0]
-                        saved.append(self._save(rk, f"odds_{kind}", tp, p2, c2, self.client.get(p2, c2)))
+                        page2 = self.client.get(p2, c2)
+                        saved.append(self._save(rk, f"odds_{kind}", tp, p2, c2, page2,
+                                                jra.trio_page_issue(page2) if kind == "trio" else None))
         if tp == "result" and not saved:
             return saved  # 結果のリンクがまだ無い。次の tick でもう一度
         if tp != "result":
@@ -581,7 +600,7 @@ class Collector:
         self.state["missed_notified"] += new_missed
         health = {"checked_at": self.now().isoformat(timespec="seconds"), "missed": missed, "errors": errors,
                   "races_known": len(self.state["races"]), "taken": len(self.state["taken"])}
-        (self.root / "health.json").write_text(json.dumps(health, ensure_ascii=False, indent=1))
+        write_atomic(self.root / "health.json", json.dumps(health, ensure_ascii=False, indent=1))   # 画面が途中を読まない
         # 終わった開催は state から外す（7日より前）。外す前に、レースの情報（頭数・発走時刻など）を
         # races_archive.jsonl に1行ずつ追記して残す（確認アプリが、過去のレースの結果がそろっているかを確かめるのに使う）
         cutoff = (self.now() - timedelta(days=7)).date().isoformat()

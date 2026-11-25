@@ -65,6 +65,9 @@ def _collector(tmp_path, when, odds=True, result=False):
             return CARD
         if cname.startswith("pw15orl"):
             return ODDS
+        if cname.startswith("pw156"):   # 三連複のタブ：実物と同じ形の、倍率のそろったページ（途中のページは取り直す決まり）
+            from tests.test_live_wallet import trio_html
+            return trio_html()
         return "<html>odds or result</html>"
     clock = {"now": when}
     col = Collector(tmp_path, client=FakeClient(pages), now=lambda: clock["now"])

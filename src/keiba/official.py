@@ -213,7 +213,8 @@ def capture_records(root: Path) -> dict[tuple, list]:
     if not (root / "snapshots.jsonl").exists():
         return out
     try:
-        snaps = _snapshots(root)
+        from .live.wallet import complete_records
+        snaps = complete_records(_snapshots(root))   # 途中のページ・未発表と出ていない未発売の印は材料に数えない（見回りも取り直す）
         for rk, tp, kind, at in snaps[["race_key", "time_point", "kind", "fetched_at"]].itertuples(index=False):
             if isinstance(rk, str) and isinstance(tp, str):
                 out.setdefault((rk, tp), []).append((kind, at))

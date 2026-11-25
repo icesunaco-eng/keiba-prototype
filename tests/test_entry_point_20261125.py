@@ -348,11 +348,12 @@ def test_post_time_survives_archive_between_reads(tmp_path):
 
 # ---- 💚20261125-18 止める：前の月の月次の書き込みが一度失敗しても、次の見回りで書き直す ---------------------------
 
-@pytest.mark.parametrize("stop_after_fail", [False, True])
-def test_previous_month_review_is_retried_until_written(env, monkeypatch, stop_after_fail):
-    """8月のレースを9月の見回りで精算し（返還）、直後の8月の月次の書き込みが一度だけ失敗した。次のふつうの見回りで
+@pytest.mark.parametrize("mode", ["write_error", "stop_in_write", "mam_error", "stop_after_settle"])
+def test_previous_month_review_is_rewritten_after_any_stop(env, monkeypatch, mode):
+    """8月のレースを9月の見回りで精算し（返還を台帳に確定）、その直後に止まった・失敗した。次のふつうの見回りで
     （予想・精算が動かない回でも）8月の月次を書き直し、保存した月次の金額が台帳と同じになる。
-    stop_after_fail：書き込みの途中で見回りが止まった（状態に残した月を、次の見回りが読む）。"""
+    write_error：8月の月次の書き込みが一度失敗。stop_in_write：書き込みの途中で強制終了。
+    mam_error：精算の直後、まむへの入力の出力が一時エラー（💚20261125-21 止める①）。stop_after_settle：精算の直後に強制終了。"""
     import keiba.review as review
     paths, col, rk = env
     _cancel(col.root, rk)
@@ -363,15 +364,23 @@ def test_previous_month_review_is_retried_until_written(env, monkeypatch, stop_a
     month = "2025-08"
     real_write(paths, month)
     old_json = (paths.data_dir / "review" / f"{month}.json").read_bytes()   # 精算の前の8月の月次（返還0円）
-    calls = []
+    calls, exports = [], []
 
     def writer(p, target, *a):
         calls.append(target)
-        if target == month and calls.count(month) == 1:
-            if stop_after_fail:
+        if target == month and calls.count(month) == 1 and mode in ("write_error", "stop_in_write"):
+            if mode == "stop_in_write":
                 raise KeyboardInterrupt()              # 見回りがここで止まった（電源・強制終了）
             raise OSError("一時的に書けない")
         return real_write(p, target, *a)
+
+    def export(p):
+        exports.append(1)
+        if len(exports) == 1 and mode == "mam_error":
+            raise OSError("まむの出力先が一時的に書けない")
+        if len(exports) == 1 and mode == "stop_after_settle":
+            raise KeyboardInterrupt()
+        return []
 
     def tick(at):
         class Cl:
@@ -383,7 +392,7 @@ def test_previous_month_review_is_retried_until_written(env, monkeypatch, stop_a
         monkeypatch.setattr(real, "refresh", lambda self, force=False: None)
         monkeypatch.setattr(real, "check_notices", lambda self, log=print: None)
         monkeypatch.setattr(cli, "_notify", lambda *a, **k: None)
-        monkeypatch.setattr(mam, "export_packets", lambda p: [])
+        monkeypatch.setattr(mam, "export_packets", export)
         monkeypatch.setattr(wallet, "run_live", lambda p, **k: _REAL_RUN_LIVE(p, now=at))
         monkeypatch.setattr(review, "write_review", writer)
         out = StringIO()
@@ -394,21 +403,22 @@ def test_previous_month_review_is_retried_until_written(env, monkeypatch, stop_a
             monkeypatch.setattr(collector_module, "Collector", real)
         return json.loads(out.getvalue().splitlines()[-1]) if out.getvalue().strip() else None
 
-    if stop_after_fail:
+    if mode in ("stop_in_write", "stop_after_settle"):
         with pytest.raises(KeyboardInterrupt):
             tick(datetime(2025, 9, 7, 16, 0, tzinfo=JST))
     else:
-        first = tick(datetime(2025, 9, 7, 16, 0, tzinfo=JST))
-        assert first["live"]["settled"] > 0
-    assert _rows(paths, rk)                                         # 精算は台帳に書けている
-    assert month in json.loads((col.root / "state.json").read_text()).get("review_months", [])   # 書けなかった月を残す
-    tick(datetime(2025, 9, 7, 16, 5, tzinfo=JST))                   # 次のふつうの見回り（精算は0件）
-    assert calls.count(month) >= 2
-    assert not json.loads((col.root / "state.json").read_text()).get("review_months")
+        tick(datetime(2025, 9, 7, 16, 0, tzinfo=JST))
+    assert _rows(paths, rk)                                         # 精算は台帳に確定している
+    assert month in review.stale_months(paths)                      # 月次が古いことを台帳と目印から見つけられる
+    assert (paths.data_dir / "review" / f"{month}.json").read_bytes() == old_json
+    tick(datetime(2025, 9, 7, 16, 5, tzinfo=JST))                   # 次のふつうの見回り
+    assert month not in review.stale_months(paths)
     saved = json.loads((paths.data_dir / "review" / f"{month}.json").read_text(encoding="utf-8"))
     fresh = json.loads(json.dumps(review.build_review(paths, month), ensure_ascii=False, default=str))
     assert saved["wallets"] == fresh["wallets"] and sum(int(w["returned"]) for w in saved["wallets"]) > 0
-    assert (paths.data_dir / "review" / f"{month}.json").read_bytes() != old_json   # 保存した8月の月次も書き直された
+    before = calls.count(month)
+    tick(datetime(2025, 9, 7, 16, 10, tzinfo=JST))                  # 追いついたあとは書き直さない
+    assert calls.count(month) == before
 
 
 # ---- 💚20261125-18 直してから：三連複のタブだけ欠けた回は「取得済み」にしない ----------------------------------
@@ -504,7 +514,7 @@ def test_mam_packet_cut_while_writing_is_written_again(env, monkeypatch):
     real = _P.write_text
 
     def cut(self, data, *a, **k):
-        if self.name.endswith(".json.tmp") or (self.suffix == ".json" and "outbox" in str(self)):
+        if "outbox" in str(self) and (self.suffix in (".json", ".tmp")):
             real(self, data[:20], *a, **k)
             raise KeyboardInterrupt()
         return real(self, data, *a, **k)
@@ -516,3 +526,164 @@ def test_mam_packet_cut_while_writing_is_written_again(env, monkeypatch):
     assert not [f for f in out.glob("*.json")]                       # 半端な .json は残らない
     written = mam.export_packets(paths)
     assert written and all(json.loads(f.read_text(encoding="utf-8"))["race_key"] for f in written)
+
+
+# ---- 💚20261125-21 止める②：見回りと手で出す export が重なっても、まむへの正式の入力を壊さない --------------------
+
+def test_mam_packet_overlapping_exports_keep_a_complete_file(env, monkeypatch):
+    """見回りの export が一時ファイルを書き終えて正式の名前に置く前に、手で出した export が割り込んで先に置いた。
+    どちらの一時ファイルも別々なので混ざらず、正式のファイルは完全な JSON のまま。後から来た側は上書きしない。"""
+    import os as _os
+    paths, col, rk = env
+    real_link = _os.link
+    inner = []
+
+    def link_after_other(src, dst):
+        if not inner:   # 最初の export が置く直前に、もう1つの export が最後まで走る
+            inner.append(None)
+            inner[0] = mam.export_packets(paths)
+        return real_link(src, dst)
+    monkeypatch.setattr(mam.os, "link", link_after_other)
+    outer = mam.export_packets(paths)
+    monkeypatch.setattr(mam.os, "link", real_link)
+    out = paths.data_dir / "mam" / "outbox"
+    files = sorted(out.glob("*.json"))
+    assert files and inner and inner[0]                              # 割り込んだ側が先に置いた
+    for f in files:
+        assert json.loads(f.read_text(encoding="utf-8"))["race_key"]  # どれも完全な JSON
+    assert not [x for x in out.iterdir() if x.name.endswith(".tmp")]   # 一時ファイルは残らない
+    assert not set(outer) & set(inner[0])                            # 同じファイルを二重に「書いた」としない
+    again = mam.export_packets(paths)
+    assert again == []                                               # 既にあるものは書き直さない
+
+
+# ---- 💚20261125-21 直してから：倍率の欄が空の三連複のページ・未発表と出ていない未発売は材料に数えない -----------
+
+def _replay_odds_page(directory, mode):
+    """mode：empty_cells（14:25の三連複のページは表があるのに倍率の欄が空、14:30から完全）、complete（対照）。"""
+    import re as _re
+    paths = _paths(directory)
+    root = paths.data_dir / "live"
+    clock = {"now": T("14:00")}
+    told = []
+
+    def fetch(name):
+        if name == ENTRY_INDEX[1] or name.startswith("pw01dli"):
+            return INDEX
+        pages = _pages(clock)
+        if name == LIST:
+            return pages[name].replace("15時41分", "15時40分")
+        if name == "pw156ou1/66" and mode == "empty_cells" and clock["now"] < T("14:30"):
+            html, n = _re.subn(r"<td>[0-9.,]+</td>", "<td></td>", pages[name])
+            assert n > 3
+            return html
+        return pages[name]
+    client = FakeClient(fetch)
+
+    def tick(hm):
+        clock["now"] = T(hm)
+        out = StringIO()
+        with patch.object(collector_module, "Collector",
+                          lambda folder: Collector(folder, client=client, now=lambda: clock["now"])), \
+                patch.object(Collector, "check_notices", lambda self, log=print: None), \
+                patch.object(cli, "_notify", lambda title, msg: told.append(msg)), \
+                patch.object(wallet, "prediction_clock", lambda: clock["now"]), \
+                patch.object(Ledger, "_now", lambda _: clock["now"].astimezone(timezone.utc).isoformat(timespec="seconds")), \
+                redirect_stdout(out):
+            cli.cmd_collect(paths, SimpleNamespace(action="tick"))
+        return json.loads(out.getvalue().splitlines()[-1])
+    return paths, root, client, tick, told
+
+
+@pytest.mark.parametrize("mode", ["empty_cells", "complete"])
+def test_trio_page_with_empty_cells_is_recaptured(tmp_path, mode):
+    paths, root, client, tick, told = _replay_odds_page(tmp_path / mode, mode)
+    tick("14:00")
+    tick("14:25")
+    taken = f"{RK}|1h" in Collector(root, client=client).state["taken"]
+    assert taken == (mode == "complete")                              # 空の倍率のページでは取得済みにしない
+    got = official.material_time(official.capture_records(root)[(RK, "1h")], T("14:40"))
+    assert (got == T("14:25")) == (mode == "complete")
+    tick("14:30")
+    assert client.calls.count("pw156ou1/66") == (2 if mode == "empty_cells" else 1)   # 戻ったページを取り直した
+    assert official.material_time(official.capture_records(root)[(RK, "1h")], T("14:40")) == \
+        (T("14:30") if mode == "empty_cells" else T("14:25"))
+    assert tick("14:41")["missed"] == 0 and not any(f"{RK}|1h" in m for m in told)
+    src = Source(paths, "live")
+    p = src.preds[RK][("ml_lgbm", "1h")]
+    assert p["odds_gate"]["pass"]                                    # 完全なページで判定した（空のページで固定しない）
+
+
+@pytest.mark.parametrize("cell, counted", [("未発表", True), (None, False), ("発売中止", False)])
+def test_unavailable_odds_counts_only_when_list_says_not_released(tmp_path, cell, counted):
+    """前日（24時間前）の時点で一覧にオッズのリンクが無い。オッズの欄に「未発表」と出ているときだけ未発売として
+    材料に数える。欄そのものが無い・別の文字なら材料に数えず、時間帯の間は取り直す。"""
+    from tests.test_live_collector import race_list
+    day_before = lambda hm: datetime.fromisoformat(f"2026-11-21T{hm}:00+09:00")
+    root = tmp_path / "live"
+    clock = {"now": day_before("15:00")}
+
+    def page(name):
+        if name.startswith("pw01dli"):
+            return INDEX
+        if name == LIST:
+            listing = race_list(odds=False).replace("15時41分", "15時40分").replace("18頭", "8頭")
+            if cell is None:
+                listing = listing.replace('<td class="odds">未発表</td>', "")
+            elif cell != "未発表":
+                listing = listing.replace('<td class="odds">未発表</td>', f'<td class="odds">{cell}</td>')
+            return listing
+        return _pages(clock)[name]
+    col = Collector(root, client=FakeClient(page), now=lambda: clock["now"])
+    col.state["races"][RK] = {"race_date": DAY, "venue": "京都", "race_number": 11, "post_time": "15:40",
+                             "field_size": 8, "surface": "芝", "distance_m": 1600, "list_cname": LIST,
+                             "known_at": day_before("09:00").isoformat(), "odds_status": "未発表"}
+    col.state["refreshed_at"] = day_before("15:10").isoformat()
+    col._write_state()
+    clock["now"] = day_before("15:26")
+    col.capture(RK, "24h")
+    assert (f"{RK}|24h" in col.state["taken"]) == counted
+    dl = deadline(DAY, "15:40", "24h")
+    assert (official.material_time(official.capture_records(root).get((RK, "24h"), []), dl) is not None) == counted
+    # 前日の時点だけ記録がある（1時間前の記録はまだ0件）。途中の印の行があっても、レースを丸ごと保留にしない
+    held = {}
+    _, _, inputs = wallet.live_tables(root, col.state, wallet._snapshots(root), held)
+    assert not held and (RK, "24h") in inputs, held
+
+
+# ---- 同じ種類（画面が読むファイルを書く途中）：health.json・held.json は置き換えで書く ---------------------------
+
+def test_files_read_by_app_are_never_written_in_place(env, monkeypatch):
+    """見回りが health.json・held.json を書く途中に確認アプリが読んでも、半端な中身（「読めない」の誤表示）を見ない。
+    正式の名前へは直接書かず、書き終えた一時ファイルから置き換える。"""
+    from pathlib import Path as _P
+    paths, col, rk = env
+    real = _P.write_text
+
+    def no_direct(self, *a, **k):
+        assert self.name not in ("health.json", "held.json", "odds_check.csv"), f"直接書いた：{self.name}"
+        return real(self, *a, **k)
+    monkeypatch.setattr(_P, "write_text", no_direct)
+    _cli_tick(paths, monkeypatch, datetime(2025, 8, 30, 14, 0, tzinfo=JST))
+    assert json.loads((col.root / "health.json").read_text(encoding="utf-8"))["checked_at"]
+    assert (col.root / "held.json").exists()
+
+
+
+def test_review_writes_one_at_a_time(env):
+    """月次は1つずつ書く：別の書き手が鍵を持つ間は待つ（古い中身が後から上書きし、目印だけ新しくなるのを防ぐ）。"""
+    import fcntl
+    import threading
+    from keiba import review
+    paths, col, rk = env
+    out = paths.data_dir / "review"
+    out.mkdir(parents=True, exist_ok=True)
+    done = threading.Event()
+    with open(out / ".lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        th = threading.Thread(target=lambda: (_REAL_WRITE_REVIEW(paths, "2025-08"), done.set()))
+        th.start()
+        assert not done.wait(1.0)                                    # 鍵を持つ間は書かない
+    th.join(30)
+    assert done.is_set() and (out / "2025-08.json").exists()
+    assert "2025-08" not in review.stale_months(paths)

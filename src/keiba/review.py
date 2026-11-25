@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 from collections import Counter
 from pathlib import Path
 
@@ -173,12 +174,63 @@ def build_review(paths, month: str | None, start: str | None = None, end: str | 
     return review
 
 
+MARKS_FILE = ".marks.json"   # data/review/ の中。月 → 月次を書いたときの、その月の精算の行数
+
+
+def settlement_counts(paths) -> dict[str, int]:
+    """月（レースの日付）→ これからのレースの精算の行数（台帳は追記だけなので、増えたら月次が古い）。読めなければ空。"""
+    import sqlite3
+    if not paths.ledger_path.exists():
+        return {}
+    conn = sqlite3.connect(f"file:{paths.ledger_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute("SELECT substr(race_key, 1, 7), COUNT(*) FROM settlements "
+                            "WHERE version LIKE 'live-%' OR method='text_ai' GROUP BY 1").fetchall()
+    finally:
+        conn.close()
+    return {m: n for m, n in rows if isinstance(m, str)}
+
+
+def _marks(paths) -> dict:
+    try:
+        x = json.loads((paths.data_dir / "review" / MARKS_FILE).read_text(encoding="utf-8"))
+        return x if isinstance(x, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def stale_months(paths) -> list[str]:
+    """精算が増えたのに月次がまだ書き直されていない月（精算の直後に止まった・月次の書き込みに失敗した等）。
+    月次は書き終えてから目印を書くので、どこで止まっても、次の見回りでこの関数が見つけて書き直せる。"""
+    marks = _marks(paths)
+    return sorted(m for m, n in settlement_counts(paths).items() if marks.get(m) != n)
+
+
+def _replace_text(path: Path, text: str):
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
 def write_review(paths, month: str | None, start: str | None = None, end: str | None = None) -> Path:
-    r = build_review(paths, month, start, end)
-    month = month or f"{start}_{end}"
+    import fcntl
     out = paths.data_dir / "review"
     out.mkdir(parents=True, exist_ok=True)
-    (out / f"{month}.json").write_text(json.dumps(r, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    # 月次は1つずつ書く（見回りと手で動かす keiba review が重なると、古い中身が後から上書きし、目印だけ新しくなることがある）
+    with open(out / ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        count = settlement_counts(paths).get(month, 0) if month else None   # 先に数える（作る途中に増えた分は、次の回に書き直す）
+        r = build_review(paths, month, start, end)
+        path = _write_review_files(out, month or f"{start}_{end}", r)
+        if month:
+            marks = _marks(paths)
+            marks[month] = count
+            _replace_text(out / MARKS_FILE, json.dumps(marks, ensure_ascii=False, indent=1))   # 書き終えてから目印
+    return path
+
+
+def _write_review_files(out: Path, month: str, r: dict) -> Path:
+    _replace_text(out / f"{month}.json", json.dumps(r, ensure_ascii=False, indent=1, default=str))
 
     def table(rows, cols, labels):
         if not rows:
@@ -208,7 +260,7 @@ def write_review(paths, month: str | None, start: str | None = None, end: str | 
              "<h2>オッズの合格判定</h2>", table(r["odds_gate"], ["time_point", "checked", "passed", "reasons"], ["時点", "判定", "合格", "不合格の主な理由"]),
              "<h2>収集</h2>", f"<p>取り損ね {r['collection']['missed']} 件</p>"]
     path = out / f"{month}.html"
-    path.write_text(_page(f"月次の振り返り {month}", "".join(parts)), encoding="utf-8")
+    _replace_text(path, _page(f"月次の振り返り {month}", "".join(parts)))
     return path
 
 

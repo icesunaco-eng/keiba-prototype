@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import json
+import os
+import uuid
 from datetime import datetime
 from itertools import combinations
 from pathlib import Path
@@ -60,10 +62,17 @@ def export_packets(paths) -> list[Path]:
             "source_snapshots": inp["snapshots"],
             "note": "締切までに分かっていた情報だけ。予想は締切までに返すこと（形は mam-format.md）",
         }
-        # 一時ファイルに書いてから置き換える（書く途中で止まると半端なファイルが残り、「書いた」とみなされて作り直されない）
-        tmp = f.with_name(f".{f.name}.tmp")
-        tmp.write_text(json.dumps(packet, ensure_ascii=False, indent=1), encoding="utf-8")
-        tmp.replace(f)
+        # 出すたびに別の一時ファイルに書き終えてから、正式の名前が「まだ無いときだけ」置く（link は既にあれば失敗する）。
+        # 書く途中で止まっても半端な正式ファイルは残らず、見回りと手で出す export が重なっても、先に置けた完全な入力を上書きしない
+        tmp = f.with_name(f".{f.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(json.dumps(packet, ensure_ascii=False, indent=1), encoding="utf-8")
+            try:
+                os.link(tmp, f)
+            except FileExistsError:
+                continue   # ほかの出力が先に置いた（同じ締切までの入力）
+        finally:
+            tmp.unlink(missing_ok=True)
         written.append(f)
     return written
 

@@ -108,6 +108,14 @@ def card_problem(nums: list[int], field_size) -> str | None:
     return None
 
 
+def complete_records(df: pd.DataFrame) -> pd.DataFrame:
+    """目録の行のうち、途中（incomplete）の印の無いもの。0行のときも列はそのまま（空の絞り込みを列の選び方と取り違えない）。"""
+    if "incomplete" not in df.columns or not len(df):
+        return df
+    keep = df["incomplete"].map(lambda x: not (isinstance(x, str) and x)).astype(bool)
+    return df[keep.to_numpy()]
+
+
 def _with_card_issue(gate: dict, issue: str | None) -> dict:
     if issue:
         gate = dict(gate, card_issue=issue, reasons=[*gate.get("reasons", []), issue])
@@ -165,7 +173,8 @@ def odds_gate(trio: dict, trio_rec, race: dict, tp: str) -> dict:
 def _write_held(root: Path, held: dict):
     """読み取りで保留にしたレースと理由（data/live/held.json）。毎回書き直す（今の状態だけ）。"""
     try:
-        (root / "held.json").write_text(json.dumps(held, ensure_ascii=False, indent=1), encoding="utf-8")
+        from .collector import write_atomic
+        write_atomic(root / "held.json", json.dumps(held, ensure_ascii=False, indent=1))
     except OSError:
         pass
 
@@ -251,6 +260,7 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                     t = jra.parse_trio_odds(page, active)
                     t["odds_time"] = jra.parse_odds_time(page)
                 at_tp = s[s["time_point"] == tp]
+                at_tp = complete_records(at_tp)   # 途中のページは材料に数えない（official.capture_records と同じ）
                 captured = official.material_time(zip(at_tp["kind"], at_tp["fetched_at"]), dl) is not None   # その時点の材料がそろったか
                 inputs[(rk, tp)] = {"card": card, "scratched": scratched, "win": w, "trio": t, "captured": captured,
                                     "gate": _with_card_issue(odds_gate(t, trio_rec, r, tp) if tp != "24h" or trio_rec is not None else
