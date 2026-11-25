@@ -1174,7 +1174,7 @@ def test_mam_formal_only_with_same_roster_and_all_combos(saved, now, keys):
     k = {"all8": combos(range(1, 9)), "all7": combos(range(1, 8)), "all7b": combos((1, 2, 3, 4, 5, 6, 8)),
          "one": ["1-2-3"]}[keys]
     probs = _uniform(k)
-    mp = {"issued_horses": list(saved), "trios_all": probs, "complete": True}  # 印は使わない（True でも正式にならないこと）
+    mp = {"issued_horses": list(saved), "trios_all": probs, "complete": True}  # 印が True でも、出走馬や組が違えば正式にしない
     use, ok, why = _mam_use(mp, list(now))
     assert use == (set(k) <= set(combos(now)))
     assert ok == (saved == now and set(k) == set(combos(now)))
@@ -1323,3 +1323,13 @@ def test_mass_reason_shows_the_difference():
     from keiba.live.wallet import _mam_use
     use, ok, why = _mam_use({"issued_horses": [1, 2, 3, 4], "trios_all": {"1-2-3": 0.5000001, "1-2-4": 0.5000001}}, [1, 2, 3, 4])
     assert not use and not ok and "1.0000002" in why
+
+
+@pytest.mark.parametrize("flag", ["false", "False", "true", 1, 0, [True], {"flag": True}, None, False])
+def test_complete_flag_must_be_boolean_true(flag):
+    """提案：全組の印が真偽値の True でない保存行は、確率がそろっていても正式にしない。"""
+    from keiba.live.wallet import _mam_use
+    row = {"issued_horses": list(range(1, N + 1)), "trios_all": _uniform(_combos(N)), "complete": flag}
+    use, ok, why = _mam_use(row, list(range(1, N + 1)))
+    assert use and not ok and "真偽値" in why
+    assert _mam_use({**row, "complete": True}, list(range(1, N + 1))) == (True, True, None)

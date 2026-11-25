@@ -405,7 +405,8 @@ def market_probs(trio_odds: dict) -> dict:
 def _mam_use(mp: dict, roster: list) -> tuple[bool, bool, str | None]:
     """保存済みのまむの予想を統合にどう使うか：(使う, 正式にしてよい, 理由)。
     取り決め（docs/requests/aisu-integration-reply.md）：正式は「同じ時点・同じ出走馬」で全組がそろったときだけ。
-    同じ出走馬かは、まむに渡した入力の出走馬（issued_horses）と統合の時の出走馬（出馬表）で決める。保存した「全組」の印は使わない。
+    同じ出走馬かは、まむに渡した入力の出走馬（issued_horses）と統合の時の出走馬（出馬表）で決める。
+    全組がそろったかは確率の組から計算し、保存した印（complete）は真偽値の True であることだけを追加で確かめる。
     受付は合計1に直して7桁に丸めて保存する。"""
     probs = mp.get("trios_all")
     if probs is None or probs == {}:
@@ -424,6 +425,8 @@ def _mam_use(mp: dict, roster: list) -> tuple[bool, bool, str | None]:
         return True, False, "まむ：予想に使った入力と今の出走馬が違う（同じ出走馬の予想ではないので参考表示）"
     if set(probs) != combos_now:
         return True, False, "まむ：全組の確率がそろっていない（足りない組を埋めて正式な確率にはしない。参考表示）"
+    if mp.get("complete") is not True:  # 受付は真偽値で保存する。それ以外の値の行は手を加えられたものとして正式にしない
+        return True, False, "まむ：保存した全組の印が真偽値の True でない（保存行の矛盾。参考表示）"
     return True, True, None
 
 
