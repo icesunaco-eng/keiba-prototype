@@ -22,6 +22,7 @@ import pandas as pd
 
 from . import official
 from .ledger import Ledger
+from .settle import winning_combos
 from .live.collector import ARCHIVE_FILE, read_jsonl
 from .live.wallet import _snapshots, live_tables, odds_check, result_ready
 from .report.html import _page
@@ -45,10 +46,9 @@ def _results(paths) -> dict:
             continue
         if not result_ready(res, (races.get(rk) or {}).get("field_size")):
             continue   # 公表の途中・一部しか読めていない結果は的中の集計に使わない（仮想財布の精算と同じ判定）
-        fin = sorted((r for r in res["rows"] if r["status"] == "finished" and r["finish_position"]), key=lambda r: r["finish_position"])
-        top = [r["horse_number"] for r in fin if r["finish_position"] <= 3]
-        out[rk] = {"actual": "-".join(map(str, sorted(top))) if len(top) == 3 else None,
-                   "payouts": res["trio_payouts"]}
+        finished = [(r["horse_number"], r["finish_position"]) for r in res["rows"] if r["status"] == "finished"]
+        wins = sorted(winning_combos(finished))   # 3着同着なら的中の組は複数（仮想財布の精算と同じ決め方）
+        out[rk] = {"actual": wins[0] if wins else None, "actuals": wins, "payouts": res["trio_payouts"]}
     return out, state
 
 
@@ -85,9 +85,9 @@ def comparison(preds: list, setts: list, results: dict) -> list:
             ll, hit = [], []
             for rk, tp in keys:
                 p = full[(rk, tp, m)]
-                actual = results[rk]["actual"]
-                ll.append(-np.log(max(p["trio_probs_full"].get(actual, 0.0), 1e-6)))
-                hit.append(actual in [t["combo"] for t in p["trios"][:10]])
+                actuals = results[rk].get("actuals") or [results[rk]["actual"]]   # 同着で複数あれば、どれかが来れば当たり（確率は足す）
+                ll.append(-np.log(max(sum(p["trio_probs_full"].get(a, 0.0) for a in actuals), 1e-6)))
+                hit.append(bool(set(actuals) & {t["combo"] for t in p["trios"][:10]}))
             st = [x for rk in {rk for rk, _ in keys} for x in roi.get((rk, m), []) if x["wallet"] == "ev_weighted"]
             stake = sum(x["stake"] for x in st)
             out.append({"set": "まむ入り" if "int_market_ml_mam" in group else "基本", "method": CMP_LABELS[m], "races": len(keys),
@@ -139,7 +139,8 @@ def build_review(paths, month: str | None, start: str | None = None, end: str | 
         if p.get("formal_probability") is False:   # 正式な確率にならなかった統合（参考表示）は的中率に入れない（アプリと同じ）
             continue
         ranked = [t["combo"] for t in p["trios"]]
-        rank = ranked.index(res["actual"]) + 1 if res["actual"] in ranked else None
+        ranks = [ranked.index(a) + 1 for a in (res.get("actuals") or [res["actual"]]) if a in ranked]
+        rank = min(ranks) if ranks else None   # 同着で的中の組が複数なら、いちばん上の順位
         cov = [h.get("coverage") for h in p["horses"] if h.get("coverage") is not None]
         rows.append({"race_key": p["race_key"], "method": p["method"], "time_point": p["time_point"], "rank": rank,
                      "mark": (p.get("rule_view") or {}).get("disagreement"),

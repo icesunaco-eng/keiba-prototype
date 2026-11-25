@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 import pickle
 import sqlite3
 from datetime import datetime, timedelta
@@ -32,7 +33,7 @@ from ..models.trio import fit_calibration
 from ..integrate import pool
 from ..settle import missing_payouts, result_problem, settle_trio
 from . import jra
-from .collector import DEADLINE_MIN, deadline
+from .collector import CAPTURE_LEAD_MIN, DEADLINE_MIN, deadline
 
 WALLET_METHODS = ("ml_lgbm", "ml_market")
 # あいす統合（別枠の参考予想）。重みは あいすの回答（2026-11-19）どおり固定。市場のみが比べる基準
@@ -121,6 +122,9 @@ def time_reasons(odds_time, fetched_at: str, race: dict, tp: str, label: str = "
     dl = deadline(race["race_date"], race["post_time"], tp)
     if fetched > dl:
         out.append(f"{label}締切後の取得（締切 {dl:%H:%M}・取得 {fetched:%H:%M}）")
+    opens = dl - timedelta(minutes=CAPTURE_LEAD_MIN)
+    if fetched < opens:   # 発走時刻が後で変わり、取得の時間帯より前になったページ：締切の代わりの予想でもお金に使わない
+        out.append(f"{label}取得の時間帯より前の取得（時間帯 {opens:%H:%M}〜{dl:%H:%M}・取得 {fetched:%H:%M}）")
     if not odds_time:
         out.append(f"{label}オッズの時刻が分からない")
         return out
@@ -366,9 +370,44 @@ def input_ready(rk: str, tp: str, inp: dict, race: dict, now: datetime) -> bool:
     return inp["captured"] or now >= deadline(race["race_date"], race["post_time"], tp)
 
 
+def _unsettled_archived(paths, root: Path, state: dict) -> tuple[dict, object]:
+    """予定表から外したレース（races_archive.jsonl）のうち、正式な予想があるのに精算が3配分そろっていないもの。
+    Macが長く止まって、精算（取りやめの返還など）の前に予定表から外れても、仮想財布の精算を続けられるようにする。
+    予想は作らない（発走ずみなので run_live の予想の側で飛ばされる）。
+    返す値：（レース, 読んだなら正式の選び方）。正式の選び方は重いので、候補があるときだけ読む。"""
+    from .. import official
+    from .collector import ARCHIVE_FILE, read_jsonl
+
+    if not paths.ledger_path.exists() or not (root / ARCHIVE_FILE).exists():
+        return {}, None
+    archived = {}
+    for x in read_jsonl(root / ARCHIVE_FILE)[0]:
+        rk = x.get("race_key")
+        if isinstance(rk, str) and rk not in state.get("races", {}) and all(x.get(k) is not None for k in ("race_date", "venue", "race_number")):
+            archived[rk] = {k: v for k, v in x.items() if k not in ("race_key", "archived_at")}
+    if not archived:
+        return {}, None
+    led = Ledger(paths.ledger_path, read_only=True)
+    try:
+        have = Counter((s["race_key"], s["time_point"], s["method"], s["version"]) for s in led.settlements())
+        cand = [p for p in led.predictions()
+                if p["race_key"] in archived and p["version"].startswith("live-")
+                and isinstance(p.get("allocation"), dict) and "kelly" in p["allocation"]
+                and have[(p["race_key"], p["time_point"], p["method"], p["version"])] < len(ALLOC_METHODS)]
+        if not cand:
+            return {}, None
+        sel = official.load(led.conn, root)
+    finally:
+        led.close()
+    need = {p["race_key"] for p in cand if sel.is_counted(p["race_key"], p["time_point"], p["method"], p["version"])}
+    return {rk: archived[rk] for rk in need}, sel
+
+
 def run_live(paths, log=print, now: datetime | None = None) -> dict:
     root = paths.data_dir / "live"
     state = json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {"races": {}}
+    archived, sel0 = _unsettled_archived(paths, root, state)   # sel0：読んだなら正式の選び方（台帳はまだ変わっていないので使い回す）
+    state = {**state, "races": {**archived, **state.get("races", {})}}
     snaps = _snapshots(root)
     held = {"_snapshots_bad_lines": snaps.attrs["bad_lines"]} if snaps.attrs.get("bad_lines") else {}
     lr, lrun, inputs = live_tables(root, state, snaps, held)
@@ -386,7 +425,7 @@ def run_live(paths, log=print, now: datetime | None = None) -> dict:
     led = Ledger(paths.ledger_path)
     done = {(p["race_key"], p["time_point"], p["method"]) for p in led.predictions(version)}
     from .. import official
-    sel = official.load(led.conn, root)
+    sel = sel0 if sel0 is not None else official.load(led.conn, root)
     done |= {(rk, tp, m) for rk, m, tp in sel.shown}   # 正式な版を保存ずみの時点は、版が変わっても作らない
     mam_preds = {(p["race_key"], p["time_point"]): p for p in led.predictions()
                  if p["method"] == "text_ai" and sel.is_shown(p["race_key"], p["time_point"], "text_ai", p["version"])}

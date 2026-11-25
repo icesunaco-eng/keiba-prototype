@@ -83,3 +83,35 @@ def test_partial_result_is_not_counted_in_monthly(tmp_path):
     r = build_review(paths, DAY[:7])
     hit = next(x for x in r["accuracy"] if x["method"] == M)
     assert r["races_with_result"] == 1 and hit["上位5"] == 1.0
+
+
+def _tie_result():
+    """3着同着（3番と4番）：的中は 1-2-3 と 1-2-4 の2組。"""
+    places = [1, 2, 3, 3, 5, 6, 7, 8]
+    rows = "".join(f'<tr><td class="place">{p}</td><td class="num">{n}</td><td class="horse"><a href="#">x</a></td>'
+                   f'<td class="time">1:35.{i}</td><td class="f_time">34.{i}</td><td class="pop">{i}</td></tr>'
+                   for i, (p, n) in enumerate(zip(places, range(1, 9)), 1))
+    pays = "".join(f'<div class="line"><div class="num">{c}</div><div class="yen">{y}円</div></div>'
+                   for c, y in (("1-2-3", "7,890"), ("1-2-4", "4,560")))
+    return (f'<html><body><table class="basic narrow-xy striped"><tbody>{rows}</tbody></table>'
+            f'<li class="trio"><dl><dd>{pays}</dd></dl></li></body></html>')
+
+
+def test_dead_heat_for_third_counts_both_winning_combos(tmp_path):
+    """💚20261125-6 直してから②：3着同着の2組のどちらを上位に置いていても、月次の的中に数える。"""
+    paths, col = _scenario(tmp_path)
+    mat = POST - timedelta(minutes=66)
+    _save(col, mat, "card", "1h", card_html(range(8)))
+    _save(col, mat, "odds_trio", "1h", trio_html(time="14時30分"))
+    led = Ledger(paths.ledger_path)
+    led._now = lambda: _ts(POST - timedelta(minutes=65))
+    led.add_prediction(RK, "1h", M, "live-test", {"race_date": DAY, "period": "live", "horses": [],
+                                                  "trios": [{"combo": "1-2-4", "p": .2}] + [{"combo": f"5-6-{k}", "p": .01} for k in (7, 8)],
+                                                  "allocation": {a: {"status": "allocated", "stakes": {"1-2-4": 100}, "total": 100}
+                                                                 for a in wallet.ALLOC_METHODS}}, "i", "m", "c")
+    led.commit()
+    led.close()
+    _save(col, POST + timedelta(minutes=31), "result", "result", _tie_result())
+    r = build_review(paths, DAY[:7])
+    hit = next(x for x in r["accuracy"] if x["method"] == M)
+    assert r["races_with_result"] == 1 and hit["上位5"] == 1.0, hit

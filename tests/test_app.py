@@ -853,7 +853,8 @@ def test_timeline_shows_early_material(live_paths, tmp_path):
     led.close()
     src = Source(live_paths, "live")
     out = pages.timeline_page({"token": "t", "mode": "live"}, src, Store(tmp_path / "p.sqlite"), {"rk": RK})
-    assert "早めの参考予想" in out and "11/20 10:00" in out
+    # 締切ちょうど（11/21 15:40）に前日の出馬表で保存した正式な予想：「早めの参考」ではなく「締切の代わりの予想」（💚20261125-6）
+    assert "締切の代わりの予想" in out and "11/20 10:00" in out and "早めの参考予想" not in out
 
 
 def test_compare_counts_shown_integrated_candidate(live_paths, tmp_path):

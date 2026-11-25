@@ -109,3 +109,96 @@ def test_capture_is_reopened_when_post_moves_later(tmp_path):
     assert (RK, "1h") in col.due()                                       # 新しい時間帯（14:45〜15:00）で取り直す
     col.state["taken"][f"{RK}|1h"] = T("14:46").isoformat()
     assert (RK, "1h") not in col.due()
+
+
+def test_failed_recapture_after_post_change_does_not_bet_on_old_odds(tmp_path):
+    """💚20261125-6 止める①：14:25に取ったあと発走が15:40→15:45に変わり、新しい時間帯（14:30〜14:45）の取り直しが
+    失敗したまま締切を過ぎた。締切の代わりの予想は作ってよいが、時間帯より前のオッズでお金を配分しない。取り損ねとして知らせる。"""
+    paths = _paths(tmp_path)
+    clock = {"now": T("14:25")}
+    fail = {"on": False}
+
+    def page(cn):
+        if fail["on"]:
+            raise TimeoutError("JRAが応答しない")
+        return _pages(clock)[cn].replace("15時41分", "15時40分")
+    col = Collector(paths.data_dir / "live", client=FakeClient(page), now=lambda: clock["now"])
+    col.state["races"][RK] = {"race_date": DAY, "venue": "京都", "race_number": 11, "post_time": "15:40",
+                             "field_size": 8, "surface": "芝", "distance_m": 1600, "list_cname": LIST,
+                             "known_at": T("09:00").isoformat()}
+    col.state["refreshed_at"] = T("14:20").isoformat()
+    col.record_post_times()
+    col._write_state()
+    with patch.object(Collector, "check_notices", lambda self, log=print: None):
+        assert col.tick(log=lambda *_: None)["saved"] == 4             # 15:40の時間帯で取った
+        col.state["races"][RK]["post_time"] = "15:45"                  # 一覧の更新で発走が5分遅れた
+        col._write_state()
+        fail["on"] = True
+        for hm in ("14:30", "14:35", "14:40"):                          # 新しい時間帯の取り直しは全部失敗
+            clock["now"] = T(hm)
+            col.tick(log=lambda *_: None)
+        clock["now"] = T("14:46")
+        col.tick(log=lambda *_: None)
+    assert f"{RK}|1h" in col.missed()                                   # 新しい時間帯で取れていない＝取り損ね
+    at = T("14:46") + timedelta(seconds=1)
+    with patch.object(Ledger, "_now", lambda _: at.astimezone(timezone.utc).isoformat(timespec="seconds")):
+        wallet.run_live(paths, now=at)
+    led = Ledger(paths.ledger_path, read_only=True)
+    preds = [p for p in led.predictions() if p["race_key"] == RK and p["time_point"] == "1h"]
+    led.close()
+    assert preds                                                         # 締切の代わりの予想は作る
+    for p in preds:
+        for a, v in (p.get("allocation") or {}).items():
+            if isinstance(v, dict):
+                assert not v.get("stakes"), (p["method"], a, v)       # でもお金は配分しない
+    gate = next(p for p in preds if p.get("odds_gate"))["odds_gate"]
+    assert any("時間帯より前" in r for r in gate["reasons"])
+    # 直してから①：画面はこの予想を「早めの参考」ではなく「締切の代わりの予想」と呼ぶ（3画面とも同じ判定）
+    from keiba.app.checks import card_flags, material_timing, pre_publish_check
+    from keiba.app.data import Source
+    src = Source(paths, "live")
+    p = src.preds[RK][("ml_lgbm", "1h")]
+    state, text = material_timing(p, src.races[RK], "1h")
+    assert state == "fallback" and "代わり" in text and "14:45" in text, (state, text)   # 保存時の発走15:45の締切
+    assert ("warn", "締切の代わりの予想") in card_flags(p, {}, src.races[RK], False, tp="1h")
+    item = next(i for i in pre_publish_check(p, {}, src.races[RK], None, None, None, "1h") if i["label"] == "時点の材料")
+    assert item["ok"] is False and "早めに作った参考" not in item["detail"]
+
+
+def test_partial_recapture_card_only_does_not_bet_on_old_odds(tmp_path):
+    """新しい時間帯で出馬表だけ取れて、オッズの取得が失敗し続けた場合も、時間帯より前のオッズではお金を配分しない。"""
+    paths = _paths(tmp_path)
+    clock = {"now": T("14:25")}
+    fail = {"on": False}
+
+    def page(cn):
+        if fail["on"] and cn.startswith("pw15"):
+            raise TimeoutError("オッズのページが応答しない")
+        return _pages(clock)[cn].replace("15時41分", "15時45分" if fail["on"] else "15時40分")   # 一覧も15:45を出す
+    col = Collector(paths.data_dir / "live", client=FakeClient(page), now=lambda: clock["now"])
+    col.state["races"][RK] = {"race_date": DAY, "venue": "京都", "race_number": 11, "post_time": "15:40",
+                             "field_size": 8, "surface": "芝", "distance_m": 1600, "list_cname": LIST,
+                             "known_at": T("09:00").isoformat()}
+    col.state["refreshed_at"] = T("14:20").isoformat()
+    col.record_post_times()
+    col._write_state()
+    with patch.object(Collector, "check_notices", lambda self, log=print: None):
+        col.tick(log=lambda *_: None)
+        col.state["races"][RK]["post_time"] = "15:45"
+        col._write_state()
+        fail["on"] = True
+        for hm in ("14:30", "14:35", "14:40", "14:46"):
+            clock["now"] = T(hm)
+            col.tick(log=lambda *_: None)
+    assert f"{RK}|1h" in col.missed()
+    at = T("14:46") + timedelta(seconds=1)
+    with patch.object(Ledger, "_now", lambda _: at.astimezone(timezone.utc).isoformat(timespec="seconds")):
+        wallet.run_live(paths, now=at)
+    led = Ledger(paths.ledger_path, read_only=True)
+    preds = [p for p in led.predictions() if p["race_key"] == RK and p["time_point"] == "1h"]
+    led.close()
+    assert preds
+    for p in preds:
+        for a, v in (p.get("allocation") or {}).items():
+            if isinstance(v, dict):
+                assert not v.get("stakes"), (p["method"], a, v)

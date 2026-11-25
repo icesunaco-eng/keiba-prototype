@@ -80,3 +80,48 @@ def test_interrupted_fill_keeps_history_and_results(tmp_path, cut):
     s = wallet.wallet_summary(paths)
     assert not s.empty and int(s["stake"].sum()) == 200 * len(wallet.ALLOC_METHODS)
     assert build_review(paths, DAY[:7])["wallets"]
+
+
+def test_reader_before_next_tick_keeps_results(tmp_path):
+    """💚20261125-6 止める②：補完が途中で止まったあと、見回りより先に画面・CLI・月次が読んでも成績を消さない。"""
+    from keiba.app.data import Source
+    paths = Paths(data_dir=tmp_path)
+    root = tmp_path / "live"
+    now = POST + timedelta(days=2)
+    col = Collector(root, client=SimpleNamespace(count=0), now=lambda: now)
+    col.state["races"][RK] = {"race_date": DAY, "venue": "東京", "race_number": 3, "post_time": "15:41",
+                             "field_size": 8, "surface": "芝", "distance_m": 1600}
+
+    def save(at, kind, tp, html):
+        col.now = lambda: at
+        col._save(RK, kind, tp, "/x", "synth", html)
+    save(POST - timedelta(days=1, minutes=10), "card", "24h", _card("15時40分"))
+    save(POST - timedelta(minutes=70), "card", "1h", _card("15時41分"))
+    save(POST - timedelta(minutes=69), "odds_trio", "1h", trio_html(time="14時30分"))
+    save(POST + timedelta(minutes=31), "result", "result", result_html(list(range(1, 9))))
+    col._write_state()
+    col.now = lambda: now
+    led = Ledger(paths.ledger_path)
+    led._now = lambda: _ts(POST - timedelta(minutes=49))
+    led.add_prediction(RK, "1h", M, "live-old", {"race_date": DAY, "period": "live", "horses": [],
+                                                 "trios": [{"combo": "1-2-3", "p": .2}],
+                                                 "allocation": {a: {"status": "allocated", "stakes": {"1-2-3": 200}, "total": 200}
+                                                                for a in wallet.ALLOC_METHODS}}, "i", "m", "c")
+    for a in wallet.ALLOC_METHODS:
+        led.add_settlement(RK, "1h", M, "live-old", a, {"status": "settled", "stake": 200, "returned": 9120, "hits": ["1-2-3"]})
+    led.commit()
+    led.close()
+
+    def cut_append(path, lines):
+        path.write_text(lines[0] + "\n" + lines[1][:18])
+        raise Interrupted()
+    with pytest.raises(Interrupted), patch.object(collector, "append_lines", cut_append):
+        col.record_post_times()
+    # 次の見回りより前に読む
+    led = Ledger(paths.ledger_path, read_only=True)
+    assert official.load(led.conn, root).is_counted(RK, "1h", M, "live-old")
+    led.close()
+    assert int(wallet.wallet_summary(paths)["stake"].sum()) == 200 * len(wallet.ALLOC_METHODS)
+    assert build_review(paths, DAY[:7])["wallets"]
+    src = Source(paths, "live")
+    assert [s for s in src.settlements if s["race_key"] == RK and s["returned"] == 9120]

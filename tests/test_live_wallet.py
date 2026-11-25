@@ -1,7 +1,7 @@
 """これからのレースの予想・配分・精算（合成のページで端から端まで。ネットにはつながない）。"""
 import re
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from itertools import combinations
 
 import pandas as pd
@@ -737,11 +737,19 @@ def test_win_odds_with_good_time_is_used(tmp_path):
 def test_previous_day_24h_odds_are_dated_by_fetch_day(tmp_path):
     """指摘1：前日に取った24時間前のオッズの発表時刻は、取得した日の時刻。レース当日の時刻として「締切後・古い」にしない。"""
     from keiba.live.wallet import _snapshots, live_tables
-    paths, col = _setup(tmp_path, tp="24h", day=29)  # レースは 8/30 15:40。24時間前の締切は 8/29 15:40。取得 8/29 14:30・発表 14:25
+    # レースは 8/30 15:40。24時間前の締切は 8/29 15:40（取得の時間帯 15:25〜15:40）。取得 8/29 15:30・発表 15:25（実物：11/21 15:25取得・15:24発表）
+    paths, col = _setup(tmp_path, tp="24h", day=29, at=(15, 30), trio=trio_html(time="15時25分"), win=win_html(time="15時25分"))
     root = tmp_path / "live"
     inp = live_tables(root, json.loads((root / "state.json").read_text()), _snapshots(root))[2][(RK, "24h")]
     assert inp["gate"]["pass"], inp["gate"]["reasons"]
     assert inp["win"]["ok"]
+
+
+def _race_closing_after(fetched: str, tp: str = "24h") -> dict:
+    """取得の5分後が締切になるレース（取得を時間帯の中に置き、発表時刻の日付の読み方だけを試す）。"""
+    from keiba.live.collector import DEADLINE_MIN
+    post = datetime.fromisoformat(fetched) + timedelta(minutes=DEADLINE_MIN[tp] + 5)
+    return {"race_date": post.date().isoformat(), "post_time": f"{post:%H:%M}"}
 
 
 @pytest.mark.parametrize("fetched,odds_time,ok", [
@@ -752,8 +760,7 @@ def test_previous_day_24h_odds_are_dated_by_fetch_day(tmp_path):
 ])
 def test_odds_time_date_rolls_back_only_across_midnight(fetched, odds_time, ok):
     from keiba.live.wallet import time_reasons
-    race = {"race_date": "2025-08-31", "post_time": "15:40"}
-    assert (not time_reasons(odds_time, fetched, race, "24h")) == ok
+    assert (not time_reasons(odds_time, fetched, _race_closing_after(fetched), "24h")) == ok
 
 
 def test_index_line_cut_before_newline_does_not_swallow_next_record(tmp_path):
@@ -842,5 +849,12 @@ def test_odds_but_no_readable_numbers_leaves_reason(tmp_path):
 ])
 def test_clock_skew_tolerance_across_midnight(fetched, odds_time, ok):
     from keiba.live.wallet import time_reasons
-    race = {"race_date": "2025-09-01", "post_time": "15:40"}
-    assert (not time_reasons(odds_time, fetched, race, "24h")) == ok
+    assert (not time_reasons(odds_time, fetched, _race_closing_after(fetched), "24h")) == ok
+
+
+def test_odds_fetched_before_the_capture_window_are_not_used():
+    """💚20261125-6 止める①：発走時刻が後で変わって、取得の時間帯より前になったオッズは使わない。"""
+    from keiba.live.wallet import time_reasons
+    race = {"race_date": "2025-08-30", "post_time": "15:45"}            # 1時間前の時間帯は 14:30〜14:45
+    assert any("時間帯より前" in r for r in time_reasons("14:24", "2025-08-30T14:25:00+09:00", race, "1h"))
+    assert not time_reasons("14:29", "2025-08-30T14:30:00+09:00", race, "1h")

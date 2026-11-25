@@ -442,6 +442,8 @@ def race_page(ctx, src, store, q) -> str:
     timing, ttext = material_timing(p, r, tp)
     if timing == "early":
         body.append(f'<div class="err small">{TP_LABEL[tp]}の材料がそろう前に作った、早めの参考予想だよ。{h(ttext)}</div>')
+    elif timing == "fallback":
+        body.append(f'<div class="err small">{TP_LABEL[tp]}の締切の代わりの予想だよ。{h(ttext)}</div>')
     elif timing == "late" and src.mode == "live":
         body.append(f'<div class="err small">{TP_LABEL[tp]}の締切より後の材料で作った予想だよ。{h(ttext)}</div>')
     body.append(f'<div class="card"><div class="row"><h2>印</h2>{conf_badge(p.get("confidence"))}</div>'
@@ -652,7 +654,7 @@ def timeline_page(ctx, src, store, q) -> str:
         money = f"{len(stakes)}点・配分 {yen(sum(stakes.values()))}" if stakes else ALLOC_STATUS.get(a.get("status"), "配分なし")
         changes = "".join(f'<div class="small">{h(x)}</div>' for x in _change_lines(prev, p, alloc if src.mode == "live" else None))
         timing, ttext = material_timing(p, r, tp) if src.mode == "live" else ("", "")
-        tchip = {"early": '<span class="chip warn">早めの参考予想</span>', "late": '<span class="chip warn">締切後の材料</span>',
+        tchip = {"early": '<span class="chip warn">早めの参考予想</span>', "fallback": '<span class="chip warn">締切の代わりの予想</span>', "late": '<span class="chip warn">締切後の材料</span>',
                  "unknown": '<span class="chip">時点を確認できない</span>'}.get(timing, "")
         cards.append(f'<div class="card{" hot" if tp == "15m" else ""}"><div class="row"><span class="chip ok">{TP_LABEL[tp]}</span>'
                      f'{conf_badge(p.get("confidence"))}{tchip}</div>'

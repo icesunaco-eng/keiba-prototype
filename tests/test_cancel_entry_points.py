@@ -1,7 +1,7 @@
 """取りやめ・精算の反例。本物の入口（collect tick）から通す。"""
 import json
 import types
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytest
 from keiba.live import jra, collector as c, wallet, mam
 from keiba.live.collector import Collector, JST
@@ -331,3 +331,43 @@ def test_N_single_race_empty_page_is_not_reported_missed(env):
         j.parse_race_list = orig
     wallet.run_live(paths, now=datetime(2025, 8, 30, 21, 41, tzinfo=JST))
     assert [s for s in rows(paths) if s["status"] == "refunded_void"]
+
+
+def test_O_single_race_cancel_settles_after_long_stop_and_archive(env, monkeypatch):
+    """💚20261125-6 止める③：1レースだけの取りやめで空の結果を保存したあと、Macが8日止まり、再開の見回りで
+    予定表から外れても、仮想財布の返還を書く（実購入と同じく300円…ここでは配分どおり全額）。"""
+    paths, col = env
+    cancel(col.root, 11, 11)
+    col.now = lambda: datetime(2025, 8, 30, 16, 10, tzinfo=JST)
+    col._save(RK, "result", "result", "/x", "c", empty_result(RK))
+    wallet.run_live(paths, now=datetime(2025, 8, 30, 16, 15, tzinfo=JST))
+    assert not rows(paths)                                             # 窓が閉じる前は待つ
+    later = datetime(2025, 9, 7, 16, 0, tzinfo=JST)                    # 8日後に再開
+    col.now = lambda: later
+    monkeypatch.setattr(Collector, "refresh", lambda self, force=False: None)
+    monkeypatch.setattr(Collector, "check_notices", lambda self, log=print: None)
+    col.tick(log=lambda *_: None)
+    assert RK not in col.state["races"] and RK in c.archived_keys(col.root / c.ARCHIVE_FILE)
+    wallet.run_live(paths, now=later)
+    got = [s for s in rows(paths) if s["race_key"] == RK]
+    assert got and all(s["status"] in ("refunded_void", "not_allocated_gate", "no_bet", "not_allocated") or s["stake"] == 0 for s in got)
+    assert [s for s in got if s["status"] == "refunded_void" and s["returned"] == s["stake"] > 0]
+    n = len(rows(paths))
+    wallet.run_live(paths, now=later + timedelta(days=1))
+    assert len(rows(paths)) == n                                       # 二度書かない
+
+
+def test_P_archived_race_with_real_result_settles_after_long_stop(env, monkeypatch):
+    """長く止まる前に本当の結果を取れていて、精算の前に予定表から外れた場合も、本当の結果で精算する。"""
+    paths, col = env
+    col.now = lambda: datetime(2025, 8, 30, 16, 10, tzinfo=JST)
+    col._save(RK, "result", "result", "/x", "c", FULL)
+    later = datetime(2025, 9, 7, 16, 0, tzinfo=JST)
+    col.now = lambda: later
+    monkeypatch.setattr(Collector, "refresh", lambda self, force=False: None)
+    monkeypatch.setattr(Collector, "check_notices", lambda self, log=print: None)
+    col.tick(log=lambda *_: None)
+    assert RK not in col.state["races"]
+    wallet.run_live(paths, now=later)
+    got = [s for s in rows(paths) if s["race_key"] == RK]
+    assert got and not [s for s in got if s["status"] == "refunded_void"] and [s for s in got if s.get("hits")]

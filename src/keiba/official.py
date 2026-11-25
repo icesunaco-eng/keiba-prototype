@@ -169,8 +169,21 @@ def recorded_posts(root: Path) -> dict[str, list]:
 
 def post_history(root: Path, keys) -> dict[str, list]:
     out = recorded_posts(root)
-    out.update(card_observations(root, set(keys) - set(out)))   # 記録を始める前のレースは原本から
+    if _history_filled(root):
+        out.update(card_observations(root, set(keys) - set(out)))   # 記録を始める前のレースは原本から
+        return out
+    # 収集の初回の穴埋めがまだ終わっていない（途中で止まった・まだ動いていない）：記録が一部だけのことがあるので、
+    # 全部のレースで出馬表の原本の観測を足し合わせる（見回りより先に画面が読んでも、発走時刻と成績を変えない）
+    for rk, obs in card_observations(root, set(keys)).items():
+        out[rk] = sorted(set(out.get(rk, [])) | set(obs), key=lambda x: x[0])
     return out
+
+
+def _history_filled(root: Path) -> bool:
+    try:
+        return bool(json.loads((root / "state.json").read_text(encoding="utf-8")).get("post_history_filled"))
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def known_post(seen: list | None, at: datetime, final: str | None) -> str | None:

@@ -434,7 +434,10 @@ class Collector:
             known = datetime.fromisoformat(r.get("known_at", self.state.get("refreshed_at") or now.isoformat()))
             for tp, (a, b) in WINDOWS.items():
                 key = f"{rk}|{tp}"
-                if key not in self.state["taken"] and now >= post + timedelta(minutes=b) and known <= post + timedelta(minutes=a):
+                taken = self.state["taken"].get(key)
+                if taken and tp != "result" and _earlier(taken, post + timedelta(minutes=a)):
+                    taken = None   # 取ったのが今の時間帯より前（あとで発走時刻が遅くなった）：新しい時間帯で取れていなければ取り損ね
+                if not taken and now >= post + timedelta(minutes=b) and known <= post + timedelta(minutes=a):
                     out.append(key)
         return out
 

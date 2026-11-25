@@ -65,7 +65,8 @@ def _lead_text(tp: str) -> str:
 
 
 def material_timing(p: dict, race: dict | None, tp: str | None) -> tuple[str, str]:
-    """時点の材料の判定。（状態, 文）。状態は ok／early（窓より前＝早めの参考）／late（締切の後）／unknown。
+    """時点の材料の判定。（状態, 文）。状態は ok／early（窓より前＝早めの参考）／fallback（材料が取れず締切で作った代わり）
+    ／late（締切の後）／unknown。
 
     例：1時間前の枠でも、前日の出馬表から作った予想は「1時間前の予想」ではなく早めの参考。
     """
@@ -86,15 +87,20 @@ def material_timing(p: dict, race: dict | None, tp: str | None) -> tuple[str, st
         return "unknown", f"取得時刻が読めない（{str(raw)[:30]}）ので判定できない"
     nominal = post - timedelta(minutes=TP_LEAD_MIN[tp])
     start = nominal - timedelta(minutes=TP_WINDOW_MIN)
-    if fetched > nominal:
-        return "late", (f"出馬表は {fetched:%m/%d %H:%M} 取得。{_lead_text(tp)}の締切 {nominal:%m/%d %H:%M} より後なので、"
-                        f"この時点の予想として使えない")
-    if fetched < start:
-        gap = (nominal - fetched).total_seconds() / 60
-        return "early", (f"出馬表は {fetched:%m/%d %H:%M} 取得（{_lead_text(tp)}の締切 {nominal:%m/%d %H:%M} より"
-                         + (f"{gap / 60:.1f}時間" if gap >= 60 else f"{gap:.0f}分") + "早い）")
     note = (f"（予想を保存した時点の発走 {known} で判定。今の発走は {now_post}）"
             if known and now_post and known != now_post else "")
+    if fetched > nominal:
+        return "late", (f"出馬表は {fetched:%m/%d %H:%M} 取得。{_lead_text(tp)}の締切 {nominal:%m/%d %H:%M} より後なので、"
+                        f"この時点の予想として使えない{note}")
+    if fetched < start:
+        created = _parse_time(p.get("_created_at"))
+        if known and created and created >= nominal:
+            # 正式に選ばれた予想で、締切の後に保存した：その時点の材料が時間帯の中で取れず、締切で手元の資料から作った代わり
+            return "fallback", (f"{_lead_text(tp)}の材料が取得の時間帯に取れなかったので、締切 {nominal:%m/%d %H:%M} に手元の資料"
+                                f"（出馬表 {fetched:%m/%d %H:%M} 取得）で作った代わりの予想{note}")
+        gap = (nominal - fetched).total_seconds() / 60
+        return "early", (f"出馬表は {fetched:%m/%d %H:%M} 取得（{_lead_text(tp)}の締切 {nominal:%m/%d %H:%M} より"
+                         + (f"{gap / 60:.1f}時間" if gap >= 60 else f"{gap:.0f}分") + f"早い）{note}")
     return "ok", f"この時点の材料で作った予想（出馬表 {fetched:%m/%d %H:%M} 取得）{note}"
 
 
@@ -172,7 +178,7 @@ def pre_publish_check(p: dict, stakes: dict, race: dict | None = None, names: di
             else "・".join(gate.get("reasons") or ["不合格"]))
     if tp:
         state, text = material_timing(p, race, tp)
-        add({"ok": True, "early": False, "late": False}.get(state), "時点の材料",
+        add({"ok": True, "early": False, "late": False, "fallback": False}.get(state), "時点の材料",
             ("早めに作った参考の予想：" + text) if state == "early" else text)
     fetched = inp.get("card_fetched_at")
     # 時点の材料と同じく、予想を保存した時点で分かっていた発走時刻で見る（あとで発走時刻が変わっても判定を動かさない）
@@ -287,6 +293,8 @@ def card_flags(p: dict | None, stakes: dict, race: dict, has_result: bool, now: 
     timing = material_timing(p, race, tp)[0] if tp else None
     if timing == "early":
         out.append(("warn", "早めの参考予想"))
+    elif timing == "fallback":
+        out.append(("warn", "締切の代わりの予想"))
     elif timing == "late":
         out.append(("warn", "締切後の材料"))
     if stakes:
