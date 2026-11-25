@@ -127,35 +127,25 @@ def cmd_review(paths, args):
     print(f"月次の振り返り → {write_review(paths, month)}")
 
 
-def _packets_missing(paths, col) -> bool:
-    """取った時点のうち、締切前なのに まむへの入力がまだ置かれていないものがあるか。
-    置く途中で止まった・置き場やページが一時的に使えなかった・見回りが重なった、のどれでも、置かれるまで毎回見る。
-    調べられないときは「ある」とみなして書き出しを試す（失敗は知らせる）。"""
-    from .live.collector import deadline
-    from .live.mam import _packet_path
+def _republish(paths, col, out: dict):
+    """この回は書き出していない（新しいページが無い・予想が失敗した）が、締切前なのに置けていない入力があれば、その時点だけ置く。
+    前の回が途中で止まった・置き場やページが一時的に使えなかった・見回りが重なった、のどれでも、置けるまで毎回見る。"""
+    import time
+    from .live.mam import export_packets, unplaced
+    now = col.now()
     try:
-        now = col.now()
-        races = col.state.get("races", {})
-        keys = list(col.state.get("taken", {}))
+        due = unplaced(paths, now)
     except Exception:
-        return True
-    for key in keys:
-        try:
-            rk, tp = key.rsplit("|", 1)
-            r = races.get(rk)
-            if tp == "result" or not r or not r.get("post_time"):
-                continue   # 結果・予定表から外れたレース・発走時刻の分からないレースは、入力を作らない
-            dl = deadline(r["race_date"], r["post_time"], tp)
-        except Exception:
-            continue   # 締切の分からない時点も入力を作らない（毎回の空回りにしない）
-        if now >= dl:
-            continue
-        try:
-            if not _packet_path(paths, rk, tp).exists():
-                return True
-        except OSError:
-            return True   # 置き場を調べられない：書き出しを試して、失敗を知らせる
-    return False
+        due = None   # 調べられない（置き場の権限など）：締切前の全部を対象に書き出しを試し、失敗を知らせる
+    if due == set():
+        return
+    start = time.monotonic()
+    try:
+        out["mam_packets"] = len(export_packets(paths, now=now, only=due))
+    except Exception as exc:  # 収集は止めない。次の回にまたやり直す
+        out["mam_error"] = repr(exc)
+        _notify("まむへの入力を置けない", repr(exc)[:120])
+    out["mam_retry_seconds"] = round(time.monotonic() - start, 2)   # 置き直しにかかった時間（入力を作れない時点の読み直しも含む）
 
 
 def cmd_collect(paths, args):
@@ -169,7 +159,7 @@ def cmd_collect(paths, args):
             try:
                 out["live"] = run_live(paths)
                 from .live.mam import export_packets
-                out["mam_packets"] = len(export_packets(paths))
+                out["mam_packets"] = len(export_packets(paths, now=col.now()))   # 締切を過ぎた時点は置かない
                 if out["live"].get("settled"):
                     from datetime import date
                     from .review import write_review
@@ -177,15 +167,8 @@ def cmd_collect(paths, args):
             except Exception as exc:  # 予想の失敗で収集を止めない
                 out["live_error"] = repr(exc)
                 _notify("予想・精算に失敗", repr(exc)[:120])
-        if "mam_packets" not in out and _packets_missing(paths, col):
-            # この回は書き出していない（新しいページが無い・予想が失敗した）が、締切前なのに置けていない入力がある
-            # （前の回が途中で止まった・置き場やページが一時的に使えなかったなど）。置けるまで毎回やり直す
-            try:
-                from .live.mam import export_packets
-                out["mam_packets"] = len(export_packets(paths))
-            except Exception as exc:  # 収集は止めない。次の回にまたやり直す
-                out["mam_error"] = repr(exc)
-                _notify("まむへの入力を置けない", repr(exc)[:120])
+        if "mam_packets" not in out:
+            _republish(paths, col, out)
         print(json.dumps(out, ensure_ascii=False))
     elif args.action == "install":
         import os

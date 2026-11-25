@@ -125,17 +125,60 @@ def issued_roster(paths, rk: str, tp: str) -> list[int] | None:
     return sorted(roster)
 
 
-def export_packets(paths) -> list[Path]:
+def unplaced(paths, now: datetime) -> set[tuple[str, str]]:
+    """締切前なのに、まむへの入力がまだ置かれていない時点（レース×時点）。
+    数えるのは、export_packets が入力を作る条件（live_tables）と同じ時点だけ：その時点の締切までに出馬表のページを保存してあり、
+    15分前はその時点のオッズのページもある（15分前は新しいオッズが無ければ入力を作らない）。
+    取得済みの記録（state の taken）を書く前に止まっても、ページが保存されていれば数える。
+    発走時刻・締切の分からない時点は数えない。置き場を調べられないとき（OSError）はそのまま上げる。"""
     root = paths.data_dir / "live"
     state = _state(root)
+    snaps = _snapshots(root)
+    first, odds15 = {}, {}   # レースごとに、いちばん早く保存した出馬表の時刻・15分前のオッズのページの時刻
+    for rk, kind, tp, fetched in (zip(snaps["race_key"], snaps["kind"], snaps["time_point"], snaps["fetched_at"]) if len(snaps) else ()):
+        try:
+            t = datetime.fromisoformat(fetched)
+        except (TypeError, ValueError):
+            continue
+        if kind == "card" and (rk not in first or t < first[rk]):
+            first[rk] = t
+        elif tp == "15m" and kind in ("odds_win", "odds_first", "odds_trio"):
+            odds15.setdefault(rk, []).append((kind, t))
+    due = set()
+    for rk, t0 in first.items():
+        r = state.get("races", {}).get(rk)
+        if not r or not r.get("post_time"):
+            continue
+        for tp in ("24h", "1h", "15m"):
+            try:
+                dl = deadline(r["race_date"], r["post_time"], tp)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if tp == "15m" and not any(k == "odds_trio" or t <= dl for k, t in odds15.get(rk, [])):
+                continue
+            if t0 <= dl and now < dl and not _packet_path(paths, rk, tp).exists():
+                due.add((rk, tp))
+    return due
+
+
+def export_packets(paths, now: datetime | None = None, only: set | None = None) -> list[Path]:
+    """まだ置いていない入力を置く。now を渡すと、その時刻で締切を過ぎた時点は置かない（見回りはいつも渡す）。
+    only を渡すと、その時点（レース×時点）だけを読み、置く。手で動かす mam export は now を渡さない（締切を問わず置いて復旧できる）。"""
+    root = paths.data_dir / "live"
+    state = _state(root)
+    if only is not None:   # 置けていない時点のレースだけ読む（全レースを読み直さない）
+        keep = {rk for rk, _ in only}
+        state = dict(state, races={rk: r for rk, r in state.get("races", {}).items() if rk in keep})
     _, _, inputs = live_tables(root, state, _snapshots(root))
     out_dir = paths.data_dir / "mam" / "outbox"
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for (rk, tp), inp in sorted(inputs.items()):
-        if tp == "result":
+        if tp == "result" or (only is not None and (rk, tp) not in only):
             continue
         r = state["races"][rk]
+        if now is not None and now >= deadline(r["race_date"], r["post_time"], tp):
+            continue   # 締切を過ぎた時点は置かない（まむが答えても受け付けない）
         f = _packet_path(paths, rk, tp)   # 置く場所・受付で読む場所と同じ名前
         if f.exists():
             continue
