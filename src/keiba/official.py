@@ -33,6 +33,7 @@ class Selection:
     shown: dict = field(default_factory=dict)    # (レース, 方式, 時点) → 版
     counted: dict = field(default_factory=dict)  # (レース, 方式) → (時点, 版)
     known: dict = field(default_factory=dict)    # (レース, 時点, 方式, 版) → 保存した時点で分かっていた発走時刻（判定に使ったもの）
+    fallback: set = field(default_factory=set)   # valid のうち、材料が時間帯の中でそろわず締切で作った代わりの予想
 
     def is_shown(self, rk, tp, m, v) -> bool:
         return self.shown.get((rk, m, tp)) == v
@@ -69,16 +70,19 @@ def post_times(root: Path, keys) -> dict[str, str]:
         if isinstance(rk, str) and isinstance(value, str) and _HHMM.fullmatch(value):
             found[rk] = value
 
+    # 予定表を先に読み、過去の記録を後に読む。見回りは「過去の記録に書く → 予定表から外す」の順なので、この順なら
+    # 間に外されたレースもどちらかに必ず載っている（逆の順だと、どちらにも無い瞬間を読んで発走時刻を失う）
+    try:
+        current = json.loads((root / "state.json").read_text(encoding="utf-8")).get("races", {})
+    except (OSError, ValueError, AttributeError):
+        current = {}
     try:
         for x in read_jsonl(root / ARCHIVE_FILE)[0]:
             put(x.get("race_key"), x.get("post_time"))
     except OSError:
         pass   # 読めなければ原本から探す
-    try:
-        for rk, r in json.loads((root / "state.json").read_text(encoding="utf-8")).get("races", {}).items():
-            put(rk, r.get("post_time"))
-    except (OSError, ValueError):
-        pass
+    for rk, r in (current.items() if isinstance(current, dict) else []):
+        put(rk, (r or {}).get("post_time") if isinstance(r, dict) else None)   # 予定表の値を優先（今までどおり）
     missing = set(keys) - set(found)
     if missing and (root / "snapshots.jsonl").exists():
         from .app.data import card_post_time
@@ -168,8 +172,11 @@ def recorded_posts(root: Path) -> dict[str, list]:
 
 
 def post_history(root: Path, keys) -> dict[str, list]:
+    # 「穴埋めが終わった」印を、記録より先に読む。印は記録を書き終えてから立つので、先に印が立っていれば記録はそろっている。
+    # 記録を読んだ後に印を読むと、その間に見回りが穴埋めを終えたとき、途中の記録を「そろった」と取り違える
+    filled = _history_filled(root)
     out = recorded_posts(root)
-    if _history_filled(root):
+    if filled:
         out.update(card_observations(root, set(keys) - set(out)))   # 記録を始める前のレースは原本から
         return out
     # 収集の初回の穴埋めがまだ終わっていない（途中で止まった・まだ動いていない）：記録が一部だけのことがあるので、
@@ -219,7 +226,7 @@ def select(rows: list[tuple], posts: dict[str, str], records: dict[tuple, list],
            history: dict[str, list] | None = None) -> Selection:
     from .live.collector import race_post
 
-    sel, first, start = Selection(), {}, {}
+    sel, first, start, missing = Selection(), {}, {}, set()
     for i, (rk, tp, m, v, created) in enumerate(rows):
         at, final = _moment(created), posts.get(rk)
         known = known_post((history or {}).get(rk), at, final) if at and final else None
@@ -232,13 +239,18 @@ def select(rows: list[tuple], posts: dict[str, str], records: dict[tuple, list],
         if (rk, tp, known) not in start:
             dl = limit - timedelta(minutes=GRACE_MINUTES)
             # 台帳の時刻は秒まで。材料の時刻も秒にそろえる
-            start[(rk, tp, known)] = (material_time(records.get((rk, tp), []), dl) or dl).replace(microsecond=0)
+            got = material_time(records.get((rk, tp), []), dl)
+            if got is None:
+                missing.add((rk, tp, known))   # 材料がそろわなかった：締切からの代わりの予想
+            start[(rk, tp, known)] = (got or dl).replace(microsecond=0)
         if at > limit or at >= ended:
             sel.late.add((rk, tp, m, v))
         elif at < start[(rk, tp, known)]:
             sel.early.add((rk, tp, m, v))
         else:
             sel.valid.add((rk, tp, m, v))
+            if (rk, tp, known) in missing:
+                sel.fallback.add((rk, tp, m, v))
             if (rk, m, tp) not in first or (at, i) < first[(rk, m, tp)][0]:   # 同じ秒なら、先に書いた行
                 first[(rk, m, tp)] = ((at, i), v)
     sel.shown = {k: v for k, (_, v) in first.items()}

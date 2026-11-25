@@ -165,6 +165,12 @@ def live_paths(tmp_path):
     (live / "state.json").write_text(json.dumps({"races": {RK: {
         "race_date": "2026-11-22", "venue": "京都", "race_number": 11, "post_time": "15:40", "surface": "芝",
         "distance_m": 1600, "field_size": 8, "race_name": "マイルチャンピオンS 3歳以上オープン"}}}, ensure_ascii=False))
+    # 取得の記録（目録だけ）：1時間前・15分前とも、取得の時間帯の中で出馬表とオッズを取った（正式の判定で「時点の材料」がそろう）
+    (live / "snapshots.jsonl").write_text("".join(json.dumps(
+        {"race_key": RK, "kind": kind, "time_point": tp, "path": f"none/{tp}-{kind}.html", "sha256": "0",
+         "fetched_at": f"2026-11-22T{hm}:00+09:00"}, ensure_ascii=False) + "\n"
+        for tp, kind, hm in (("1h", "card", "14:30"), ("1h", "odds_trio", "14:31"),
+                             ("15m", "card", "15:15"), ("15m", "odds_trio", "15:21"))))
     led = Ledger(paths.ledger_path)
     v = "live-test0001"
     led.add_prediction(RK, "1h", "ml_lgbm", v, _pred([3, 7, 9, 1, 2], "B", {"3-7-9": 600}, card_at="2026-11-22T14:30:00+09:00"),

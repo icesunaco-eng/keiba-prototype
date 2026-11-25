@@ -215,6 +215,13 @@ def _earlier(stamp, than: datetime) -> bool:
         return False
 
 
+def _later(stamp, than: datetime) -> bool:
+    try:
+        return datetime.fromisoformat(stamp) > than
+    except (TypeError, ValueError):
+        return False
+
+
 def archived_keys(path: Path) -> set[str]:
     return {x["race_key"] for x in read_jsonl(path)[0] if isinstance(x.get("race_key"), str)}
 
@@ -412,6 +419,10 @@ class Collector:
                         saved.append(self._save(rk, f"odds_{kind}", tp, p2, c2, self.client.get(p2, c2)))
         if tp == "result" and not saved:
             return saved  # 結果のリンクがまだ無い。次の tick でもう一度
+        if tp != "result" and not any(x.get("kind") == "card" for x in saved):
+            # 出馬表を取れなかった（一覧の出馬表リンクが欠けた等）：オッズだけでは「取得済み」にしない。
+            # 時間帯の間は次の回に取り直し、取れないまま時間帯が過ぎたら「取れなかった」に数える
+            return saved
         self.state["taken"][f"{rk}|{tp}"] = self.now().isoformat(timespec="seconds")
         self._write_state()
         return saved
@@ -435,8 +446,10 @@ class Collector:
             for tp, (a, b) in WINDOWS.items():
                 key = f"{rk}|{tp}"
                 taken = self.state["taken"].get(key)
-                if taken and tp != "result" and _earlier(taken, post + timedelta(minutes=a)):
-                    taken = None   # 取ったのが今の時間帯より前（あとで発走時刻が遅くなった）：新しい時間帯で取れていなければ取り損ね
+                if taken and tp != "result" and (_earlier(taken, post + timedelta(minutes=a))
+                                                 or _later(taken, post + timedelta(minutes=b))):
+                    # 取ったのが今の時間帯の外（あとで発走時刻が遅くなった・早くなった）：新しい時間帯で取れていなければ取り損ね
+                    taken = None
                 if not taken and now >= post + timedelta(minutes=b) and known <= post + timedelta(minutes=a):
                     out.append(key)
         return out
@@ -577,9 +590,13 @@ class Collector:
             except OSError as exc:   # 書けなければ予定表に残し、次の回にもう一度
                 log(f"過去のレースの記録を書けなかった（予定表に残す）：{exc!r}")
             saved = archived_keys(self.root / ARCHIVE_FILE)
-            for rk in old:
-                if rk in saved:   # 記録を読み戻せたレースだけ予定表から外す
-                    self.state["races"].pop(rk)
+            gone = [rk for rk in old if rk in saved]
+            for rk in gone:   # 記録を読み戻せたレースだけ予定表から外す
+                self.state["races"].pop(rk)
+            if gone:
+                # 外したレースにまだ精算していない予想があるかもしれない（Macが長く止まっていた等）。
+                # 精算は予定表から外したレースも見るので、この回に動かす（精算済みなら何も書かない）
+                self._live_needed()
         self.mark_cancellations()
         self.mark_deadlines()
         self._write_state()

@@ -155,7 +155,8 @@ def cmd_collect(paths, args):
                         from datetime import date, timedelta
                         from .review import write_review
                         days = [date.today(), *([date.today() - timedelta(days=1)] if interrupted else [])]
-                        for month in sorted({x.strftime("%Y-%m") for x in days}):
+                        # 精算を書いたレースの月も（長く止まった後に予定表から外れたレースなど、前の月のことがある）
+                        for month in sorted({x.strftime("%Y-%m") for x in days} | set(out["live"].get("months") or [])):
                             write_review(paths, month)
                     failed = out["live"].get("failed")   # 一部のレース・方式だけの失敗：ほかは書けている。次の回にやり直す
                     new = col.live_finished(failed or [], out["live"].get("retry_now", True))

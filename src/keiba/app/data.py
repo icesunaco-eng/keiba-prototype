@@ -295,7 +295,8 @@ class Source:
                 if sel.is_shown(rk, tp, m, v):
                     # 画面の時点の判定も、正式の判定と同じ「保存した時点で分かっていた発走時刻」で行う
                     self.preds[rk][(m, tp)] = {**json.loads(payload), "version": v, "_created_at": created,
-                                               "_known_post": sel.known.get((rk, tp, m, v))}
+                                               "_known_post": sel.known.get((rk, tp, m, v)),
+                                               "_fallback": (rk, tp, m, v) in sel.fallback}
             for rk, tp, m, v, w, payload in conn.execute(
                     "SELECT race_key,time_point,method,version,wallet,payload FROM settlements WHERE version LIKE 'live-%' "
                     "OR method='text_ai'"):

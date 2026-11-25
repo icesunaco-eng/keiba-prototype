@@ -80,15 +80,21 @@ def material_timing(p: dict, race: dict | None, tp: str | None) -> tuple[str, st
         return "unknown", "時点が分からない"
     if not post:
         return "unknown", "発走時刻が無いので判定できない"
-    if not raw:
-        return "unknown", "取得時刻が無いので判定できない"
-    fetched = _parse_time(raw)
-    if not fetched:
-        return "unknown", f"取得時刻が読めない（{str(raw)[:30]}）ので判定できない"
     nominal = post - timedelta(minutes=TP_LEAD_MIN[tp])
-    start = nominal - timedelta(minutes=TP_WINDOW_MIN)
     note = (f"（予想を保存した時点の発走 {known} で判定。今の発走は {now_post}）"
             if known and now_post and known != now_post else "")
+    fetched = _parse_time(raw) if raw else None
+    if p.get("_fallback") and not (fetched and fetched > nominal):
+        # 正式の判定で「材料が取得の時間帯の中でそろわず、締切で作った代わり」とした予想（出馬表だけ取り直せた場合や、
+        # 出馬表の取得時刻を持たない統合の予想も）。画面は正式の判定と同じ呼び方にする
+        used = f"（出馬表 {fetched:%m/%d %H:%M} 取得）" if fetched else ""
+        return "fallback", (f"{_lead_text(tp)}の材料が取得の時間帯にそろわなかったので、締切 {nominal:%m/%d %H:%M} に手元の資料"
+                            f"{used}で作った代わりの予想{note}")
+    if not raw:
+        return "unknown", "取得時刻が無いので判定できない"
+    if not fetched:
+        return "unknown", f"取得時刻が読めない（{str(raw)[:30]}）ので判定できない"
+    start = nominal - timedelta(minutes=TP_WINDOW_MIN)
     if fetched > nominal:
         return "late", (f"出馬表は {fetched:%m/%d %H:%M} 取得。{_lead_text(tp)}の締切 {nominal:%m/%d %H:%M} より後なので、"
                         f"この時点の予想として使えない{note}")

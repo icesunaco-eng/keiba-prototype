@@ -227,6 +227,13 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                 active = [int(c["horse_number"]) for c in card]  # 出走馬（取消を除く）。オッズの組はこれとぴったり照らす
                 card_issue = ("・".join(getattr(card_all, "problems", [])) or
                               card_problem([c["horse_number"] for c in card_all], r.get("field_size")))
+                card_at = datetime.fromisoformat(cards.iloc[-1]["fetched_at"])
+                opens = dl - timedelta(minutes=CAPTURE_LEAD_MIN)
+                if not card_issue and card_at < opens:
+                    # 出馬表が取得の時間帯より前（一覧の出馬表リンクが欠けた・発走時刻が後で変わった等）：その後の取消を
+                    # 見落としているかもしれないので、オッズが時間帯の中でもお金に使わない（オッズの時刻の検査と同じ扱い）
+                    card_issue = (f"出馬表が取得の時間帯より前の取得（時間帯 {opens.astimezone(dl.tzinfo):%H:%M}〜"
+                                  f"{dl:%H:%M}・取得 {card_at.astimezone(dl.tzinfo):%H:%M}）")
                 w = {"ok": False, "odds": {}}
                 if len(win):
                     win_page = _read(root, win.iloc[-1])
@@ -415,10 +422,11 @@ def run_live(paths, log=print, now: datetime | None = None) -> dict:
     if lrun.empty:   # 予想を作る馬がいない回も、精算（取りやめの返還など）は行う
         led = Ledger(paths.ledger_path)
         failed: list[str] = []
-        n_set = _settle(led, inputs, state, root, now, failed)
+        months: set = set()
+        n_set = _settle(led, inputs, state, root, now, failed, months)
         led.commit()
         led.close()
-        return {"predicted": 0, "settled": n_set, "held": len(held),
+        return {"predicted": 0, "settled": n_set, "held": len(held), "months": sorted(months),
                 **({"failed": failed, "retry_now": False} if failed else {})}
     feat, hist = _features(paths, lr, lrun)
     version = f"live-{code_hash()[:8]}"
@@ -496,17 +504,26 @@ def run_live(paths, log=print, now: datetime | None = None) -> dict:
             except Exception as exc:
                 _failed(failed, f"{rk}|{tp} の統合", exc)
     retry_now = bool(failed)   # 予想の失敗は締切＋10分までに毎回やり直す（精算だけの失敗は間隔をあけてよい）
-    n_set = _settle(led, inputs, state, root, now, failed)
+    months: set = set()
+    n_set = _settle(led, inputs, state, root, now, failed, months)
     led.commit()
     led.close()
-    return {"predicted": n_pred, "settled": n_set, "version": version, "held": len(held),
+    return {"predicted": n_pred, "settled": n_set, "version": version, "held": len(held), "months": sorted(months),
             **({"failed": failed, "retry_now": retry_now} if failed else {})}
 
 
-def _settle(led, inputs: dict, state: dict, root: Path, now: datetime | None = None, failed: list | None = None) -> int:
-    """精算を書く（予想を作らない回でも行う）。書いた行の数を返す。"""
+def _wrote(n: int, rk: str, months: set) -> int:
+    if n:
+        months.add(rk[:7])   # 精算を書いたレースの月（月次の振り返りを作り直す）
+    return n
+
+
+def _settle(led, inputs: dict, state: dict, root: Path, now: datetime | None = None, failed: list | None = None,
+            months: set | None = None) -> int:
+    """精算を書く（予想を作らない回でも行う）。書いた行の数を返す。months に渡すと、精算を書いたレースの月を入れる。"""
     n_set = 0
     failed = [] if failed is None else failed
+    months = set() if months is None else months
     # 精算（財布を持つ方式だけ。まむ（text_ai）など、ほかの live 版の予想もまとめて精算する）
     preds = {}
     from .. import official
@@ -542,7 +559,7 @@ def _settle(led, inputs: dict, state: dict, root: Path, now: datetime | None = N
                                      {"status": st.status if st else p["allocation"][a]["status"],
                                       "stake": st.stake if st else 0, "returned": st.returned if st else 0,
                                       "hits": [], "cancelled": True}))
-                    n_set += _write_together(led, todo)
+                    n_set += _wrote(_write_together(led, todo), rk, months)
                 except Exception as exc:
                     _failed(failed, f"{rk}|{m}|{ver} の取りやめの返還", exc)
         except Exception as exc:
@@ -577,7 +594,7 @@ def _settle(led, inputs: dict, state: dict, root: Path, now: datetime | None = N
                                      {"status": st.status if st else p["allocation"][a]["status"],
                                       "stake": st.stake if st else 0, "returned": st.returned if st else 0,
                                       "hits": st.hits if st else []}))
-                    n_set += _write_together(led, todo)
+                    n_set += _wrote(_write_together(led, todo), rk, months)
                 except Exception as exc:
                     _failed(failed, f"{rk}|{m}|{ver} の精算", exc)
         except Exception as exc:

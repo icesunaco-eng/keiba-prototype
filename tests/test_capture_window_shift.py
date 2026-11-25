@@ -202,3 +202,15 @@ def test_partial_recapture_card_only_does_not_bet_on_old_odds(tmp_path):
         for a, v in (p.get("allocation") or {}).items():
             if isinstance(v, dict):
                 assert not v.get("stakes"), (p["method"], a, v)
+    # 💚20261125-10 直してから①：出馬表だけ時間帯の中で取り直せても、材料はそろっていない。正式の判定どおり、
+    # 3画面とも「締切の代わりの予想」と呼び、公開前チェックの「時点の材料」は合格にしない
+    from keiba.app.checks import card_flags, material_timing, pre_publish_check
+    from keiba.app.data import Source
+    src = Source(paths, "live")
+    p = src.preds[RK][("ml_lgbm", "1h")]
+    assert p["_fallback"]
+    state, text = material_timing(p, src.races[RK], "1h")
+    assert state == "fallback" and "代わり" in text, (state, text)
+    assert ("warn", "締切の代わりの予想") in card_flags(p, {}, src.races[RK], False, tp="1h")
+    item = next(i for i in pre_publish_check(p, {}, src.races[RK], None, None, None, "1h") if i["label"] == "時点の材料")
+    assert item["ok"] is False
