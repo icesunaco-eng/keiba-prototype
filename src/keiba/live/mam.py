@@ -136,7 +136,7 @@ def export_packets(paths) -> list[Path]:
         if tp == "result":
             continue
         r = state["races"][rk]
-        f = out_dir / f"{rk.replace('|', '_')}_{tp}.json"
+        f = _packet_path(paths, rk, tp)   # 置く場所・受付で読む場所と同じ名前
         if f.exists():
             continue
         gate = inp["gate"]

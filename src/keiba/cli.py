@@ -127,17 +127,36 @@ def cmd_review(paths, args):
     print(f"月次の振り返り → {write_review(paths, month)}")
 
 
+def _clear_mark(mark, mine: int):
+    """自分の付けた印だけ外す（あとから別の見回りが付け直していたら残す）。"""
+    try:
+        if mark.stat().st_mtime_ns == mine:
+            mark.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def cmd_collect(paths, args):
     from .live.collector import Collector
     root = paths.data_dir / "live"
     if args.action == "tick":
+        # まむへの入力を置き終えていない印。この回が新しいページを取るかもしれないので先に付け、置き終えたら外す。
+        # 前の回の印が残っていれば（途中で止まった・失敗した）、新しいページが無い回でも置き直す（締切までに渡すため）
+        pending = paths.data_dir / "mam" / "export-pending"
+        was_pending = pending.exists()
+        pending.parent.mkdir(parents=True, exist_ok=True)
+        pending.touch()
+        mine = pending.stat().st_mtime_ns
         out = Collector(root).tick(notify=_notify)
         if out["saved"]:
+            pending.touch()   # 取ったページの入力を置くまで印を残す（重なった別の見回りが先に外していても付け直す）
+            mine = pending.stat().st_mtime_ns
             from .live.wallet import run_live
             try:
                 out["live"] = run_live(paths)
                 from .live.mam import export_packets
                 out["mam_packets"] = len(export_packets(paths))
+                _clear_mark(pending, mine)
                 if out["live"].get("settled"):
                     from datetime import date
                     from .review import write_review
@@ -145,6 +164,16 @@ def cmd_collect(paths, args):
             except Exception as exc:  # 予想の失敗で収集を止めない
                 out["live_error"] = repr(exc)
                 _notify("予想・精算に失敗", repr(exc)[:120])
+        elif was_pending:   # 新しいページは無いが、前の回が入力を置き終えていない
+            try:
+                from .live.mam import export_packets
+                out["mam_packets"] = len(export_packets(paths))
+                _clear_mark(pending, mine)
+            except Exception as exc:  # 印は残して、次の回にまたやり直す
+                out["mam_error"] = repr(exc)
+                _notify("まむへの入力を置けない", repr(exc)[:120])
+        else:
+            _clear_mark(pending, mine)
         print(json.dumps(out, ensure_ascii=False))
     elif args.action == "install":
         import os
