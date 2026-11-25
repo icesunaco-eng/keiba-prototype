@@ -106,13 +106,24 @@ def test_quiet_tick_republishes_an_interrupted_packet_before_the_deadline(tmp_pa
 
 # ---- 印の付け外し（予想・書き出しは差し替えて、見回りの判断だけを見る）
 class _FakeCollector:
+    """見回りの代役。PR #15 の見回り（前の回の失敗をやり直す印）と合わせたときにも同じ判断を見られるよう、その入口も持つ。"""
     saved = []
 
     def __init__(self, root):
-        pass
+        self.n = 0
 
     def tick(self, notify=None):
-        return {"saved": _FakeCollector.saved.pop(0)}
+        self.n = _FakeCollector.saved.pop(0)
+        return {"saved": self.n}
+
+    def live_pending(self):
+        return bool(self.n)
+
+    def live_started(self):
+        return False
+
+    def live_finished(self, failures, retry_now=True):
+        return []
 
 
 def _run(paths, saved, live=None, export=None):
