@@ -1,5 +1,6 @@
 """これからのレースの予想・配分・精算（合成のページで端から端まで。ネットにはつながない）。"""
 import json
+import os
 from datetime import datetime
 from itertools import combinations
 
@@ -1521,3 +1522,79 @@ def test_packet_permissions_match_a_plain_write(tmp_path, monkeypatch):
     plain = paths.data_dir / "mam" / "outbox" / "plain.txt"
     plain.write_text("x", encoding="utf-8")
     assert written and all(stat.S_IMODE(f.stat().st_mode) == stat.S_IMODE(plain.stat().st_mode) for f in written)
+
+
+# ---- みに💚20261125-17（PR #18）の指摘：ハードリンクが使えない置き場で途中で止まったとき
+def _child_publish_then_die(data_dir, where):
+    """別プロセスで、ハードリンクが使えない置き場をまねて置きに行き、where の所で強制終了する（後片付けは走らない）。"""
+    from pathlib import Path
+    from types import SimpleNamespace
+    from keiba.live import mam
+
+    def no_links(src, dst):
+        raise PermissionError("hard links are not supported here")
+    mam.os.link = no_links
+    if where == "writing":
+        real_fsync = mam.os.fsync
+        calls = []
+
+        def die_on_second(fd):   # 2回目の書き込み（outbox の中の隠し名）の途中で止まる
+            calls.append(fd)
+            if len(calls) == 2:
+                os._exit(9)
+            real_fsync(fd)
+        mam.os.fsync = die_on_second
+    else:
+        mam._rename_noreplace = lambda src, dst: os._exit(9)   # 置く直前で止まる
+    mam._publish_once(SimpleNamespace(data_dir=Path(data_dir)), RK, "1h", json.dumps({"x": "y" * 100000}))
+
+
+@pytest.mark.parametrize("where", ["writing", "placing"])
+def test_killed_publish_without_hard_links_leaves_no_packet_and_retries(tmp_path, where):
+    """ハードリンクが使えない置き場で、書く途中・置く直前に強制終了しても、正式な名前には何も残らず、次の回に置き直せる。"""
+    import multiprocessing as mp
+    from types import SimpleNamespace
+    from keiba.live import mam
+    paths = SimpleNamespace(data_dir=tmp_path)
+    (tmp_path / "mam" / "outbox").mkdir(parents=True)
+    child = mp.get_context("spawn").Process(target=_child_publish_then_die, args=(str(tmp_path), where))
+    child.start()
+    child.join(60)
+    assert child.exitcode == 9
+    f = mam._packet_path(paths, RK, "1h")
+    assert not f.exists()                                            # 正式な名前には何も無い
+    leftovers = [x.name for x in f.parent.iterdir()]
+    assert all(n.startswith(".") and n.endswith(".part") for n in leftovers)   # 残るのは隠し名の書きかけだけ
+    body = json.dumps({"race_key": RK, "time_point": "1h", "horses": [{"horse_number": n} for n in range(1, N + 1)]})
+    assert mam._publish_once(paths, RK, "1h", body) == f             # 次の回は置ける
+    assert mam.issued_roster(paths, RK, "1h") == list(range(1, N + 1))
+
+
+def test_rename_noreplace_never_replaces(tmp_path):
+    """上書きしない移動：先にあるファイルは入れ替わらない。"""
+    from keiba.live.mam import _rename_noreplace
+    a, b, dst = tmp_path / "a", tmp_path / "b", tmp_path / "dst"
+    a.write_text("first"), b.write_text("second")
+    assert _rename_noreplace(a, dst) is True and not a.exists()
+    assert _rename_noreplace(b, dst) is False and b.exists()
+    assert dst.read_text() == "first"
+
+
+def test_publish_refuses_when_no_safe_way_exists(tmp_path, monkeypatch):
+    """リンクも上書きしない移動も使えない置き場では置かない（書きかけも正式な名前に残さない）。"""
+    import errno
+    from types import SimpleNamespace
+    from keiba.live import mam
+
+    def no_links(src, dst):
+        raise PermissionError("no hard links")
+
+    def no_rename(src, dst):
+        raise OSError(errno.ENOTSUP, "no noreplace rename")
+    monkeypatch.setattr(mam.os, "link", no_links)
+    monkeypatch.setattr(mam, "_rename_noreplace", no_rename)
+    paths = SimpleNamespace(data_dir=tmp_path)
+    (tmp_path / "mam" / "outbox").mkdir(parents=True)
+    with pytest.raises(OSError):
+        mam._publish_once(paths, RK, "1h", "{}")
+    assert not list((tmp_path / "mam" / "outbox").iterdir()) and not list((tmp_path / "mam" / "outbox-staging").iterdir())

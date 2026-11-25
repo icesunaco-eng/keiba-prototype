@@ -11,8 +11,11 @@
 """
 from __future__ import annotations
 
+import ctypes
+import errno
 import json
 import os
+import sys
 import uuid
 from datetime import datetime
 from itertools import combinations
@@ -37,44 +40,74 @@ def _packet_path(paths, rk: str, tp: str) -> Path:
     return paths.data_dir / "mam" / "outbox" / f"{rk.replace('|', '_')}_{tp}.json"
 
 
+def _rename_noreplace(src: Path, dst: Path) -> bool:
+    """src を dst へ一度に移す。dst がもうあれば移さず False（上書きしない）。
+    ハードリンクを作れない置き場のための道。OS がこの操作を持たなければ OSError（置かない）。"""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        fn = libc.renamex_np
+        fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rc = fn(os.fsencode(src), os.fsencode(dst), 0x4)            # RENAME_EXCL
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        fn = libc.renameat2
+        fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rc = fn(-100, os.fsencode(src), -100, os.fsencode(dst), 1)  # AT_FDCWD・RENAME_NOREPLACE
+    else:
+        raise OSError(errno.ENOTSUP, "上書きしない移動が使えない")
+    if rc == 0:
+        return True
+    err = ctypes.get_errno()
+    if err == errno.EEXIST:
+        return False
+    raise OSError(err, os.strerror(err))
+
+
+def _write_complete(tmp: Path, text: str) -> None:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)   # 権限は前の write_text と同じ（umask に従う）
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
 def _publish_once(paths, rk: str, tp: str, text: str) -> Path | None:
     """入力の束を、書き終えた形で一度だけ outbox に置く。同じ名前がもうあれば置かず None を返す。
     書き出しが同時に2つ走っても（見回りと手動の mam export など）、先に置いた入力は入れ替わらない。
     まむが読んだ入力と、受付で確かめる入力（issued_roster）を同じものにするため。
-    書きかけは outbox の外（outbox-staging）で作るので、まむが書きかけを読むことも無い。"""
+    正式な名前に現れるのは、いつも書き終えた入力だけ（書く途中で止まっても、正式な名前には何も残らず、次の回に置き直せる）。
+    1. ふつう：outbox の外（outbox-staging）で書き終えて、ハードリンクで置く
+    2. 別のディスクなどでリンクできない：outbox の中の隠し名（.〜.part）で書き終えて、同じ場所でリンクで置く
+    3. ハードリンクが使えない置き場：同じ隠し名から「上書きしない移動」で置く。それも使えなければ置かない（OSError）"""
     path = _packet_path(paths, rk, tp)
     stage = paths.data_dir / "mam" / "outbox-staging"   # 同じディスクの outbox の外
     stage.mkdir(parents=True, exist_ok=True)
-    tmp = stage / f"{path.stem}.{os.getpid()}.{uuid.uuid4().hex}.part"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)   # 権限は前の write_text と同じ（umask に従う）
+    tag = f"{path.stem}.{os.getpid()}.{uuid.uuid4().hex}.part"
+    tmp = stage / tag
+    near = path.parent / f".{tag}"
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
+        _write_complete(tmp, text)
         try:
             os.link(tmp, path)   # 同じ名前があれば失敗する（上書きしない）。置いた時には中身がそろっている
             return path
         except FileExistsError:
             return None
         except OSError:
-            pass   # ハードリンクを作れない置き場（outbox が別のディスクなど）
+            pass
+        _write_complete(near, text)
         try:
-            fh = open(path, "x", encoding="utf-8")   # 無いときだけ作る（上書きしない）
+            os.link(near, path)
+            return path
         except FileExistsError:
             return None
-        try:
-            with fh:
-                fh.write(text)
-        except BaseException:
-            path.unlink(missing_ok=True)   # 自分が作った書きかけだけを消す
-            raise
-        return path
-    finally:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
+        except OSError:
             pass
+        return path if _rename_noreplace(near, path) else None
+    finally:
+        for f in (tmp, near):
+            try:
+                os.unlink(f)
+            except FileNotFoundError:
+                pass
 
 
 def issued_roster(paths, rk: str, tp: str) -> list[int] | None:
