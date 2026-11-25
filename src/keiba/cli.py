@@ -136,15 +136,25 @@ def _packets_missing(paths, col) -> bool:
     try:
         now = col.now()
         races = col.state.get("races", {})
-        for key in col.state.get("taken", {}):
-            rk, tp = key.rsplit("|", 1)
-            r = races.get(rk)
-            if tp == "result" or not r:
-                continue
-            if now < deadline(r["race_date"], r["post_time"], tp) and not _packet_path(paths, rk, tp).exists():
-                return True
+        keys = list(col.state.get("taken", {}))
     except Exception:
         return True
+    for key in keys:
+        try:
+            rk, tp = key.rsplit("|", 1)
+            r = races.get(rk)
+            if tp == "result" or not r or not r.get("post_time"):
+                continue   # 結果・予定表から外れたレース・発走時刻の分からないレースは、入力を作らない
+            dl = deadline(r["race_date"], r["post_time"], tp)
+        except Exception:
+            continue   # 締切の分からない時点も入力を作らない（毎回の空回りにしない）
+        if now >= dl:
+            continue
+        try:
+            if not _packet_path(paths, rk, tp).exists():
+                return True
+        except OSError:
+            return True   # 置き場を調べられない：書き出しを試して、失敗を知らせる
     return False
 
 

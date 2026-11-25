@@ -193,6 +193,13 @@ def test_missing_packets_are_counted_only_before_the_deadline(tmp_path):
     out, _ = _tick(paths, AT.replace(minute=34))
     assert out["mam_packets"] >= 1
     _placed_once(paths)
+    # 締切の分からない時点（発走時刻が空・壊れた記録）は数えない。毎回の書き出しの空回りにしない
+    c = col(AT.replace(minute=35))
+    c.state["races"]["2025-08-30|京都|12"] = {"race_date": "2025-08-30", "post_time": None}
+    c.state["races"]["2025-08-30|京都|10"] = {"race_date": "2025-08-30"}
+    c.state["races"]["2025-08-30|京都|9"] = {"race_date": "あした", "post_time": "15:00"}
+    c.state["taken"].update({"2025-08-30|京都|12|1h": "x", "2025-08-30|京都|10|1h": "x", "2025-08-30|京都|9|1h": "x", "壊れた記録": "x"})
+    assert not cli._packets_missing(paths, c)
 
 
 def test_tick_goes_on_when_the_outbox_cannot_even_be_checked(tmp_path):
