@@ -178,18 +178,21 @@ def test_an_older_overlapping_tick_cannot_cancel_a_later_retry(tmp_path):
     _placed_once(paths)
 
 
-def test_quiet_tick_does_not_export_when_nothing_is_missing_or_too_late(tmp_path):
+def test_missing_packets_are_counted_only_before_the_deadline(tmp_path):
+    """置けていない入力の数え方：置けていれば無し、無ければ締切前だけ「ある」、締切を過ぎたら無し。"""
     paths = _paths(tmp_path)
-    calls = []
     out, _ = _tick(paths, AT)   # ふつうに置ける
     assert out["mam_packets"] >= 1
-    with patch.object(mam, "export_packets", lambda p: calls.append(p) or []):
-        out, _ = _tick(paths, AT.replace(minute=33))
-    assert calls == [] and "mam_packets" not in out   # 置けていれば静かな回は何もしない
+
+    def col(at):
+        return collector.Collector(tmp_path / "live", client=None, now=lambda: at)
+    assert not cli._packets_missing(paths, col(AT.replace(minute=33)))   # 置けている
     mam._packet_path(paths, RK, TP).unlink()
-    with patch.object(mam, "export_packets", lambda p: calls.append(p) or []):
-        out, _ = _tick(paths, AT.replace(minute=41))   # 締切 14:40 を過ぎた時点は置き直さない
-    assert calls == [] and "mam_packets" not in out
+    assert cli._packets_missing(paths, col(AT.replace(minute=33)))       # 締切 14:40 の前で、無い
+    assert not cli._packets_missing(paths, col(AT.replace(minute=41)))   # 締切を過ぎた時点は置き直さない
+    out, _ = _tick(paths, AT.replace(minute=34))
+    assert out["mam_packets"] >= 1
+    _placed_once(paths)
 
 
 def test_tick_goes_on_when_the_outbox_cannot_even_be_checked(tmp_path):
