@@ -127,43 +127,39 @@ def cmd_review(paths, args):
     print(f"月次の振り返り → {write_review(paths, month)}")
 
 
-def _set_mark(mark) -> int | None:
-    """印を付けて、付けた時刻を返す。付けられない置き場では None（印のために見回りを止めない）。"""
+def _packets_missing(paths, col) -> bool:
+    """取った時点のうち、締切前なのに まむへの入力がまだ置かれていないものがあるか。
+    置く途中で止まった・置き場やページが一時的に使えなかった・見回りが重なった、のどれでも、置かれるまで毎回見る。
+    調べられないときは「ある」とみなして書き出しを試す（失敗は知らせる）。"""
+    from .live.collector import deadline
+    from .live.mam import _packet_path
     try:
-        mark.parent.mkdir(parents=True, exist_ok=True)
-        mark.touch()
-        return mark.stat().st_mtime_ns
-    except OSError:
-        return None
-
-
-def _clear_mark(mark, mine: int | None):
-    """自分の付けた印だけ外す（あとから別の見回りが付け直していたら残す）。"""
-    try:
-        if mine is not None and mark.stat().st_mtime_ns == mine:
-            mark.unlink()
-    except OSError:
-        pass
+        now = col.now()
+        races = col.state.get("races", {})
+        for key in col.state.get("taken", {}):
+            rk, tp = key.rsplit("|", 1)
+            r = races.get(rk)
+            if tp == "result" or not r:
+                continue
+            if now < deadline(r["race_date"], r["post_time"], tp) and not _packet_path(paths, rk, tp).exists():
+                return True
+    except Exception:
+        return True
+    return False
 
 
 def cmd_collect(paths, args):
     from .live.collector import Collector
     root = paths.data_dir / "live"
     if args.action == "tick":
-        # まむへの入力を置き終えていない印。この回が新しいページを取るかもしれないので先に付け、置き終えたら外す。
-        # 前の回の印が残っていれば（途中で止まった・失敗した）、新しいページが無い回でも置き直す（締切までに渡すため）
-        pending = paths.data_dir / "mam" / "export-pending"
-        was_pending = pending.exists()
-        mine = _set_mark(pending)
-        out = Collector(root).tick(notify=_notify)
+        col = Collector(root)
+        out = col.tick(notify=_notify)
         if out["saved"]:
-            mine = _set_mark(pending)   # 取ったページの入力を置くまで印を残す（重なった別の見回りが先に外していても付け直す）
             from .live.wallet import run_live
             try:
                 out["live"] = run_live(paths)
                 from .live.mam import export_packets
                 out["mam_packets"] = len(export_packets(paths))
-                _clear_mark(pending, mine)
                 if out["live"].get("settled"):
                     from datetime import date
                     from .review import write_review
@@ -171,16 +167,15 @@ def cmd_collect(paths, args):
             except Exception as exc:  # 予想の失敗で収集を止めない
                 out["live_error"] = repr(exc)
                 _notify("予想・精算に失敗", repr(exc)[:120])
-        elif was_pending:   # 新しいページは無いが、前の回が入力を置き終えていない
+        if "mam_packets" not in out and _packets_missing(paths, col):
+            # この回は書き出していない（新しいページが無い・予想が失敗した）が、締切前なのに置けていない入力がある
+            # （前の回が途中で止まった・置き場やページが一時的に使えなかったなど）。置けるまで毎回やり直す
             try:
                 from .live.mam import export_packets
                 out["mam_packets"] = len(export_packets(paths))
-                _clear_mark(pending, mine)
-            except Exception as exc:  # 印は残して、次の回にまたやり直す
+            except Exception as exc:  # 収集は止めない。次の回にまたやり直す
                 out["mam_error"] = repr(exc)
                 _notify("まむへの入力を置けない", repr(exc)[:120])
-        else:
-            _clear_mark(pending, mine)
         print(json.dumps(out, ensure_ascii=False))
     elif args.action == "install":
         import os

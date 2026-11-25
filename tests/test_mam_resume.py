@@ -1,7 +1,8 @@
-"""まむへの入力を置く途中で止まった後、次の見回りで置き直す（みに💚20261125-19 の指摘。PR #18）。
+"""まむへの入力を置けなかった時点を、次の見回りで締切前に置き直す（みに💚20261125-19・-22 の指摘。PR #18）。
 
 見回り（keiba collect tick）は、新しいページを取った回だけ予想と書き出しをする。
-入力を置く途中で止まると、次に新しいページを取るまで置かれず、締切を過ぎることがあった。
+入力を置く途中で止まる・置き場やページが一時的に使えないと、次に新しいページを取るまで置かれず、締切を過ぎることがあった。
+いまは、取った時点のうち締切前なのに入力が無いものを毎回数え、あれば新しいページが無い回でも書き出す。
 """
 import errno
 import io
@@ -37,17 +38,43 @@ def _client():
 
 
 def _tick(paths, when):
-    """ふだんの入口（cli の collect tick）を、合成のページと時計で1回動かす。最後の行（結果）を返す。"""
+    """ふだんの入口（cli の collect tick）を、合成のページと時計で1回動かす。最後の行（結果）と知らせの数を返す。"""
     real = collector.Collector
     buf = io.StringIO()
     with patch.object(collector, "Collector", side_effect=lambda root: real(root, client=_client(), now=lambda: when)), \
-         patch.object(cli, "_notify"), redirect_stdout(buf):
+         patch.object(cli, "_notify") as notify, redirect_stdout(buf):
         cli.cmd_collect(paths, SimpleNamespace(action="tick"))
-    return json.loads(buf.getvalue().splitlines()[-1])
+    return json.loads(buf.getvalue().splitlines()[-1]), notify.call_count
+
+
+def _paths(tmp_path):
+    from tests.conftest import make_tables
+    paths = Paths(data_dir=tmp_path)
+    races, runners = make_tables(n_days=34, races_per_day=6, field=10, horses=60)
+    runners["horse_id"] = runners["horse_id"].map(lambda h: f"{int(h[1:]):010d}")
+    paths.tables_dir.mkdir(parents=True)
+    races.to_parquet(paths.tables_dir / "races.parquet")
+    runners.to_parquet(paths.tables_dir / "runners.parquet")
+    return paths
 
 
 def _no_links(*_):
     raise OSError(errno.ENOTSUP, "hard links are not supported here")
+
+
+SEVEN = json.dumps({"race_key": RK, "time_point": TP, "horses": [{"horse_number": n} for n in range(1, 8)]})
+
+
+def _placed_once(paths, first=None):
+    """書き終えた8頭の入力が1つだけあり、後から別の入力では入れ替わらない。"""
+    f = mam._packet_path(paths, RK, TP)
+    assert mam.issued_roster(paths, RK, TP) == list(range(1, 9))
+    assert json.loads(f.read_text())["deadline"].endswith("T14:40+09:00")
+    body = f.read_bytes()
+    assert first is None or body == first
+    assert mam._publish_once(paths, RK, TP, SEVEN) is None and f.read_bytes() == body
+    assert [p.name for p in f.parent.iterdir() if not p.name.startswith(".")] == [f.name]
+    return body
 
 
 def _child_tick_then_die(data_dir, where):
@@ -76,128 +103,103 @@ def _child_tick_then_die(data_dir, where):
 
 @pytest.mark.parametrize("where", ["half-written", "before-rename"])
 def test_quiet_tick_republishes_an_interrupted_packet_before_the_deadline(tmp_path, where):
-    from tests.conftest import make_tables
-    paths = Paths(data_dir=tmp_path)
-    races, runners = make_tables(n_days=34, races_per_day=6, field=10, horses=60)
-    runners["horse_id"] = runners["horse_id"].map(lambda h: f"{int(h[1:]):010d}")
-    paths.tables_dir.mkdir(parents=True)
-    races.to_parquet(paths.tables_dir / "races.parquet")
-    runners.to_parquet(paths.tables_dir / "runners.parquet")
+    paths = _paths(tmp_path)
     child = mp.get_context("spawn").Process(target=_child_tick_then_die, args=(str(tmp_path), where))
     child.start()
     child.join(300)
     assert child.exitcode == 9
     f = mam._packet_path(paths, RK, TP)
     assert not f.exists()   # 正式な名前には何も無い
-    assert (tmp_path / "mam" / "export-pending").exists()   # 置き終えていない印が残る
-
     with patch.object(mam.os, "link", _no_links):   # 置き場はリンクが使えないまま
-        out = _tick(paths, AT.replace(minute=33))   # 新しいページの無い、締切前の見回り
+        out, _ = _tick(paths, AT.replace(minute=33))   # 新しいページの無い、締切前の見回り
         assert out["saved"] == 0 and out["mam_packets"] >= 1
-        assert mam.issued_roster(paths, RK, TP) == list(range(1, 9))   # 締切 14:40 より前に、書き終えた8頭の入力
-        assert not (tmp_path / "mam" / "export-pending").exists()
-        first = f.read_bytes()
-        assert "mam_packets" not in _tick(paths, AT.replace(minute=37))   # 置き終えたら、静かな回は書き出さない
-        seven = json.dumps({"race_key": RK, "time_point": TP, "horses": [{"horse_number": n} for n in range(1, 8)]})
-        assert mam._publish_once(paths, RK, TP, seven) is None   # 後から別の入力では入れ替わらない
-    assert f.read_bytes() == first
-    assert [p.name for p in f.parent.iterdir() if not p.name.startswith(".")] == [f.name]   # 正式な名前は書き終えた1つだけ
+        first = _placed_once(paths)
+        out, _ = _tick(paths, AT.replace(minute=37))
+        assert out.get("mam_packets", 0) == 0   # 置き終えたら、静かな回は書き出さない
+    _placed_once(paths, first)
 
 
-# ---- 印の付け外し（予想・書き出しは差し替えて、見回りの判断だけを見る）
-class _FakeCollector:
-    """見回りの代役。PR #15 の見回り（前の回の失敗をやり直す印）と合わせたときにも同じ判断を見られるよう、その入口も持つ。"""
-    saved = []
+def test_failed_prediction_still_places_the_packets_in_the_same_tick(tmp_path):
+    paths = _paths(tmp_path)
 
-    def __init__(self, root):
-        self.n = 0
-
-    def tick(self, notify=None):
-        self.n = _FakeCollector.saved.pop(0)
-        return {"saved": self.n}
-
-    def live_pending(self):
-        return bool(self.n)
-
-    def live_started(self):
-        return False
-
-    def live_finished(self, failures, retry_now=True):
-        return []
-
-
-def _run(paths, saved, live=None, export=None):
-    calls = {"live": 0, "export": 0}
-
-    def run_live(_):
-        calls["live"] += 1
-        return live() if live else {"settled": 0}
-
-    def export_packets(_):
-        calls["export"] += 1
-        return export() if export else []
-    _FakeCollector.saved = [saved]
-    buf = io.StringIO()
-    with patch.object(collector, "Collector", _FakeCollector), patch.object(cli, "_notify") as notify, \
-         patch("keiba.live.wallet.run_live", run_live), patch.object(mam, "export_packets", export_packets), redirect_stdout(buf):
-        cli.cmd_collect(paths, SimpleNamespace(action="tick"))
-    return calls, json.loads(buf.getvalue().splitlines()[-1]), notify.call_count
-
-
-def test_quiet_tick_does_nothing_when_nothing_is_pending(tmp_path):
-    paths = Paths(data_dir=tmp_path)
-    calls, out, _ = _run(paths, 0)
-    assert calls == {"live": 0, "export": 0} and not (tmp_path / "mam" / "export-pending").exists()
-    calls, _, _ = _run(paths, 2)
-    assert calls == {"live": 1, "export": 1} and not (tmp_path / "mam" / "export-pending").exists()
-
-
-def test_failed_prediction_leaves_packets_for_the_next_quiet_tick(tmp_path):
-    paths = Paths(data_dir=tmp_path)
-
-    def boom():
+    def boom(_):
         raise RuntimeError("予想の失敗")
-    calls, out, _ = _run(paths, 3, live=boom)
-    assert calls == {"live": 1, "export": 0} and "live_error" in out
-    assert (tmp_path / "mam" / "export-pending").exists()
-    calls, out, _ = _run(paths, 0)   # 新しいページは無いが、入力を置き直す（予想はやり直さない：main と同じ）
-    assert calls == {"live": 0, "export": 1} and not (tmp_path / "mam" / "export-pending").exists()
-    calls, _, _ = _run(paths, 0)
-    assert calls == {"live": 0, "export": 0}
+    with patch("keiba.live.wallet.run_live", boom):
+        out, told = _tick(paths, AT)
+    assert out["saved"] == 3 and "live_error" in out and out["mam_packets"] >= 1 and told == 1
+    _placed_once(paths)
 
 
-def test_failed_republish_keeps_the_mark_and_is_reported(tmp_path):
-    paths = Paths(data_dir=tmp_path)
-    (tmp_path / "mam").mkdir()
-    (tmp_path / "mam" / "export-pending").touch()
-
-    def no_place():
-        raise OSError(errno.ENOTSUP, "置けない置き場")
-    for _ in range(2):   # 置けない間は、毎回やり直して知らせる
-        calls, out, told = _run(paths, 0, export=no_place)
-        assert calls == {"live": 0, "export": 1} and "mam_error" in out and told == 1
-        assert (tmp_path / "mam" / "export-pending").exists()
-    calls, out, _ = _run(paths, 0)
-    assert calls["export"] == 1 and not (tmp_path / "mam" / "export-pending").exists()
-
-
-def test_mark_set_by_a_later_tick_is_not_removed(tmp_path):
-    """重なって動いた後の見回りが付け直した印は、先の見回りが外さない。"""
-    mark = tmp_path / "export-pending"
-    mark.touch()
-    mine = mark.stat().st_mtime_ns
-    os.utime(mark, ns=(mine + 1_000_000, mine + 1_000_000))   # 別の見回りが付け直した
-    cli._clear_mark(mark, mine)
-    assert mark.exists()
-    cli._clear_mark(mark, mark.stat().st_mtime_ns)
-    assert not mark.exists()
+def test_page_unreadable_for_one_tick_is_placed_by_a_later_quiet_tick(tmp_path):
+    """ページを一時的に読めず、その回は0件で「成功」しても、置かれるまで次の回にやり直す（💚20261125-22 要修正②）。"""
+    paths = _paths(tmp_path)
+    real = mam.live_tables
+    with patch.object(mam, "live_tables", lambda root, state, snaps: (None, None, {})):   # 出馬表を読めず、入力が作れない
+        out, _ = _tick(paths, AT)
+    assert out["saved"] == 3 and out["mam_packets"] == 0 and not mam._packet_path(paths, RK, TP).exists()
+    with patch.object(mam, "live_tables", lambda root, state, snaps: (None, None, {})):
+        out, _ = _tick(paths, AT.replace(minute=33))   # まだ読めない回も、収集は続け、置けていないことを覚えておく
+    assert out["saved"] == 0 and out["mam_packets"] == 0
+    assert mam.live_tables is real
+    out, _ = _tick(paths, AT.replace(minute=37))   # 読めるようになった静かな回
+    assert out["saved"] == 0 and out["mam_packets"] >= 1
+    _placed_once(paths)
 
 
-def test_tick_goes_on_when_the_mark_cannot_be_written(tmp_path):
-    """印を置けない置き場（data/mam がファイルになっているなど）でも、見回りは止めない。"""
-    paths = Paths(data_dir=tmp_path)
-    (tmp_path / "mam").write_text("not a folder")
-    calls, out, _ = _run(paths, 2)
-    assert calls == {"live": 1, "export": 1} and out["saved"] == 2
-    calls, out, _ = _run(paths, 0)
-    assert calls == {"live": 0, "export": 0} and out["saved"] == 0
+def test_outbox_unusable_for_a_while_is_placed_after_it_recovers(tmp_path):
+    """まむの置き場だけが一時的に使えなくても、収集は続け、使えるようになった回に置く（💚20261125-22 要修正③）。"""
+    paths = _paths(tmp_path)
+
+    def eio(*_):
+        raise OSError(errno.EIO, "置き場が一時的に使えない")
+    with patch.object(mam, "_publish_once", eio):
+        out, told = _tick(paths, AT)
+        assert out["saved"] == 3 and "mam_error" in out and told >= 1   # ページは保存し、知らせる
+        out, told = _tick(paths, AT.replace(minute=35))
+        assert out["saved"] == 0 and "mam_error" in out and told == 1
+    out, told = _tick(paths, AT.replace(minute=39))   # 戻った回（締切 14:40 の前）
+    assert out["saved"] == 0 and out["mam_packets"] >= 1 and told == 0
+    _placed_once(paths)
+
+
+def test_an_older_overlapping_tick_cannot_cancel_a_later_retry(tmp_path):
+    """見回りが重なっても、置けていない入力の記録を誰かが消すことは無い（💚20261125-22 要修正①）。
+    印を使わず、毎回「締切前なのに入力が無い時点」を数えるので、先の回が後の回の記録を消す場面が無い。"""
+    paths = _paths(tmp_path)
+    with patch.object(mam, "export_packets", lambda _: []):   # 14:30 の回はページを保存したが入力を置けずに終わる
+        out, _ = _tick(paths, AT)
+    assert out["saved"] == 3 and not mam._packet_path(paths, RK, TP).exists()
+    placed = 0
+    for minute in (20, 35):   # 遅れて終わった古い回（14:20 の時計）と、その後の回。どちらが置いてもよい
+        out, _ = _tick(paths, AT.replace(minute=minute))
+        assert out["saved"] == 0
+        placed += out.get("mam_packets", 0)
+    assert placed >= 1
+    _placed_once(paths)
+
+
+def test_quiet_tick_does_not_export_when_nothing_is_missing_or_too_late(tmp_path):
+    paths = _paths(tmp_path)
+    calls = []
+    out, _ = _tick(paths, AT)   # ふつうに置ける
+    assert out["mam_packets"] >= 1
+    with patch.object(mam, "export_packets", lambda p: calls.append(p) or []):
+        out, _ = _tick(paths, AT.replace(minute=33))
+    assert calls == [] and "mam_packets" not in out   # 置けていれば静かな回は何もしない
+    mam._packet_path(paths, RK, TP).unlink()
+    with patch.object(mam, "export_packets", lambda p: calls.append(p) or []):
+        out, _ = _tick(paths, AT.replace(minute=41))   # 締切 14:40 を過ぎた時点は置き直さない
+    assert calls == [] and "mam_packets" not in out
+
+
+def test_tick_goes_on_when_the_outbox_cannot_even_be_checked(tmp_path):
+    """置けていないかを調べられないとき（権限など）も、収集は止めずに書き出しを試し、失敗を知らせる。"""
+    paths = _paths(tmp_path)
+    out, _ = _tick(paths, AT)
+    assert out["mam_packets"] >= 1
+
+    def denied(*_):
+        raise PermissionError(errno.EACCES, "調べられない")
+    with patch.object(mam, "_packet_path", denied):
+        out, told = _tick(paths, AT.replace(minute=33))
+    assert out["saved"] == 0 and "mam_error" in out and told == 1
