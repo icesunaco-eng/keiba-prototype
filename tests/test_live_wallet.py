@@ -252,11 +252,12 @@ def test_integrated_versions(tmp_path):
 def test_mam_partial_trios_are_reference_only(tmp_path):
     from keiba.ledger import Ledger
     from keiba.live import wallet
-    from keiba.live.mam import import_predictions
+    from keiba.live.mam import export_packets, import_predictions
     orig = jra.parse_card
     jra.parse_card = lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)]
     try:
         paths, col = _setup(tmp_path)
+        export_packets(paths)  # ふだんの流れ：まむへの入力を渡してから回答を受け付ける
         f = tmp_path / "mam.json"
         f.write_text(json.dumps({"schema": "keiba-mam-prediction-v1", "race_key": RK, "time_point": "1h",
                                  "generated_at": "2025-08-30T14:35:00+09:00", "trios": [{"combo": "1-2-3", "p": 0.3}]}))
@@ -1015,7 +1016,7 @@ def _stored_mam(paths, **change):
                "trios": [{"combo": "1-2-3", "p": 1.0}], "trios_all": {"1-2-3": 1.0}, "complete": False, "confidence": "Z",
                "allocation": {a: {"status": "allocated", "stakes": {"1-2-3": 100}, "total": 100}
                               for a in ("equal_payout", "ev_weighted", "kelly")},
-               "period": "live", **change}
+               "period": "live", "issued_horses": list(range(1, N + 1)), **change}
     led = Ledger(paths.ledger_path)
     led.add_prediction(RK, "1h", "text_ai", "live-mam-v1", payload, "i", "mam", "old")
     led.commit()
@@ -1065,8 +1066,9 @@ def test_accepted_mam_probs_pass_saved_check(tmp_path, monkeypatch, small, forma
     """受付が保存した値（7桁丸めの端を含む）は、保存値の検査で落ちない。順位だけの予想も今までどおり。"""
     from itertools import combinations
     from keiba.ledger import Ledger
-    from keiba.live.mam import import_predictions
+    from keiba.live.mam import export_packets, import_predictions
     paths, _ = _two_races(tmp_path, monkeypatch)
+    export_packets(paths)
     combos = ["-".join(map(str, c)) for c in combinations(range(1, N + 1), 3)]
     body = {"ranking": [1, 2, 3]} if small is None else {
         "trios": [{"combo": c, "p": 1.0 if i == 0 else small} for i, c in enumerate(combos)]}
@@ -1122,9 +1124,9 @@ def test_mam_from_a_smaller_roster_is_not_formal(tmp_path, monkeypatch):
     paths, _ = _two_races(tmp_path, monkeypatch)
     small = _combos(N - 1)
     it = _mam_row(paths, {c: (0.8 if i == 0 else round(0.2 / (len(small) - 1), 7)) for i, c in enumerate(small)}, True,
-                  horses=[{"n": n, "rank": None} for n in range(1, N)])
+                  horses=[{"n": n, "rank": None} for n in range(1, N)], issued_horses=list(range(1, N)))
     assert "mam" in it["inputs_used"] and not it["formal_probability"] and it["trio_probs_full"] is None
-    assert any("予想した時と今の出走馬が違う" in r for r in it["reasons"])
+    assert any("予想に使った入力と今の出走馬が違う" in r for r in it["reasons"])
     assert all(not a["stakes"] for a in it["allocation"].values())
 
 
@@ -1172,8 +1174,7 @@ def test_mam_formal_only_with_same_roster_and_all_combos(saved, now, keys):
     k = {"all8": combos(range(1, 9)), "all7": combos(range(1, 8)), "all7b": combos((1, 2, 3, 4, 5, 6, 8)),
          "one": ["1-2-3"]}[keys]
     probs = _uniform(k)
-    mp = {"horses": [{"n": n, "rank": None} for n in saved], "trios_all": probs,
-          "complete": set(k) == set(combos(saved))}  # 受付（mam.py）と同じ決め方
+    mp = {"issued_horses": list(saved), "trios_all": probs, "complete": True}  # 印は使わない（True でも正式にならないこと）
     use, ok, why = _mam_use(mp, list(now))
     assert use == (set(k) <= set(combos(now)))
     assert ok == (saved == now and set(k) == set(combos(now)))
@@ -1195,7 +1196,7 @@ def test_partial_mam_does_not_become_formal_after_a_scratch(tmp_path, monkeypatc
     it = next(p for p in led.predictions() if p["race_key"] == RK and p["method"] == "int_market_ml_mam")
     led.close()
     assert it["odds_gate"]["pass"], it["odds_gate"]["reasons"]
-    assert not it["formal_probability"] and any("予想した時と今の出走馬が違う" in r for r in it["reasons"])
+    assert not it["formal_probability"] and any("予想に使った入力と今の出走馬が違う" in r for r in it["reasons"])
     assert all(not a["stakes"] for a in it["allocation"].values())
 
 
@@ -1207,7 +1208,8 @@ def test_mam_from_the_same_seven_is_formal(tmp_path, monkeypatch):
     col._save(RK, "odds_win", "1h", "/JRADB/x", "c", win_html(n=N - 1))
     col._save(RK, "odds_trio", "1h", "/JRADB/x", "c", trio_html(n=N - 1))
     col._write_state()
-    _stored_mam(paths, trios_all=_uniform(_combos(N - 1)), complete=True, horses=[{"n": n, "rank": None} for n in range(1, N)])
+    _stored_mam(paths, trios_all=_uniform(_combos(N - 1)), complete=True, horses=[{"n": n, "rank": None} for n in range(1, N)],
+                issued_horses=list(range(1, N)))
     run_live(paths)
     led = Ledger(paths.ledger_path, read_only=True)
     it = next(p for p in led.predictions() if p["race_key"] == RK and p["method"] == "int_market_ml_mam")
@@ -1215,10 +1217,109 @@ def test_mam_from_the_same_seven_is_formal(tmp_path, monkeypatch):
     assert it["odds_gate"]["pass"] and it["formal_probability"] and "mam" in it["inputs_used"]
 
 
-@pytest.mark.parametrize("horses", [None, "1-8", [], [{"rank": 1}], [{"n": None}], [{"n": "1"}], [{"n": True}], [1, 2, 3],
-                                    [{"n": n} for n in [1, 1, 2, 3, 4, 5, 6, 7]], [{"n": n} for n in range(1, 10)]])
-def test_broken_saved_roster_is_reference_not_a_crash(horses):
-    """保存した馬の一覧が壊れていても止まらず、正式にしない。"""
+@pytest.mark.parametrize("issued", [None, "1-8", [], [None], ["1"], [True], [1.0, 2, 3, 4, 5, 6, 7, 8],
+                                    [1, 1, 2, 3, 4, 5, 6, 7], list(range(1, 10)), list(range(1, 8))])
+def test_broken_or_other_issued_roster_is_reference_not_a_crash(issued):
+    """渡した入力の出走馬が分からない・壊れている・違うときは、止まらずに参考表示（正式にしない）。"""
     from keiba.live.wallet import _mam_use
-    use, ok, why = _mam_use({"horses": horses, "trios_all": _uniform(_combos(N)), "complete": True}, list(range(1, N + 1)))
-    assert use and not ok and "出走馬が違う" in why
+    use, ok, why = _mam_use({"issued_horses": issued, "trios_all": _uniform(_combos(N)), "complete": True}, list(range(1, N + 1)))
+    assert use and not ok and ("出走馬が分からない" in why or "出走馬が違う" in why)
+
+
+# ---- みに💚20261125-4（PR #18）の指摘
+def _scratch_eight(col, tp="1h"):
+    col._save(RK, "card", tp, "/JRADB/x", "c", _scratch_card([N]))
+    col._save(RK, "odds_win", tp, "/JRADB/x", "c", win_html(n=N - 1))
+    col._save(RK, "odds_trio", tp, "/JRADB/x", "c", trio_html(n=N - 1))
+    col._write_state()
+
+
+def _int_rows(paths):
+    from keiba.ledger import Ledger
+    led = Ledger(paths.ledger_path, read_only=True)
+    rows = {(p["race_key"], p["time_point"], p["method"]): p for p in led.predictions()}
+    led.close()
+    return rows
+
+
+def test_answer_to_an_eight_horse_packet_accepted_after_a_scratch_is_not_formal(tmp_path, monkeypatch):
+    """重大①：8頭の入力に1〜7の35組だけ答えた予想を、8番取消の取得の後に受け付けても正式にしない。"""
+    from keiba.live.mam import export_packets, import_predictions
+    paths, col = _two_races(tmp_path, monkeypatch)
+    export_packets(paths)                      # まむに渡したのは8頭の入力
+    _scratch_eight(col)                        # その後に8番取消を取得
+    f = tmp_path / "p.json"
+    f.write_text(json.dumps({"schema": "keiba-mam-prediction-v1", "race_key": RK, "time_point": "1h",
+                             "generated_at": "2025-08-30T14:35:00+09:00",
+                             "trios": [{"combo": c, "p": 1 / 35} for c in _combos(N - 1)]}))
+    assert import_predictions(paths, f)["accepted"] == 1
+    run_live(paths)
+    rows = _int_rows(paths)
+    assert rows[(RK, "1h", "text_ai")]["issued_horses"] == list(range(1, N + 1))
+    it = rows[(RK, "1h", "int_market_ml_mam")]
+    assert it["odds_gate"]["pass"] and not it["formal_probability"]
+    assert any("予想に使った入力と今の出走馬が違う" in r for r in it["reasons"])
+    assert all(not a["stakes"] for a in it["allocation"].values())
+
+
+def test_answer_to_a_seven_horse_packet_is_formal(tmp_path, monkeypatch):
+    """正常対照：取消の後に渡した7頭の入力へ、7頭の全組で答えた予想は正式。"""
+    from keiba.live.mam import export_packets, import_predictions
+    paths, col = _two_races(tmp_path, monkeypatch)
+    _scratch_eight(col)
+    export_packets(paths)
+    f = tmp_path / "p.json"
+    f.write_text(json.dumps({"schema": "keiba-mam-prediction-v1", "race_key": RK, "time_point": "1h",
+                             "generated_at": "2025-08-30T14:35:00+09:00",
+                             "trios": [{"combo": c, "p": 1 / 35} for c in _combos(N - 1)]}))
+    assert import_predictions(paths, f)["accepted"] == 1
+    run_live(paths)
+    it = _int_rows(paths)[(RK, "1h", "int_market_ml_mam")]
+    assert it["formal_probability"] and "mam" in it["inputs_used"]
+
+
+@pytest.mark.parametrize("packet", ["missing", "broken", "other_race", "other_time", "duplicate", "text_numbers", "empty"])
+def test_issued_roster_is_unknown_unless_the_packet_matches(tmp_path, monkeypatch, packet):
+    """渡した入力が無い・壊れている・別のレースや時点のものなら、出走馬は分からない（正式にしない）。"""
+    from keiba.live.mam import export_packets, issued_roster, _packet_path
+    paths, _ = _two_races(tmp_path, monkeypatch)
+    export_packets(paths)
+    f = _packet_path(paths, RK, "1h")
+    body = json.loads(f.read_text(encoding="utf-8"))
+    assert issued_roster(paths, RK, "1h") == list(range(1, N + 1))
+    if packet == "missing":
+        f.unlink()
+    elif packet == "broken":
+        f.write_text(f.read_text(encoding="utf-8")[:27], encoding="utf-8")
+    else:
+        change = {"other_race": {"race_key": RK2}, "other_time": {"time_point": "15m"},
+                  "duplicate": {"horses": body["horses"] + body["horses"][:1]},
+                  "text_numbers": {"horses": [dict(h, horse_number=str(h["horse_number"])) for h in body["horses"]]},
+                  "empty": {"horses": []}}[packet]
+        f.write_text(json.dumps({**body, **change}, ensure_ascii=False), encoding="utf-8")
+    assert issued_roster(paths, RK, "1h") is None
+
+
+def test_later_scratch_in_learning_rows_keeps_integration_reference(tmp_path, monkeypatch):
+    """重大②：15分前に分かった取消で学習の出走馬が7頭になったら、8頭の1時間前の統合は正式にしない。"""
+    paths, col = _two_races(tmp_path, monkeypatch)
+    _stored_mam(paths, trios_all=_uniform(_combos(N)), complete=True)
+    from datetime import datetime
+    from keiba.live.collector import JST
+    col.now = lambda: datetime(2025, 8, 30, 15, 20, tzinfo=JST)  # 1時間前の締切（14:40）の後に、15分前の出馬表で取消が分かる
+    _scratch_eight(col, "15m")
+    run_live(paths)
+    rows = _int_rows(paths)
+    for m in ("int_market_ml", "int_market_ml_mam"):
+        it = rows[(RK, "1h", m)]
+        assert it["odds_gate"]["pass"] and not it["formal_probability"], m
+        assert any(r.startswith("学習：") for r in it["reasons"]), m
+        assert all(not a["stakes"] for a in it["allocation"].values()), m
+    assert rows[(RK, "1h", "int_market")]["formal_probability"]  # 市場だけの統合は学習を使わない
+
+
+def test_mass_reason_shows_the_difference():
+    """要修正：合計で外した理由に、1からのずれが見える桁で出す。"""
+    from keiba.live.wallet import _mam_use
+    use, ok, why = _mam_use({"issued_horses": [1, 2, 3, 4], "trios_all": {"1-2-3": 0.5000001, "1-2-4": 0.5000001}}, [1, 2, 3, 4])
+    assert not use and not ok and "1.0000002" in why

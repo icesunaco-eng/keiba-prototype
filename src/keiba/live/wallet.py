@@ -405,22 +405,24 @@ def market_probs(trio_odds: dict) -> dict:
 def _mam_use(mp: dict, roster: list) -> tuple[bool, bool, str | None]:
     """保存済みのまむの予想を統合にどう使うか：(使う, 正式にしてよい, 理由)。
     取り決め（docs/requests/aisu-integration-reply.md）：正式は「同じ時点・同じ出走馬」で全組がそろったときだけ。
-    保存した時の出走馬・全組の印と、今の出走馬（出馬表）の全組の3つで決める。受付は合計1に直して7桁に丸めて保存する。"""
+    同じ出走馬かは、まむに渡した入力の出走馬（issued_horses）と統合の時の出走馬（出馬表）で決める。保存した「全組」の印は使わない。
+    受付は合計1に直して7桁に丸めて保存する。"""
     probs = mp.get("trios_all")
     if probs is None or probs == {}:
         return True, False, "まむ：確率が無い（順位だけ）。正式な確率にしない（参考表示）"
-    now = {"-".join(map(str, c)) for c in combinations(sorted(roster), 3)}
+    combos_now = {"-".join(map(str, c)) for c in combinations(sorted(roster), 3)}
     if not isinstance(probs, dict) or not any(probs.values()) or not all(
-            c in now and type(v) in (int, float) and (v == 0 or 1e-7 <= v <= 1) for c, v in probs.items()):
+            c in combos_now and type(v) in (int, float) and (v == 0 or 1e-7 <= v <= 1) for c, v in probs.items()):
         return False, False, "まむ：保存済みの確率を使えない（数でない・範囲外・今の出走馬にない組）"
-    if abs(sum(probs.values()) - 1) > len(probs) * 5e-8 + 1e-9:
-        return False, False, f"まむ：保存済みの確率の合計が1でない（{sum(probs.values()):.7g}）"
-    saved = mp.get("horses")
-    ok_rows = isinstance(saved, list) and all(isinstance(h, dict) and type(h.get("n")) is int for h in saved)
-    saved = sorted(h["n"] for h in saved) if ok_rows else None
-    if saved != sorted(roster):
-        return True, False, "まむ：予想した時と今の出走馬が違う（同じ出走馬の予想ではないので参考表示）"
-    if not mp.get("complete") or set(probs) != now:
+    total, tolerance = sum(probs.values()), len(probs) * 5e-8 + 1e-9
+    if abs(total - 1) > tolerance:
+        return False, False, f"まむ：保存済みの確率の合計が1でない（合計 {total:.12g}、許す幅は1±{tolerance:.2g}）"
+    issued = mp.get("issued_horses")
+    if not isinstance(issued, list) or any(type(n) is not int for n in issued):
+        return True, False, "まむ：予想に使った入力の出走馬が分からない（古い版の受付・入力が読めない）。参考表示"
+    if sorted(issued) != sorted(roster):
+        return True, False, "まむ：予想に使った入力と今の出走馬が違う（同じ出走馬の予想ではないので参考表示）"
+    if set(probs) != combos_now:
         return True, False, "まむ：全組の確率がそろっていない（足りない組を埋めて正式な確率にはしない。参考表示）"
     return True, True, None
 
@@ -437,6 +439,8 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) ->
     model, cal = models["ml_lgbm"]
     ml = {"-".join(map(str, sorted(nums[i] for i in c))): p
           for c, p in ev.trio_probs(cal.strength(np.asarray(model.score(g), dtype=float)), cal.gamma).items()}
+    roster = [c["horse_number"] for c in inp["card"]]
+    combos_now = {"-".join(map(str, c)) for c in combinations(sorted(roster), 3)}
     for m, w in INT_METHODS.items():
         if (rk, tp, m) in done:
             continue
@@ -452,6 +456,9 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) ->
             reasons.append("市場推定確率：三連複オッズが合格していない（" + " / ".join(gate.get("reasons", [])) + "）")
         if "ml" in w:
             sources["ml"] = ml
+            if set(ml) != combos_now:  # 学習の出走馬は最新の時点の出馬表から作る。後の時点の取消が混ざると組がずれる
+                formal = False
+                reasons.append("学習：予想した出走馬が、この時点の出走馬と違う（後の時点の出馬表が混ざっている。参考表示）")
         if "mam" in w:
             mp = mam_preds.get((rk, tp))
             if mp is None:
@@ -459,7 +466,7 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) ->
                     continue  # 締切まではまむの予想を待つ
                 reasons.append("まむ：締切までに予想が無い")
             else:
-                use, ok, why = _mam_use(mp, [c["horse_number"] for c in inp["card"]])
+                use, ok, why = _mam_use(mp, roster)
                 if use:
                     sources["mam"] = mp.get("trios_all") or {}
                 if not ok:

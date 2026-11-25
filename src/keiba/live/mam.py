@@ -30,6 +30,25 @@ def _state(root: Path) -> dict:
     return json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {"races": {}}
 
 
+def _packet_path(paths, rk: str, tp: str) -> Path:
+    return paths.data_dir / "mam" / "outbox" / f"{rk.replace('|', '_')}_{tp}.json"
+
+
+def issued_roster(paths, rk: str, tp: str) -> list[int] | None:
+    """そのレース・時点でまむに渡した入力（outbox。一度書いたら上書きしない）の出走馬。
+    無い・読めない・別のレースのものは None（予想と出走馬を結び付けられない）。"""
+    try:
+        packet = json.loads(_packet_path(paths, rk, tp).read_text(encoding="utf-8"))
+        if packet.get("race_key") != rk or packet.get("time_point") != tp:
+            return None
+        roster = [h["horse_number"] for h in packet["horses"]]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    if not roster or any(type(n) is not int for n in roster) or len(set(roster)) != len(roster):
+        return None
+    return sorted(roster)
+
+
 def export_packets(paths) -> list[Path]:
     root = paths.data_dir / "live"
     state = _state(root)
@@ -41,7 +60,7 @@ def export_packets(paths) -> list[Path]:
         if tp == "result":
             continue
         r = state["races"][rk]
-        f = out_dir / f"{rk.replace('|', '_')}_{tp}.json"
+        f = _packet_path(paths, rk, tp)
         if f.exists():
             continue
         gate = inp["gate"]
@@ -145,6 +164,8 @@ def import_predictions(paths, file: Path) -> dict:
             "trios": [{"combo": c, "p": round(probs[c], 6) if c in probs else None} for c in ranked[:20]],
             "trios_all": {c: round(p, 7) for c, p in probs.items()},
             "complete": bool(probs) and set(probs) == {"-".join(map(str, c)) for c in combinations(sorted(nums), 3)},
+            # 予想を作った時にまむが見ていた出走馬（渡した入力）。統合で正式にするかは、これと統合の時の出走馬で決める
+            "issued_horses": issued_roster(paths, rk, tp),
             "confidence": pred.get("confidence", "Z"),
             "allocation": {a: (lambda x: {"status": x.status if gate.get("pass") else "not_allocated_gate", "stakes": x.stakes,
                                           "total": x.total})(allocate(probs, odds, a, calibrated=calibrated)) for a in ALLOC_METHODS},
