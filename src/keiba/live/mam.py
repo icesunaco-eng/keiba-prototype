@@ -60,7 +60,7 @@ def export_packets(paths) -> list[Path]:
         if tp == "result":
             continue
         r = state["races"][rk]
-        f = _packet_path(paths, rk, tp)
+        f = out_dir / f"{rk.replace('|', '_')}_{tp}.json"  # issued_roster（_packet_path）と同じ名前
         if f.exists():
             continue
         gate = inp["gate"]
