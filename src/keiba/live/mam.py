@@ -240,7 +240,8 @@ def _make(root: Path, state: dict, snaps, rk: str, tp: str, held: dict | None = 
 def _recheck(root: Path, rk: str, tp: str, dl: datetime, sig: tuple, clock):
     """置く直前の確かめ直し（_publish_once の check）。最新の状態（state.json）と保存したページの記録を読み直し、
     締切を過ぎた・発走時刻（締切）やその時点のページが変わった・レースが消えた、なら _Stale を上げる。
-    clock が None（手の mam export）なら締切は問わず、変わった・消えただけを見る（入力の締切の欄と中身を最新の状態に合わせる）。"""
+    clock が None（手の mam export）なら締切は問わない。sig が None（手の mam export）ならページの変化は見ず、
+    発走時刻（締切）の変化とレースが消えたかだけを見る（入力の締切の欄を最新に合わせる。中身はそのときあるページのまま）。"""
     def check():
         r = _state(root).get("races", {}).get(rk)
         try:
@@ -251,6 +252,8 @@ def _recheck(root: Path, rk: str, tp: str, dl: datetime, sig: tuple, clock):
             raise _Stale("late")
         if now_dl != dl:
             raise _Stale("changed")
+        if sig is None:
+            return
         snaps = _snapshots(root)
         s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
         rows = _material(s, r, tp)
@@ -286,7 +289,7 @@ def export_packets(paths, now=None, only: set | None = None, held: dict | None =
     now を渡すと、締切を過ぎた時点は置かない（見回りはいつも渡す）。now に今の時刻を返す関数（Collector.now）を渡すと、
     正式な名前に置く直前ごとに、最新の状態（state.json・保存したページの記録）から締切とその時点のページを確かめ直す。
     締切を過ぎていれば置かず、発走時刻やページが変わっていれば新しい状態で作り直す（別の見回りが重なっても古い締切で置かない）。
-    手で動かす mam export（now なし）も、締切は問わずに、発走時刻・ページが変わっていれば作り直す（入力の締切の欄を最新に合わせる）。
+    手で動かす mam export（now なし）は、締切は問わず、そのときあるページで置く。発走時刻が変わっていれば作り直す（入力の締切の欄を最新に合わせる）。
     only を渡すと、その時点（レース×時点）だけを、その時点の入力に使うページ（_material）だけ読んで置く。
     1つの時点のページが読めなくても、ほかの時点は置く。held に辞書を渡すと、入力を作れなかった時点と理由を入れる。
     手で動かす mam export は now を渡さない（締切を問わず置いて復旧できる）。"""
@@ -314,14 +317,16 @@ def export_packets(paths, now=None, only: set | None = None, held: dict | None =
             else:
                 r = state["races"][rk]
                 dl = deadline(r["race_date"], r["post_time"], tp)
-                s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
-                rows = _material(s, r, tp)
-                sig = _signature(snaps, rows) if rows is not None else ()
+                sig = None   # 手の mam export：ページの変化は見ない（そのときあるページで置く）
+                if clock is not None:
+                    s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
+                    rows = _material(s, r, tp)
+                    sig = _signature(snaps, rows) if rows is not None else ()
             if clock is not None and clock() >= dl:
                 break   # 締切を過ぎた時点は置かない（まむが答えても受け付けない）
             if _packet_path(paths, rk, tp).exists():   # 置く場所・受付で読む場所と同じ名前
                 break
-            try:   # 置く直前に確かめ直す（手の mam export も、締切は問わずに発走時刻・ページの変化だけ見る）
+            try:   # 置く直前に確かめ直す（手の mam export は、締切は問わずに発走時刻の変化とレースが消えたかだけ見る）
                 placed = _publish_once(paths, rk, tp, _packet_text(rk, tp, r, dl, inp), check=_recheck(root, rk, tp, dl, sig, clock))
             except _Stale as stale:
                 if stale.reason != "changed":

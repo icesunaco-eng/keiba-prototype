@@ -446,3 +446,26 @@ def test_manual_export_uses_the_latest_post_time_when_it_changes_meanwhile(tmp_p
     packet = json.loads(mam._packet_path(paths, RK, TP).read_text())
     assert packet["deadline"].endswith("T14:45+09:00") and packet["race"]["post_time"] == "15:45"
     _no_leftovers(paths)
+
+
+def test_manual_export_keeps_the_pages_it_read_when_only_pages_change(tmp_path):
+    """手の mam export は、そのときあるページで置く。置く前に別の見回りがページを取り直しても作り直さない（先に作った完全な入力を置く）。"""
+    paths = _paths(tmp_path)
+    _pages_saved_unplaced(paths)
+    first_card = next(json.loads(x)["sha256"] for x in (tmp_path / "live" / "snapshots.jsonl").read_text().splitlines()
+                      if json.loads(x)["kind"] == "card")
+    real = mam._write_complete
+    started = []
+
+    def write(path, text):
+        real(path, text)
+        if not started:
+            started.append(1)
+            REAL_COLLECTOR(tmp_path / "live", client=_client(), now=lambda: AT.replace(minute=35))._save(
+                RK, "card", TP, "/sample", "card-again", card_html(IDS) + "<!-- 取り直し -->")
+
+    with patch.object(mam, "_write_complete", write), redirect_stdout(io.StringIO()):
+        cli.cmd_mam(paths, SimpleNamespace(action="export"))
+    packet = json.loads(mam._packet_path(paths, RK, TP).read_text())
+    assert packet["source_snapshots"][0] == first_card and packet["deadline"].endswith("T14:40+09:00")
+    _no_leftovers(paths)
