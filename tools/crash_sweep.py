@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import multiprocessing
 import json
 import shutil
 import sys
@@ -63,7 +64,9 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--out", type=Path)
+    ap.add_argument("--shard", default="1/1", help="i/n：止める点を n 個に分けた i 番目だけ流す（CI で並べる）")
     a = ap.parse_args(argv)
+    shard, shards = (int(x) for x in a.shard.split("/"))
     from tests.crash_harness import run_day, invariants
     work = Path(tempfile.mkdtemp(prefix="crash-sweep-"))
     try:
@@ -74,12 +77,18 @@ def main(argv=None) -> int:
         assert base == _plain(invariants(trained)), "控えの有無で1日の結果が変わった"
         pkl = [i + 1 for i, x in enumerate(trained.log) if ".pkl" in x]   # モデルの控えを書く点（控え無しで止める）
         from tests.crash_harness import TICKS
-        with ProcessPoolExecutor(a.jobs) as pool:
+        # 子は spawn で作る：親が LightGBM（OpenMP）を動かしたあとに fork すると、子が止まったまま動かないことがある（Linux）
+        with ProcessPoolExecutor(a.jobs, mp_context=multiprocessing.get_context("spawn")) as pool:
             skips = dict(pool.map(_skip, [(hm, models, str(work)) for hm in TICKS]))
             todo = [(k, w, base, skips, models, str(work)) for k in range(1, base_day.writes + 1)
                     for w in ("before", "after")] + [(k, w, base, skips, "", str(work)) for k in pkl
                                                       for w in ("before", "after")]
-            results = sorted(pool.map(_one, todo), key=lambda r: (r["k"], r["when"]))
+            todo = [x for i, x in enumerate(todo) if i % shards == shard - 1]
+            results = []
+            for r in pool.map(_one, todo):   # 1点ごとに進み具合を出す（止まったときにどこか分かるように）
+                results.append(r)
+                print(f"[{len(results)}/{len(todo)}] {r['k']} {r['when']} {'崩れた' if judge([r]) else 'ok'}", flush=True)
+            results.sort(key=lambda r: (r["k"], r["when"]))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     broken = judge(results)

@@ -17,16 +17,21 @@ jobs:
   # 崩れた点があれば落ちる。結果の一覧は crash-sweep.json として残す（tools/crash_sweep.py）
   crash-sweep:
     runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -e '.[test]'
-      - run: python tools/crash_sweep.py --jobs 4 --out crash-sweep.json
+      - run: python tools/crash_sweep.py --jobs 4 --shard ${{ matrix.shard }}/4 --out crash-sweep-${{ matrix.shard }}.json
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: crash-sweep
-          path: crash-sweep.json
+          name: crash-sweep-${{ matrix.shard }}
+          path: crash-sweep-${{ matrix.shard }}.json
           if-no-files-found: ignore
