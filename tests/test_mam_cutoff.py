@@ -233,8 +233,9 @@ def test_counting_time_is_recorded(tmp_path):
     clock[0] = AT.replace(minute=31)   # 新しいページの無い回（12R の窓は 14:33 から）
     with patch.object(mam, "unplaced", slow):
         out = _tick(paths, clock, another=True)
-    assert out["saved"] == 0 and out["mam_packets"] == 1
-    assert out["mam_check_seconds"] >= 0.05 and out["mam_retry_seconds"] >= out["mam_check_seconds"]
+    assert out["saved"] == 0 and out["mam_packets"] == 1 and out["mam_check_seconds"] >= 0.05
+    if "live" not in out:   # 置き直しの回（予想を流さなかった回。PR #15 と合わせた版は前の回の失敗で予想を流し直す）
+        assert out["mam_retry_seconds"] >= out["mam_check_seconds"]
     clock[0] = AT.replace(minute=32)
     out = _tick(paths, clock, another=True)                         # 置くものが無い回も、数えた時間は残る
     assert "mam_check_seconds" in out and "mam_retry_seconds" not in out and out.get("mam_packets", 0) == 0
@@ -258,3 +259,15 @@ def test_due_time_point_whose_own_page_is_unreadable_is_shown_and_retried(tmp_pa
     out = _tick(paths, [AT.replace(minute=37)])
     assert out["mam_packets"] == 1 and "mam_held" not in out
     _placed_once(paths)
+
+
+def test_tick_with_new_pages_always_reaches_the_export_step(tmp_path):
+    """新しいページを取って予想・精算を流した回は、置くものが無くても書き出しを呼ぶ（予想・精算の後の書き出しの位置を変えない。
+    書き出しは置けていない時点が無ければ何も読まずに戻る）。"""
+    paths = _paths(tmp_path)
+    calls = []
+    with patch.object(mam, "unplaced", lambda *a, **k: set()), \
+         patch.object(mam, "export_packets", lambda p, **k: calls.append(k.get("only")) or []):
+        out = _tick(paths, [AT])
+    assert out["saved"] == 3 and out["mam_packets"] == 0 and calls == [set()]
+    assert mam.export_packets(paths, now=AT, only=set()) == []

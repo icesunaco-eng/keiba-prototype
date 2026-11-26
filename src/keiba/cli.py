@@ -143,10 +143,9 @@ def _due(paths, col, out: dict):
 
 def _place(paths, col, due, out: dict) -> int:
     """置けていない時点だけを、その時点のページだけ読んで置く。now に時計（col.now）を渡し、正式な名前に置く直前にも締切を見直す。
+    置くものが無くても書き出しは呼ぶ（中身を読まずにすぐ戻る。予想・精算の後の書き出しの位置を変えない）。
     入力を作れなかった時点と理由は mam_held に出す（締切までは毎回やり直す）。"""
     from .live.mam import export_packets
-    if due == set():
-        return 0
     held = {}
     try:
         return len(export_packets(paths, now=col.now, only=due, held=held))

@@ -201,6 +201,8 @@ def export_packets(paths, now=None, only: set | None = None, held: dict | None =
     only を渡すと、その時点（レース×時点）だけを、その時点の入力に使うページ（_material）だけ読んで置く。
     1つの時点のページが読めなくても、ほかの時点は置く。held に辞書を渡すと、only のうち入力を作れなかった時点と理由を入れる。
     手で動かす mam export は now を渡さない（締切を問わず置いて復旧できる）。"""
+    if only is not None and not only:
+        return []   # 置けていない時点が無い：ページも記録も読まない
     clock = now if callable(now) else (lambda: now) if now is not None else None
     root = paths.data_dir / "live"
     state = _state(root)
