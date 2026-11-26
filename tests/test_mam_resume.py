@@ -145,10 +145,10 @@ def test_page_unreadable_for_one_tick_is_placed_by_a_later_quiet_tick(tmp_path):
     """ページを一時的に読めず、その回は0件で「成功」しても、置かれるまで次の回にやり直す（💚20261125-22 要修正②）。"""
     paths = _paths(tmp_path)
     real = mam.live_tables
-    with patch.object(mam, "live_tables", lambda root, state, snaps: (None, None, {})):   # 出馬表を読めず、入力が作れない
+    with patch.object(mam, "live_tables", lambda root, state, snaps, **k: (None, None, {})):   # 出馬表を読めず、入力が作れない
         out, _ = _tick(paths, AT)
     assert out["saved"] == 3 and out["mam_packets"] == 0 and not mam._packet_path(paths, RK, TP).exists()
-    with patch.object(mam, "live_tables", lambda root, state, snaps: (None, None, {})):
+    with patch.object(mam, "live_tables", lambda root, state, snaps, **k: (None, None, {})):
         out, _ = _tick(paths, AT.replace(minute=33))   # まだ読めない回も、収集は続け、置けていないことを覚えておく
     assert out["saved"] == 0 and out["mam_packets"] == 0
     assert mam.live_tables is real
@@ -161,11 +161,11 @@ def test_outbox_unusable_for_a_while_is_placed_after_it_recovers(tmp_path):
     """まむの置き場だけが一時的に使えなくても、収集は続け、使えるようになった回に置く（💚20261125-22 要修正③）。"""
     paths = _paths(tmp_path)
 
-    def eio(*_):
+    def eio(*_a, **_k):
         raise OSError(errno.EIO, "置き場が一時的に使えない")
     with patch.object(mam, "_publish_once", eio):
         out, told = _tick(paths, AT)
-        assert out["saved"] == 3 and "mam_error" in out and told >= 1   # ページは保存し、知らせる
+        assert out["saved"] == 3 and "OSError" in out["mam_error"] and told >= 1   # ページは保存し、知らせる
         out, told = _tick(paths, AT.replace(minute=35))
         assert out["saved"] == 0 and "mam_error" in out and told == 1
     out, told = _tick(paths, AT.replace(minute=39))   # 戻った回（締切 14:40 の前）

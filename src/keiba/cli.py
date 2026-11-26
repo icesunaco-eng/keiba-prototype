@@ -127,25 +127,48 @@ def cmd_review(paths, args):
     print(f"月次の振り返り → {write_review(paths, month)}")
 
 
+def _due(paths, col, out: dict):
+    """締切前なのに置けていない時点（mam.unplaced）。調べられなければ None（締切前の全部を対象にする）。
+    数えるのにかかった時間を mam_check_seconds に残す（ページは読まない。締切の残るレースの記録だけ見る）。"""
+    import time
+    from .live.mam import unplaced
+    start = time.monotonic()
+    try:
+        return unplaced(paths, col.now())
+    except Exception:
+        return None   # 調べられない（置き場の権限など）：締切前の全部を対象に書き出しを試し、失敗を知らせる
+    finally:
+        out["mam_check_seconds"] = round(time.monotonic() - start, 2)
+
+
+def _place(paths, col, due, out: dict) -> int:
+    """置けていない時点だけを、その時点のページだけ読んで置く。now に時計（col.now）を渡し、正式な名前に置く直前にも締切を見直す。
+    入力を作れなかった時点と理由は mam_held に出す（締切までは毎回やり直す）。"""
+    from .live.mam import export_packets
+    if due == set():
+        return 0
+    held = {}
+    try:
+        return len(export_packets(paths, now=col.now, only=due, held=held))
+    finally:
+        if held:
+            out["mam_held"] = {k: v[:120] for k, v in held.items()}
+
+
 def _republish(paths, col, out: dict):
     """この回は書き出していない（新しいページが無い・予想が失敗した）が、締切前なのに置けていない入力があれば、その時点だけ置く。
     前の回が途中で止まった・置き場やページが一時的に使えなかった・見回りが重なった、のどれでも、置けるまで毎回見る。"""
     import time
-    from .live.mam import export_packets, unplaced
-    now = col.now()
-    try:
-        due = unplaced(paths, now)
-    except Exception:
-        due = None   # 調べられない（置き場の権限など）：締切前の全部を対象に書き出しを試し、失敗を知らせる
+    start = time.monotonic()
+    due = _due(paths, col, out)
     if due == set():
         return
-    start = time.monotonic()
     try:
-        out["mam_packets"] = len(export_packets(paths, now=now, only=due))
+        out["mam_packets"] = _place(paths, col, due, out)
     except Exception as exc:  # 収集は止めない。次の回にまたやり直す
         out["mam_error"] = repr(exc)
         _notify("まむへの入力を置けない", repr(exc)[:120])
-    out["mam_retry_seconds"] = round(time.monotonic() - start, 2)   # 置き直しにかかった時間（入力を作れない時点の読み直しも含む）
+    out["mam_retry_seconds"] = round(time.monotonic() - start, 2)   # 置き直しにかかった時間（数える時間・入力を作れない時点の読み直しも含む）
 
 
 def cmd_collect(paths, args):
@@ -158,8 +181,7 @@ def cmd_collect(paths, args):
             from .live.wallet import run_live
             try:
                 out["live"] = run_live(paths)
-                from .live.mam import export_packets
-                out["mam_packets"] = len(export_packets(paths, now=col.now()))   # 締切を過ぎた時点は置かない
+                out["mam_packets"] = _place(paths, col, _due(paths, col, out), out)   # 締切前で置けていない時点だけ。締切を過ぎた時点は置かない
                 if out["live"].get("settled"):
                     from datetime import date
                     from .review import write_review
