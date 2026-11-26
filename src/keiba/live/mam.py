@@ -70,10 +70,21 @@ def _write_complete(tmp: Path, text: str) -> None:
         os.fsync(fh.fileno())
 
 
-def _publish_once(paths, rk: str, tp: str, text: str, cutoff: datetime | None = None, clock=None) -> Path | None:
+class _Stale(Exception):
+    """置く直前に最新の状態で確かめ直したら、その入力はもう置けない。reason：late（締切を過ぎた）・changed（発走時刻や
+    その時点のページが変わった。新しい状態で作り直す）・gone（レースや発走時刻が状態から消えた）。"""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _publish_once(paths, rk: str, tp: str, text: str, cutoff: datetime | None = None, clock=None, check=None) -> Path | None:
     """入力の束を、書き終えた形で一度だけ outbox に置く。同じ名前がもうあれば置かず None を返す。
-    cutoff と clock（今の時刻を返す関数）を渡すと、正式な名前に置く直前に毎回時計を見直し、締切を過ぎていれば置かず None を返す
-    （見回りの書き出しの途中で締切をまたいでも、締切後の入力を置かない。見直しと置く操作のあいだは、リンク1回分だけ残る）。
+    cutoff と clock（今の時刻を返す関数）を渡すと、正式な名前に置く直前に毎回時計を見直し、締切を過ぎていれば置かず None を返す。
+    check（引数なしの関数）を渡すと、正式な名前に置く直前ごとに呼ぶ。置けないなら check が _Stale を上げ、置かずにそのまま上げる
+    （見回りは最新の状態から締切とページを確かめ直す。別の見回りが発走時刻を変えても、古い締切の入力を置かない）。
+    確かめ直しと置く操作のあいだは、リンク1回分だけ残る。
     書き出しが同時に2つ走っても（見回りと手動の mam export など）、先に置いた入力は入れ替わらない。
     まむが読んだ入力と、受付で確かめる入力（issued_roster）を同じものにするため。
     正式な名前に現れるのは、いつも書き終えた入力だけ（書く途中で止まっても、正式な名前には何も残らず、次の回に置き直せる）。
@@ -86,7 +97,9 @@ def _publish_once(paths, rk: str, tp: str, text: str, cutoff: datetime | None = 
     tag = f"{path.stem}.{os.getpid()}.{uuid.uuid4().hex}.part"
     tmp = stage / tag
     near = path.parent / f".{tag}"
-    def late() -> bool:   # 置く直前の締切の見直し（見回りだけ。手の mam export は締切を問わない）
+    def late() -> bool:   # 置く直前の確かめ直し（見回りだけ。手の mam export は締切を問わない）
+        if check is not None:
+            check()   # 置けないなら _Stale を上げる（書きかけは finally で消す）
         return cutoff is not None and clock is not None and clock() >= cutoff
 
     try:
@@ -194,12 +207,86 @@ def unplaced(paths, now: datetime) -> set[tuple[str, str]]:
     return due
 
 
+def _signature(snaps, rows) -> tuple:
+    """その時点の入力に使うページの組（_material の行）を、索引の行番号ではなく中身（場所・ハッシュ）で表す。"""
+    return tuple(sorted({(str(snaps.at[i, "path"]), str(snaps.at[i, "sha256"])) for i in rows}))   # 出馬表がその時点の記録にも入るので重ねない
+
+
+def _make(root: Path, state: dict, snaps, rk: str, tp: str, held: dict | None = None):
+    """(rk, tp) の入力を、その時点の入力に使うページ（_material）だけ読んで作る。live_tables もその時点だけ作る。
+    作れなければ None（held に辞書を渡すと、ページが読めない・出馬表が使えない等の理由を入れる）。
+    返す値：(レース, 締切, ページの組, 入力)。"""
+    r = state.get("races", {}).get(rk)
+    if not r:
+        return None
+    s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
+    try:
+        dl = deadline(r["race_date"], r["post_time"], tp)
+        rows = _material(s, r, tp)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if rows is None:
+        return None
+    rows = sorted(set(rows))
+    why = {}
+    _, _, got = live_tables(root, dict(state, races={rk: r}), snaps.loc[rows], held=why, tps=(tp,))
+    if (rk, tp) not in got:
+        if held is not None:   # ページが読めない・出馬表が使えない・枠順の確定前など。見回りの結果に出す
+            held[f"{rk}|{tp}"] = why.get(f"{rk}|{tp}") or why.get(rk) or "入力を作れない（枠順の確定前など）"
+        return None
+    return r, dl, _signature(snaps, rows), got[(rk, tp)]
+
+
+def _recheck(root: Path, rk: str, tp: str, dl: datetime, sig: tuple, clock):
+    """置く直前の確かめ直し（_publish_once の check）。最新の状態（state.json）と保存したページの記録を読み直し、
+    締切を過ぎた・発走時刻（締切）やその時点のページが変わった・レースが消えた、なら _Stale を上げる。"""
+    def check():
+        r = _state(root).get("races", {}).get(rk)
+        try:
+            now_dl = deadline(r["race_date"], r["post_time"], tp)
+        except (KeyError, TypeError, ValueError):
+            raise _Stale("gone")
+        if clock() >= now_dl:
+            raise _Stale("late")
+        if now_dl != dl:
+            raise _Stale("changed")
+        snaps = _snapshots(root)
+        s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
+        rows = _material(s, r, tp)
+        if rows is None or _signature(snaps, rows) != sig:
+            raise _Stale("changed")
+    return check
+
+
+def _packet_text(rk: str, tp: str, r: dict, dl: datetime, inp: dict) -> str:
+    gate = inp["gate"]
+    packet = {
+        "schema": SCHEMA_IN, "race_key": rk, "time_point": tp,
+        "deadline": dl.isoformat(timespec="minutes"),
+        "race": {k: r.get(k) for k in ("race_date", "venue", "race_number", "post_time", "surface", "distance_m", "field_size", "race_name")},
+        "scratched_known": inp["scratched"],
+        "horses": [{k: c.get(k) for k in ("horse_number", "waku", "horse_name", "sex", "age", "weight_carried",
+                                          "jockey_name", "trainer_name", "sire", "dam", "damsire", "past_runs")}
+                   for c in inp["card"]],
+        "win_odds": inp["win"]["odds"] if inp["win"]["ok"] else None,
+        "trio_odds": inp["trio"]["odds"] if gate.get("pass") else None,
+        "odds_time": gate.get("odds_time") if gate.get("pass") else None,
+        "source_snapshots": inp["snapshots"],
+        "note": "締切までに分かっていた情報だけ。予想は締切までに返すこと（形は mam-format.md）",
+    }
+    return json.dumps(packet, ensure_ascii=False, indent=1)
+
+
+REMAKE_LIMIT = 3   # 置く直前に変わっていたら作り直す回数の上限（変わり続けるときに止まらないように）
+
+
 def export_packets(paths, now=None, only: set | None = None, held: dict | None = None) -> list[Path]:
     """まだ置いていない入力を置く。
     now を渡すと、締切を過ぎた時点は置かない（見回りはいつも渡す）。now に今の時刻を返す関数（Collector.now）を渡すと、
-    選ぶときに加えて、正式な名前に置く直前にも時計を見直す（書き出しの途中で締切をまたいだ時点は置かない）。
+    正式な名前に置く直前ごとに、最新の状態（state.json・保存したページの記録）から締切とその時点のページを確かめ直す。
+    締切を過ぎていれば置かず、発走時刻やページが変わっていれば新しい状態で作り直す（別の見回りが重なっても古い締切で置かない）。
     only を渡すと、その時点（レース×時点）だけを、その時点の入力に使うページ（_material）だけ読んで置く。
-    1つの時点のページが読めなくても、ほかの時点は置く。held に辞書を渡すと、only のうち入力を作れなかった時点と理由を入れる。
+    1つの時点のページが読めなくても、ほかの時点は置く。held に辞書を渡すと、入力を作れなかった時点と理由を入れる。
     手で動かす mam export は now を渡さない（締切を問わず置いて復旧できる）。"""
     if only is not None and not only:
         return []   # 置けていない時点が無い：ページも記録も読まない
@@ -207,59 +294,45 @@ def export_packets(paths, now=None, only: set | None = None, held: dict | None =
     root = paths.data_dir / "live"
     state = _state(root)
     snaps = _snapshots(root)
-    if only is None:
+    if only is None:   # 手の mam export（と、置けていない時点を数えられなかった見回り）：全部を読む
         _, _, inputs = live_tables(root, state, snaps)
+        todo = [(rk, tp, inputs[(rk, tp)]) for rk, tp in sorted(inputs) if tp != "result"]
     else:
-        inputs = {}
-        for rk, tp in sorted(only):
-            r = state.get("races", {}).get(rk)
-            if not r:
-                continue
-            s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
-            try:
-                rows = _material(s, r, tp)
-            except (KeyError, TypeError, ValueError):
-                continue
-            if rows is None:
-                continue
-            why = {}
-            _, _, got = live_tables(root, dict(state, races={rk: r}), snaps.loc[sorted(set(rows))], held=why)
-            if (rk, tp) in got:
-                inputs[(rk, tp)] = got[(rk, tp)]
-            elif held is not None:   # ページが読めない・出馬表が使えない・枠順の確定前など。見回りの結果に出す
-                held[f"{rk}|{tp}"] = why.get(f"{rk}|{tp}") or why.get(rk) or "入力を作れない（枠順の確定前など）"
+        todo = [(rk, tp, None) for rk, tp in sorted(only)]
     out_dir = paths.data_dir / "mam" / "outbox"
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
-    for (rk, tp), inp in sorted(inputs.items()):
-        if tp == "result" or (only is not None and (rk, tp) not in only):
-            continue
-        r = state["races"][rk]
-        dl = deadline(r["race_date"], r["post_time"], tp)
-        if clock is not None and clock() >= dl:
-            continue   # 締切を過ぎた時点は置かない（まむが答えても受け付けない）
-        f = _packet_path(paths, rk, tp)   # 置く場所・受付で読む場所と同じ名前
-        if f.exists():
-            continue
-        gate = inp["gate"]
-        packet = {
-            "schema": SCHEMA_IN, "race_key": rk, "time_point": tp,
-            "deadline": dl.isoformat(timespec="minutes"),
-            "race": {k: r.get(k) for k in ("race_date", "venue", "race_number", "post_time", "surface", "distance_m", "field_size", "race_name")},
-            "scratched_known": inp["scratched"],
-            "horses": [{k: c.get(k) for k in ("horse_number", "waku", "horse_name", "sex", "age", "weight_carried",
-                                              "jockey_name", "trainer_name", "sire", "dam", "damsire", "past_runs")}
-                       for c in inp["card"]],
-            "win_odds": inp["win"]["odds"] if inp["win"]["ok"] else None,
-            "trio_odds": inp["trio"]["odds"] if gate.get("pass") else None,
-            "odds_time": gate.get("odds_time") if gate.get("pass") else None,
-            "source_snapshots": inp["snapshots"],
-            "note": "締切までに分かっていた情報だけ。予想は締切までに返すこと（形は mam-format.md）",
-        }
-        placed = _publish_once(paths, rk, tp, json.dumps(packet, ensure_ascii=False, indent=1), cutoff=dl, clock=clock)
-        if placed is None:
-            continue   # 同時に動いた別の書き出しが先に置いた・置く直前に締切を過ぎた
-        written.append(placed)
+    for rk, tp, inp in todo:
+        for _ in range(REMAKE_LIMIT):
+            if inp is None:
+                made = _make(root, state, snaps, rk, tp, held)
+                if made is None:
+                    break
+                r, dl, sig, inp = made
+            else:
+                r = state["races"][rk]
+                dl = deadline(r["race_date"], r["post_time"], tp)
+                sig = None
+                if clock is not None:
+                    s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
+                    rows = _material(s, r, tp)
+                    sig = _signature(snaps, rows) if rows is not None else ()
+            if clock is not None and clock() >= dl:
+                break   # 締切を過ぎた時点は置かない（まむが答えても受け付けない）
+            if _packet_path(paths, rk, tp).exists():   # 置く場所・受付で読む場所と同じ名前
+                break
+            check = _recheck(root, rk, tp, dl, sig, clock) if clock is not None else None
+            try:
+                extra = {"check": check} if check is not None else {}   # 手の mam export は前と同じ呼び方
+                placed = _publish_once(paths, rk, tp, _packet_text(rk, tp, r, dl, inp), **extra)
+            except _Stale as stale:
+                if stale.reason != "changed":
+                    break   # 締切を過ぎた・レースが消えた
+                state, snaps, inp = _state(root), _snapshots(root), None   # 新しい状態で作り直す
+                continue
+            if placed is not None:   # None：同時に動いた別の書き出しが先に置いた
+                written.append(placed)
+            break
     return written
 
 

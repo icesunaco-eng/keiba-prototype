@@ -167,9 +167,11 @@ def _write_held(root: Path, held: dict):
         pass
 
 
-def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None = None,
+                tps: tuple = ("24h", "1h", "15m")) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """集めたページから、正規の表と同じ形の races / runners と、時点ごとの入力を作る。
-    held に辞書を渡すと、読み取りで保留にしたレースと理由を入れて返す（ファイルには書かない）。"""
+    held に辞書を渡すと、読み取りで保留にしたレースと理由を入れて返す（ファイルには書かない）。
+    tps：入力を作る時点（ふだんは3つとも。まむへの1つの時点の書き出しは、その時点だけ）。"""
     races, runners, inputs = [], [], {}
     held = {} if held is None else held
     for rk, r in state.get("races", {}).items():
@@ -179,7 +181,7 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                       "field_size": r.get("field_size"), "attr_source": "jra_live",
                       "race_type": "障害候補" if r.get("surface") == "障害" else "平地候補"})
         try:  # 1レースの読み取りの失敗で、ほかのレースを止めない（そのレースだけ保留にして理由を残す）
-            for tp in ("24h", "1h", "15m"):
+            for tp in tps:   # まむへの1つの時点の書き出しは、その時点だけ作る（ほかの時点の出馬表を読み直さない）
                 if not r.get("post_time"):
                     continue
                 dl = deadline(r["race_date"], r["post_time"], tp)

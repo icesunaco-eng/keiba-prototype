@@ -21,6 +21,7 @@ from tests.test_live_wallet import card_html, trio_html, win_html
 from tests.test_mam_resume import AT, RK, TP, _client, _no_links, _paths, _placed_once
 
 R12 = "2025-08-30|京都|12"
+REAL_COLLECTOR = collector.Collector   # 見回りの中から別の見回りを動かすとき、差し替え中の代役ではなく本物を使う
 DL11 = AT.replace(minute=40)   # 11R の1時間前の締切（12R は 14:48）
 IDS = [f"{n:010}" for n in range(8)]
 
@@ -271,3 +272,143 @@ def test_tick_with_new_pages_always_reaches_the_export_step(tmp_path):
         out = _tick(paths, [AT])
     assert out["saved"] == 3 and out["mam_packets"] == 0 and calls == [set()]
     assert mam.export_packets(paths, now=AT, only=set()) == []
+
+
+# ---- 💚20261126-3：別の見回りが、置く前に発走時刻・ページを変える ----
+
+def _moved_client(post):
+    """発走時刻だけを変えた合成のページ（11R）。"""
+    client = _client()
+    load = client.pages
+    client.pages = lambda tag: load(tag).replace("15時40分", f"{post[:2]}時{post[3:]}分") if tag.startswith("pw01drl") else load(tag)
+    return client
+
+
+def _other_tick(paths, when, post):
+    """同じ置き場で、別の見回りを1回動かす（発走時刻を post に変えた一覧を読む）。"""
+    real = REAL_COLLECTOR
+    refresh = real.refresh
+    buf = io.StringIO()
+    with patch.object(collector, "Collector", side_effect=lambda root: real(root, client=_moved_client(post), now=lambda: when)), \
+         patch.object(real, "refresh", lambda self, force=False: refresh(self, force=True)), \
+         patch.object(wallet, "run_live", return_value={"settled": 0}), patch.object(cli, "_notify"), redirect_stdout(buf):
+        cli.cmd_collect(paths, SimpleNamespace(action="tick"))
+    return json.loads(buf.getvalue().splitlines()[-1])
+
+
+def _tick_interrupted_by(paths, start, resume, between):
+    """start に始めた見回りが 11R の入力を書き終えた所で止まり、その間に between() が動き、resume に再開する。"""
+    clock = [start]
+    real = mam._write_complete
+    seen, started = [], []
+
+    def write(path, text):
+        real(path, text)
+        if not started and json.loads(text)["race_key"] == RK:   # 1回だけ（間に動く見回りの書き出しでは止めない）
+            started.append(1)
+            seen.append(between())
+            clock[0] = resume
+
+    with patch.object(mam, "_write_complete", write):
+        out = _tick(paths, clock)
+    return out, seen
+
+
+def _pages_saved_unplaced(paths):
+    """14:30 に 11R のページを保存したが、入力は置けずに終わった状態。"""
+    def eio(*_a, **_k):
+        raise OSError(errno.EIO, "置き場が一時的に使えない")
+    with patch.object(mam, "_publish_once", eio):
+        assert _tick(paths, [AT])["saved"] == 3
+    assert not mam._packet_path(paths, RK, TP).exists()
+
+
+def test_post_time_moved_earlier_by_another_tick_is_not_placed_with_the_old_deadline(tmp_path):
+    """14:33 の見回りが 11R の入力を書き終えた後、14:38 の別の見回りが発走を 15:37（締切 14:37）に繰り上げて保存した。
+    再開した先の見回りは、最新の締切（14:37）を過ぎているので置かない（古い締切 14:40 の入力を置かない）。"""
+    paths = _paths(tmp_path)
+    _pages_saved_unplaced(paths)
+    out, seen = _tick_interrupted_by(paths, AT.replace(minute=33), AT.replace(minute=38),
+                                     lambda: _other_tick(paths, AT.replace(minute=38), "15:37"))
+    assert seen[0].get("mam_packets", 0) == 0                          # 別の見回りは締切後なので置かない
+    assert json.loads((tmp_path / "live" / "state.json").read_text())["races"][RK]["post_time"] == "15:37"
+    assert out["mam_packets"] == 0 and not mam._packet_path(paths, RK, TP).exists()
+    _no_leftovers(paths)
+
+
+@pytest.mark.parametrize("other_places", [True, False], ids=["other-tick-places", "other-tick-cannot-place"])
+def test_post_time_moved_later_by_another_tick_is_placed_with_the_new_deadline(tmp_path, other_places):
+    """別の見回りが発走を 15:45（締切 14:45）に繰り下げたら、置かれる入力は新しい締切のもの1つだけ。
+    別の見回りが自分で置ければそれが残り、先の見回りは置かない。別の見回りが置けなければ、先の見回りが新しい状態で作り直して置く。"""
+    paths = _paths(tmp_path)
+    _pages_saved_unplaced(paths)
+
+    def other():
+        if other_places:
+            return _other_tick(paths, AT.replace(minute=36), "15:45")
+        with patch.object(mam, "_publish_once", side_effect=OSError(errno.EIO, "置き場が一時的に使えない")):
+            return _other_tick(paths, AT.replace(minute=36), "15:45")
+    out, seen = _tick_interrupted_by(paths, AT.replace(minute=33), AT.replace(minute=36), other)
+    assert seen[0].get("mam_packets", 0) == (1 if other_places else 0)
+    assert out["mam_packets"] == (0 if other_places else 1)
+    packet = json.loads(mam._packet_path(paths, RK, TP).read_text())
+    assert packet["deadline"].endswith("T14:45+09:00") and packet["race"]["post_time"] == "15:45"
+    assert mam.issued_roster(paths, RK, TP) == list(range(1, 9))
+    _no_leftovers(paths)
+
+
+def test_page_saved_by_another_tick_meanwhile_is_used_in_the_remade_input(tmp_path):
+    """締切は同じでも、置く前に別の見回りがその時点の出馬表を保存し直したら、新しいページで作り直して置く。"""
+    paths = _paths(tmp_path)
+    _pages_saved_unplaced(paths)
+
+    def resave():
+        col = REAL_COLLECTOR(tmp_path / "live", client=_client(), now=lambda: AT.replace(minute=35))
+        return col._save(RK, "card", TP, "/sample", "card-again", card_html(IDS) + "<!-- 取り直し -->")
+    out, seen = _tick_interrupted_by(paths, AT.replace(minute=33), AT.replace(minute=35), resave)
+    assert out["mam_packets"] == 1
+    packet = json.loads(mam._packet_path(paths, RK, TP).read_text())
+    assert packet["source_snapshots"][0] == seen[0]["sha256"] and packet["deadline"].endswith("T14:40+09:00")
+    _no_leftovers(paths)
+
+
+def test_remaking_stops_when_the_state_keeps_changing(tmp_path):
+    """置く直前に毎回変わっているときは、決まった回数だけ作り直して止まり、次の見回りで置く。"""
+    paths = _paths(tmp_path)
+    _pages_saved_unplaced(paths)
+    made = []
+    real_make = mam._make
+
+    def make(*a, **k):
+        made.append(1)
+        return real_make(*a, **k)
+
+    def always_changed(*_a):
+        def check():
+            raise mam._Stale("changed")
+        return check
+
+    with patch.object(mam, "_make", make), patch.object(mam, "_recheck", always_changed):
+        out = _tick(paths, [AT.replace(minute=33)])
+    assert out["mam_packets"] == 0 and len(made) == mam.REMAKE_LIMIT and not mam._packet_path(paths, RK, TP).exists()
+    _no_leftovers(paths)
+    assert _tick(paths, [AT.replace(minute=35)])["mam_packets"] == 1
+    _placed_once(paths)
+
+
+def test_one_input_reads_each_page_once(tmp_path):
+    """置き直しの1つの入力で、使うページ（その時点の出馬表）は1回だけ読む（ほかの時点のために読み直さない）。"""
+    paths = _paths(tmp_path)
+    _pages_saved_unplaced(paths)
+    real = wallet._read
+    reads = []
+
+    def read(root, rec):
+        reads.append(rec["path"])
+        return real(root, rec)
+
+    with patch.object(wallet, "_read", read):
+        out = _tick(paths, [AT.replace(minute=33)])
+    assert out["mam_packets"] == 1
+    assert len(reads) == len(set(reads)) and reads
+    _placed_once(paths)
