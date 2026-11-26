@@ -423,3 +423,26 @@ def test_one_input_reads_each_page_once(tmp_path):
     assert out["mam_packets"] == 1
     assert len(reads) == len(set(reads)) and reads
     _placed_once(paths)
+
+
+def test_manual_export_uses_the_latest_post_time_when_it_changes_meanwhile(tmp_path):
+    """手の mam export は締切を問わないが、置く前に別の見回りが発走時刻を変えたら、新しい状態で作り直す（入力の締切の欄が最新になる）。"""
+    paths = _paths(tmp_path)
+    _pages_saved_unplaced(paths)
+    real = mam._write_complete
+    started = []
+
+    def write(path, text):
+        real(path, text)
+        if not started:   # 書き終えた所で、別の見回りが発走時刻を 15:45 に変えて保存した
+            started.append(1)
+            state_path = tmp_path / "live" / "state.json"
+            state = json.loads(state_path.read_text())
+            state["races"][RK]["post_time"] = "15:45"
+            state_path.write_text(json.dumps(state, ensure_ascii=False))
+
+    with patch.object(mam, "_write_complete", write), redirect_stdout(io.StringIO()):
+        cli.cmd_mam(paths, SimpleNamespace(action="export"))
+    packet = json.loads(mam._packet_path(paths, RK, TP).read_text())
+    assert packet["deadline"].endswith("T14:45+09:00") and packet["race"]["post_time"] == "15:45"
+    _no_leftovers(paths)
