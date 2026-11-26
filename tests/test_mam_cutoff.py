@@ -330,9 +330,14 @@ def test_post_time_moved_earlier_by_another_tick_is_not_placed_with_the_old_dead
     _pages_saved_unplaced(paths)
     out, seen = _tick_interrupted_by(paths, AT.replace(minute=33), AT.replace(minute=38),
                                      lambda: _other_tick(paths, AT.replace(minute=38), "15:37"))
-    assert seen[0].get("mam_packets", 0) == 0                          # 別の見回りは締切後なので置かない
-    assert json.loads((tmp_path / "live" / "state.json").read_text())["races"][RK]["post_time"] == "15:37"
-    assert out["mam_packets"] == 0 and not mam._packet_path(paths, RK, TP).exists()
+    post = json.loads((tmp_path / "live" / "state.json").read_text())["races"][RK]["post_time"]
+    if seen[0].get("skipped"):   # PR #15 と合わせた版：見回りの鍵で、別の見回りは何もしない（繰り上げはまだ知らない）
+        assert post == "15:40" and out["mam_packets"] == 1
+        assert json.loads(mam._packet_path(paths, RK, TP).read_text())["deadline"].endswith("T14:40+09:00")
+    else:
+        assert seen[0].get("mam_packets", 0) == 0                      # 別の見回りは締切後なので置かない
+        assert post == "15:37"
+        assert out["mam_packets"] == 0 and not mam._packet_path(paths, RK, TP).exists()
     _no_leftovers(paths)
 
 
@@ -349,9 +354,13 @@ def test_post_time_moved_later_by_another_tick_is_placed_with_the_new_deadline(t
         with patch.object(mam, "_publish_once", side_effect=OSError(errno.EIO, "置き場が一時的に使えない")):
             return _other_tick(paths, AT.replace(minute=36), "15:45")
     out, seen = _tick_interrupted_by(paths, AT.replace(minute=33), AT.replace(minute=36), other)
+    packet = json.loads(mam._packet_path(paths, RK, TP).read_text())
+    if seen[0].get("skipped"):   # PR #15 と合わせた版：見回りの鍵で、別の見回りは何もしない
+        assert out["mam_packets"] == 1 and packet["deadline"].endswith("T14:40+09:00")
+        _no_leftovers(paths)
+        return
     assert seen[0].get("mam_packets", 0) == (1 if other_places else 0)
     assert out["mam_packets"] == (0 if other_places else 1)
-    packet = json.loads(mam._packet_path(paths, RK, TP).read_text())
     assert packet["deadline"].endswith("T14:45+09:00") and packet["race"]["post_time"] == "15:45"
     assert mam.issued_roster(paths, RK, TP) == list(range(1, 9))
     _no_leftovers(paths)
@@ -404,7 +413,9 @@ def test_one_input_reads_each_page_once(tmp_path):
     reads = []
 
     def read(root, rec):
-        reads.append(rec["path"])
+        import traceback   # まむへの書き出しから読んだものだけ数える（PR #15 と合わせた版は、ほかの読み手も同じページを読む）
+        if any(f.filename.endswith("live/mam.py") for f in traceback.extract_stack()):
+            reads.append(rec["path"])
         return real(root, rec)
 
     with patch.object(wallet, "_read", read):
