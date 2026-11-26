@@ -441,8 +441,13 @@ class Collector:
                     if tabs:
                         p2, c2 = tabs[0]
                         page2 = self.client.get(p2, c2)
-                        saved.append(self._save(rk, f"odds_{kind}", tp, p2, c2, page2,
-                                                jra.trio_page_issue(page2, active) if kind == "trio" else None))
+                        issue = None
+                        if kind == "trio":
+                            issue = jra.trio_page_issue(page2, active)
+                            if issue is None and not active:
+                                # 同じ回の出馬表で名簿（取消でない馬番）が取れない（準備中・リンク欠け等）：載っている組を照らせない
+                                issue = "同じ回の出馬表の名簿が無く、三連複の組を照らせない"
+                        saved.append(self._save(rk, f"odds_{kind}", tp, p2, c2, page2, issue))
         if tp == "result" and not saved:
             return saved  # 結果のリンクがまだ無い。次の tick でもう一度
         if tp != "result":
@@ -550,10 +555,14 @@ class Collector:
         wait = self.state.get("live_retry_at")
         return not wait or self.now() >= datetime.fromisoformat(wait)
 
-    def live_started(self) -> bool:
-        """予想・精算を始める印を先に残す。返すのは、前の回の印が残っていたか（＝最後まで終わっていない）。"""
+    def live_started(self, months=()) -> bool:
+        """予想・精算を始める印を先に残す。返すのは、前の回の印が残っていたか（＝最後まで終わっていない）。
+        months：この回で月次を書く予定の月。始める印と同じ保存で review_months に足す（この直後に止まって、
+        日や月をまたいで再開しても、書く予定だった月を次の見回りが書く。月次が書けるまで外さない）。"""
         before = bool(self.state.get("live_running"))
         self.state["live_running"] = True
+        self.state["review_months"] = sorted(set(self.state.get("review_months") or []) | set(months)
+                                             | {self.now().strftime("%Y-%m")})
         self._write_state()
         return before
 
@@ -605,6 +614,9 @@ class Collector:
         if (new_missed or tell) and notify:
             notify(f"取れなかった {len(new_missed)}件・失敗 {len(tell)}件", "; ".join((new_missed + tell)[:3]))
         self.state["missed_notified"] += new_missed
+        if new_missed:   # 取り損ねは月次の「収集」に出るので、そのレースの月を月次の書く予定に足す（この回の状態と同じ保存）
+            self.state["review_months"] = sorted(set(self.state.get("review_months") or [])
+                                                 | {k[:7] for k in new_missed})
         health = {"checked_at": self.now().isoformat(timespec="seconds"), "missed": missed, "errors": errors,
                   "races_known": len(self.state["races"]), "taken": len(self.state["taken"])}
         write_atomic(self.root / "health.json", json.dumps(health, ensure_ascii=False, indent=1))   # 画面が途中を読まない

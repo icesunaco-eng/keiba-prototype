@@ -172,7 +172,9 @@ def cmd_collect(paths, args):
             out = col.tick(notify=_notify)
             if col.live_pending():   # 新しいページ・取りやめ・前の回の失敗のどれかがある
                 from .live.wallet import run_live
-                interrupted = col.live_started()   # 前の回が最後まで終わっていない（途中で止まった・失敗した）
+                from datetime import date as _date
+                # 前の回が最後まで終わっていない（途中で止まった・失敗した）か。今日の月を、始める印と同じ保存で月次の書く予定に足す
+                interrupted = col.live_started({_date.today().strftime("%Y-%m")})
                 try:
                     out["live"] = run_live(paths)
                     from .live.mam import export_packets

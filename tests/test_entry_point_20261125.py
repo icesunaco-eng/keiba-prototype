@@ -783,13 +783,19 @@ def _replay_trio_rows(directory, mode):
         pages = _pages(clock)
         if name == LIST:
             return pages[name].replace("15時41分", "15時40分")
+        if name == CARD and mode == "card_preparing" and clock["now"] < T("14:30"):
+            return _re.sub(r'<td class="num">\d+</td>', '<td class="num"></td>', pages[name])   # 出馬表が準備中（馬番が空）
         if name == "pw156ou1/66" and clock["now"] < T("14:30"):
             html = pages[name]
-            if mode == "row_missing":
+            if mode in ("row_missing", "card_preparing"):
                 html, n = _re.subn(r'(<caption>1-2</caption><tbody>)<tr><th scope="row">3</th><td>[^<]*</td></tr>', r"\1", html)
                 assert n == 1
             elif mode == "display_row":
                 html = html.replace("<tbody>", "<tbody><tr><th>（表示だけの行）</th><td></td></tr>", 1)
+            elif mode == "extra_td":   # 馬番の行に、空の倍率の欄と別の「更新中」の欄が並ぶ
+                html, n = _re.subn(r'(<caption>1-2</caption><tbody><tr><th scope="row">3</th>)<td>[^<]*</td>',
+                                   r"\1<td></td><td>更新中</td>", html)
+                assert n == 1
             return html
         return pages[name]
     client = FakeClient(fetch)
@@ -809,7 +815,8 @@ def _replay_trio_rows(directory, mode):
     return paths, root, client, tick, told
 
 
-@pytest.mark.parametrize("mode, taken_at_1425", [("row_missing", False), ("display_row", True)])
+@pytest.mark.parametrize("mode, taken_at_1425", [("row_missing", False), ("display_row", True),
+                                                  ("card_preparing", False), ("extra_td", False)])
 def test_trio_page_rows_are_checked_against_the_roster(tmp_path, mode, taken_at_1425):
     """直してから②：14:25の三連複のページで1-2-3の行が丸ごと欠けた → 取得済みにせず、14:30に取り直す。
     回帰③：馬番の無い表示だけの空の行は空欄の検査に入れない（14:25のまま取得済み）。"""
@@ -855,3 +862,110 @@ def test_race_missing_from_list_does_not_reuse_old_unreleased(tmp_path):
     clock["now"] = day_before("15:31")
     col.capture(RK, "24h")
     assert f"{RK}|24h" in col.state["taken"]
+
+
+
+# ---- 💚20261126-5（みにの再検証）の指摘 ---------------------------------------------------------------------
+
+def test_month_end_stop_right_after_live_started_keeps_the_month(env, monkeypatch):
+    """止める：月末23:55の見回りが予想・精算を始める印を書いた直後に止まり、丸1日以上あけて翌々日に再開した。
+    書く予定だった月（8月）は、始める印と同じ保存で残っているので、再開した見回りが8月の月次を書く。"""
+    import keiba.review as review
+    paths, col, rk = env
+    col.state["live_pending"] = True
+    col._write_state()
+    stopped = {"on": True}
+
+    def run(p, **k):
+        if stopped["on"]:
+            stopped["on"] = False
+            raise KeyboardInterrupt()   # 始める印を書いた直後に止まった（電源・強制終了）
+        return _REAL_RUN_LIVE(p, now=k.get("now"))
+    monkeypatch.setattr(review, "write_review", _REAL_WRITE_REVIEW)
+
+    def tick(at):
+        class Cl:
+            count = 0
+            def get(self, path, cname): return "<html></html>"
+            def get_url(self, url): return "<html></html>"
+        real = collector_module.Collector
+        monkeypatch.setattr(collector_module, "Collector", lambda root: real(root, client=Cl(), now=lambda: at))
+        monkeypatch.setattr(real, "refresh", lambda self, force=False: None)
+        monkeypatch.setattr(real, "check_notices", lambda self, log=print: None)
+        monkeypatch.setattr(cli, "_notify", lambda *a, **k: None)
+        monkeypatch.setattr(mam, "export_packets", lambda p: [])
+        monkeypatch.setattr(wallet, "run_live", lambda p, **k: run(p, now=at))
+        out = StringIO()
+        try:
+            with redirect_stdout(out):
+                cli.cmd_collect(paths, types.SimpleNamespace(action="tick"))
+        finally:
+            monkeypatch.setattr(collector_module, "Collector", real)
+
+    with pytest.raises(KeyboardInterrupt):
+        tick(datetime(2025, 8, 31, 23, 55, tzinfo=JST))
+    assert "2025-08" in json.loads((col.root / "state.json").read_text())["review_months"]
+    assert not (paths.data_dir / "review" / "2025-08.json").exists()
+    tick(datetime(2025, 9, 2, 10, 0, tzinfo=JST))                   # 翌々日に再開（9/1は動いていない）
+    for f in ("2025-08.json", "2025-08.html"):
+        assert (paths.data_dir / "review" / f).exists(), f
+    assert "2025-08" not in (json.loads((col.root / "state.json").read_text()).get("review_months") or [])
+
+
+def test_mam_packets_through_ordinary_ticks_without_hard_links(tmp_path, monkeypatch):
+    """あとで②：ハードリンクを作れない置き場（ENOTSUP）で、ふつうの見回りの1日と、書き込みの直前ごとに手で動かす
+    mam export を重ねても、まむの入力は止めない1日と同じ（完全な JSON・同じファイル）になる。"""
+    import errno
+    from tests.crash_harness import exporter, invariants, run_day
+    base = run_day(tmp_path / "base")
+    want = json.loads(json.dumps(invariants(base), default=str))
+
+    def no_link(src, dst):
+        raise OSError(errno.ENOTSUP, "Operation not supported")
+    monkeypatch.setattr(mam.os, "link", no_link)
+    day = run_day(tmp_path / "nolink", models=base.root / "models", probe=exporter)
+    assert not day.probe.errors
+    got = json.loads(json.dumps(invariants(day), default=str))
+    assert got["mam_files"] == want["mam_files"] and got["mam_json_complete"]
+    assert got == want
+
+
+def test_race_missing_from_list_through_ordinary_ticks(tmp_path):
+    """あとで②：前日の時点で、さっきまで「未発表」だったレースが今回の一覧から一時的に消えた回を、ふつうの見回りで通す。
+    前の回の「未発表」を使わず取得済みにせず、一覧に戻った回に取得済みにする。取り損ねにはしない。"""
+    from tests.test_live_collector import race_list
+    day_before = lambda hm: datetime.fromisoformat(f"2026-11-21T{hm}:00+09:00")
+    paths = _paths(tmp_path)
+    root = paths.data_dir / "live"
+    clock = {"now": day_before("15:00")}
+    told = []
+
+    def fetch(name):
+        if name == ENTRY_INDEX[1] or name.startswith("pw01dli"):
+            return INDEX
+        if name == LIST:
+            listing = race_list(odds=False).replace("15時41分", "15時40分").replace("18頭", "8頭")
+            if day_before("15:24") <= clock["now"] < day_before("15:30"):
+                listing = listing.replace('alt="11レース"', 'alt="12レース"')   # 11Rの行が一時的に無い
+            return listing
+        return _pages(clock)[name]
+    client = FakeClient(fetch)
+
+    def tick(at):
+        clock["now"] = at
+        out = StringIO()
+        with patch.object(collector_module, "Collector",
+                          lambda folder: Collector(folder, client=client, now=lambda: clock["now"])), \
+                patch.object(Collector, "check_notices", lambda self, log=print: None), \
+                patch.object(cli, "_notify", lambda title, msg: told.append(msg)), \
+                patch.object(wallet, "prediction_clock", lambda: clock["now"]), \
+                patch.object(Ledger, "_now", lambda _: clock["now"].astimezone(timezone.utc).isoformat(timespec="seconds")), \
+                redirect_stdout(out):
+            cli.cmd_collect(paths, SimpleNamespace(action="tick"))
+        return json.loads(out.getvalue().splitlines()[-1])
+    tick(day_before("15:00"))
+    tick(day_before("15:26"))                                       # 一覧に11Rが無い回
+    assert f"{RK}|24h" not in Collector(root, client=client).state["taken"]
+    tick(day_before("15:31"))                                       # 一覧に戻り「未発表」
+    assert f"{RK}|24h" in Collector(root, client=client).state["taken"]
+    assert tick(day_before("15:41"))["missed"] == 0 and not any(f"{RK}|24h" in m for m in told)

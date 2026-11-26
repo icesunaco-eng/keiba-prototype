@@ -490,15 +490,15 @@ def trio_page_issue(page: str, horses=None) -> str | None:
             ths, tds = tr.xpath("./th"), tr.xpath("./td")
             if len(ths) != 1 or not _t(ths[0]).isdigit():
                 continue   # 馬番の無い行（見出し・表示だけの行）は見ない
-            if not tds or not any(_t(td) for td in tds):
-                empty += 1
+            if len(tds) != 1 or not _t(tds[0]):
+                empty += 1   # 馬番の行の倍率の欄は1つだけ（実物の形）。欄が無い・空・ほかの欄が並ぶ行は、まだそろっていない
                 continue
             if m:
                 listed.add(tuple(sorted({int(m.group(1)), int(m.group(2)), int(_t(ths[0]))})))
     if not listed and not empty:
         return "三連複の馬番の行が無い"
     if empty:
-        return f"三連複の倍率の欄が空（{empty}行）"
+        return f"三連複の倍率の欄が空か、形がそろっていない（{empty}行）"
     if parse_odds_time(page) is None:
         return "オッズの発表時刻が無い"
     if horses:
