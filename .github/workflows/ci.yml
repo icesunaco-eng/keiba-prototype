@@ -3,6 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:   # 手で動かすこともできる
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -14,7 +15,8 @@ jobs:
       - run: pip install -e '.[test]'
       - run: python -m pytest -q
   # 止める試験（全部の点）：ふつうの見回りの1日を、書き込みの1点ごと（前・後）に止めて、結果が崩れないかを確かめる。
-  # 崩れた点があれば落ちる。結果の一覧は crash-sweep.json として残す（tools/crash_sweep.py）
+  # 崩れた点があれば落ちる。結果の一覧は crash-sweep-*.json として残す（tools/crash_sweep.py）。
+  # （代表の点だけの短い版は tests/test_crash_sweep.py で、ふだんの試験としても流れる）
   crash-sweep:
     runs-on: ubuntu-latest
     timeout-minutes: 150

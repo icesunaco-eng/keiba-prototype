@@ -129,20 +129,29 @@ def cmd_review(paths, args):
     print(f"月次の振り返り → {write_review(paths, month)}")
 
 
-def _write_reviews(paths, months: set) -> list[str]:
-    """月次の振り返りを書く。渡した月に加えて、精算が増えたのに月次が古い月（精算の直後に止まった・書き込みに失敗した等）も
-    台帳の精算の行数と月次の目印を比べて見つけ、書き直す。返すのは書けなかった月の失敗の文（次の見回りでまた見つかる）。"""
+def _write_reviews(paths, col, months: set) -> list[str]:
+    """月次の振り返りを書く。書く月は、書き始める前に状態（review_months）へ残し、HTML・JSON・目印まで書けた月だけ外す
+    （精算の無い月も、書き込みの失敗・途中の停止のあと次の見回りで書き直す）。精算の行数と月次の目印が食い違う月
+    （精算の直後に止まった等）も見つけて足す。返すのは書けなかった月の失敗の文（次の見回りでまた書く）。"""
     from .review import stale_months, write_review
     try:
         stale = set(stale_months(paths))
-    except Exception:   # 台帳を読めない回（書き込み中の鍵など）は、渡した月だけ書く。食い違いは残るので、次の回に見つける
+    except Exception:   # 台帳を読めない回（書き込み中の鍵など）は、残っている月と渡した月だけ書く
         stale = set()
-    failed = []
-    for month in sorted(set(months) | stale):
+    todo = sorted(set(col.state.get("review_months") or []) | set(months) | stale)
+    if not todo:
+        return []
+    col.state["review_months"] = todo
+    col._write_state()
+    failed, left = [], []
+    for month in todo:
         try:
             write_review(paths, month)
         except Exception as exc:   # 1つの月が書けなくても、ほかの月は書く
             failed.append(f"{month} の月次の振り返り：{exc!r}"[:200])
+            left.append(month)
+    col.state["review_months"] = left
+    col._write_state()
     return failed
 
 
@@ -175,7 +184,7 @@ def cmd_collect(paths, args):
                         days = [date.today(), *([date.today() - timedelta(days=1)] if interrupted else [])]
                         # 精算を書いたレースの月も（長く止まった後に予定表から外れたレースなど、前の月のことがある）
                         months = {x.strftime("%Y-%m") for x in days} | set(out["live"].get("months") or [])
-                    review_failed = _write_reviews(paths, months)
+                    review_failed = _write_reviews(paths, col, months)
                     failed = out["live"].get("failed")   # 一部のレース・方式だけの失敗：ほかは書けている。次の回にやり直す
                     new = col.live_finished((failed or []) + review_failed, out["live"].get("retry_now", True))
                     if new:
@@ -186,7 +195,7 @@ def cmd_collect(paths, args):
                         _notify("予想・精算に失敗", repr(exc)[:120])
             else:
                 # 予想・精算は動かさない回でも、精算が増えたのに古いままの月次があれば書き直す
-                failed = _write_reviews(paths, set())
+                failed = _write_reviews(paths, col, set())
                 if failed:
                     out["review_error"] = failed
                     told = col.state.get("review_told", [])

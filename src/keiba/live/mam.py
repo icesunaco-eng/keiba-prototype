@@ -62,19 +62,53 @@ def export_packets(paths) -> list[Path]:
             "source_snapshots": inp["snapshots"],
             "note": "締切までに分かっていた情報だけ。予想は締切までに返すこと（形は mam-format.md）",
         }
-        # 出すたびに別の一時ファイルに書き終えてから、正式の名前が「まだ無いときだけ」置く（link は既にあれば失敗する）。
-        # 書く途中で止まっても半端な正式ファイルは残らず、見回りと手で出す export が重なっても、先に置けた完全な入力を上書きしない
-        tmp = f.with_name(f".{f.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-        try:
-            tmp.write_text(json.dumps(packet, ensure_ascii=False, indent=1), encoding="utf-8")
-            try:
-                os.link(tmp, f)
-            except FileExistsError:
-                continue   # ほかの出力が先に置いた（同じ締切までの入力）
-        finally:
-            tmp.unlink(missing_ok=True)
-        written.append(f)
+        if _publish_once(f, json.dumps(packet, ensure_ascii=False, indent=1)):
+            written.append(f)   # 置けなかったのは、ほかの出力が先に置いたとき（同じ締切までの入力）
     return written
+
+
+
+def _rename_noreplace(src: Path, dst: Path) -> bool:
+    """src を dst へ一度に移す。dst がもうあれば移さず False（上書きしない）。ハードリンクを作れない置き場のための道
+    （PR #18 と同じ作り）。OS がこの操作を持たなければ OSError（置かない）。"""
+    import ctypes
+    import errno
+    import sys
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        fn = libc.renamex_np
+        fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rc = fn(os.fsencode(src), os.fsencode(dst), 0x4)            # RENAME_EXCL
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        fn = libc.renameat2
+        fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rc = fn(-100, os.fsencode(src), -100, os.fsencode(dst), 1)  # AT_FDCWD・RENAME_NOREPLACE
+    else:
+        raise OSError(errno.ENOTSUP, "上書きしない移動が使えない")
+    if rc == 0:
+        return True
+    err = ctypes.get_errno()
+    if err == errno.EEXIST:
+        return False
+    raise OSError(err, os.strerror(err))
+
+
+def _publish_once(path: Path, text: str) -> bool:
+    """書き終えた一時ファイル（出すたびに別の名前）から、正式の名前が「まだ無いときだけ」置く。置けたら True。
+    書く途中で止まっても正式の名前に半端な中身は残らず、見回りと手で出す export が重なっても先に置けた入力を上書きしない。
+    ふつうはハードリンク（既にあれば失敗）。ハードリンクを作れない置き場では「上書きしない移動」で置く。"""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        try:
+            os.link(tmp, path)
+            return True
+        except FileExistsError:
+            return False
+        except OSError:   # ハードリンクを作れない置き場（ENOTSUP・EPERM など）
+            return _rename_noreplace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 class Rejected(Exception):

@@ -413,17 +413,24 @@ class Collector:
                     saved[-1]["incomplete"] = issue
                     return saved
         else:
+            active = None   # この回の出馬表で取消でない馬番（三連複のページに全組が載っているかを見る）
             if r.get("card_cname"):  # 出馬表は毎時点取る（取消を、その時点の締切までの情報で反映するため）
-                saved.append(self._save(rk, "card", tp, "/JRADB/accessD.html", r["card_cname"],
-                                        self.client.get("/JRADB/accessD.html", r["card_cname"])))
+                card_page = self.client.get("/JRADB/accessD.html", r["card_cname"])
+                saved.append(self._save(rk, "card", tp, "/JRADB/accessD.html", r["card_cname"], card_page))
+                try:
+                    active = [c["horse_number"] for c in jra.parse_card(card_page)
+                              if not c.get("scratch") and c.get("horse_number") is not None] or None
+                except Exception:   # 出馬表が読めない回は組の照合をしない（材料の判定は予想の側の名簿の検査に任せる）
+                    active = None
             odds_links = r.get("odds_links") or []
             if not odds_links:
-                status = fresh.get("odds_status") if fresh else r.get("odds_status")   # 今回の一覧の欄（前の回の値を使わない）
+                status = fresh.get("odds_status") if fresh else None   # 今回の一覧のこのレースの行の欄だけ（行が無ければ確かめていない）
                 saved.append({"race_key": rk, "kind": "odds_unavailable", "time_point": tp,
                               "fetched_at": self.now().isoformat(timespec="seconds"), "odds_status": status})
                 if status != "未発表":
                     # 一覧のオッズの欄が無い・「未発表」と出ていない：未発売とは言えないので材料に数えず、時間帯の間は取り直す
-                    saved[-1]["incomplete"] = f"オッズの欄が「{status or '無い'}」（未発表と出ていない）"
+                    saved[-1]["incomplete"] = (f"オッズの欄が「{status or '無い'}」（未発表と出ていない）" if fresh else
+                                               "今回の一覧にこのレースの行が無い（未発表か確かめていない）")
                 self._append_index(saved[-1])
             else:
                 path, cname = odds_links[0]
@@ -435,7 +442,7 @@ class Collector:
                         p2, c2 = tabs[0]
                         page2 = self.client.get(p2, c2)
                         saved.append(self._save(rk, f"odds_{kind}", tp, p2, c2, page2,
-                                                jra.trio_page_issue(page2) if kind == "trio" else None))
+                                                jra.trio_page_issue(page2, active) if kind == "trio" else None))
         if tp == "result" and not saved:
             return saved  # 結果のリンクがまだ無い。次の tick でもう一度
         if tp != "result":

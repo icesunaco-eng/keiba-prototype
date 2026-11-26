@@ -473,25 +473,40 @@ def parse_trio_odds(page: str, horses) -> dict:
             "extra": len(extra), "missing": len(missing), "extra_examples": extra[:5], "missing_examples": missing[:5]}
 
 
-def trio_page_issue(page: str) -> str | None:
-    """三連複のページが途中（表はあるのに倍率の欄が空・表が無い・発表時刻が無い）なら理由。そろっていれば None。
-    「票数なし」「取消」など文字の入った欄は空ではない（そのページはそろっている。使えるかは parse_trio_odds の判定）。"""
+def trio_page_issue(page: str, horses=None) -> str | None:
+    """三連複のページが途中なら理由。そろっていれば None。途中とみなすのは：表が無い・馬番の行が無い・馬番の行の倍率の欄が空・
+    発表時刻が無い・horses（その回の出馬表で取消でない馬番）の全組のうち載っていない組がある。
+    馬番の無い表示だけの行は見ない。「票数なし」「取消」など文字の入った欄は空ではない（使えるかは parse_trio_odds の判定）。"""
+    from itertools import combinations
     doc = lxml_html.fromstring(page)
     tables = doc.xpath(f"//table[{_has_class('fuku3')}]")
     if not tables:
         return "三連複の表が無い"
-    cells = empty = 0
+    listed, empty = set(), 0
     for table in tables:
+        cap = table.xpath("./caption")
+        m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", _t(cap[0])) if len(cap) == 1 else None
         for tr in _rows(table):
-            for td in tr.xpath("./td"):
-                cells += 1
-                empty += not _t(td)
-    if not cells:
-        return "三連複の倍率の欄が無い"
+            ths, tds = tr.xpath("./th"), tr.xpath("./td")
+            if len(ths) != 1 or not _t(ths[0]).isdigit():
+                continue   # 馬番の無い行（見出し・表示だけの行）は見ない
+            if not tds or not any(_t(td) for td in tds):
+                empty += 1
+                continue
+            if m:
+                listed.add(tuple(sorted({int(m.group(1)), int(m.group(2)), int(_t(ths[0]))})))
+    if not listed and not empty:
+        return "三連複の馬番の行が無い"
     if empty:
-        return f"三連複の倍率の欄が空（{empty}/{cells}）"
+        return f"三連複の倍率の欄が空（{empty}行）"
     if parse_odds_time(page) is None:
         return "オッズの発表時刻が無い"
+    if horses:
+        want = {tuple(sorted(c)) for c in combinations(sorted({int(h) for h in horses}), 3)}
+        missing = want - listed
+        if missing:
+            ex = "-".join(map(str, sorted(missing)[0]))
+            return f"三連複の組が載っていない（{len(missing)}組。例 {ex}）"
     return None
 
 
