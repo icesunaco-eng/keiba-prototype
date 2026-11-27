@@ -61,13 +61,14 @@ def _collector(tmp_path, when, odds=True, result=False):
             return INDEX
         if cname.startswith("pw01drl"):
             return race_list(odds=odds, result=result)
-        if cname.startswith("pw01dde"):
-            return CARD
+        if cname.startswith("pw01dde"):   # 出馬表：一覧と同じ18頭の名簿（名簿が途中までの出馬表は取り直す決まり）
+            from tests.test_live_wallet import card_html
+            return card_html([f"20221{i:05d}" for i in range(18)])
         if cname.startswith("pw15orl"):
             return ODDS
         if cname.startswith("pw156"):   # 三連複のタブ：実物と同じ形の、倍率のそろったページ（途中のページは取り直す決まり）
             from tests.test_live_wallet import trio_html
-            return trio_html()
+            return trio_html(n=18)
         return "<html>odds or result</html>"
     clock = {"now": when}
     col = Collector(tmp_path, client=FakeClient(pages), now=lambda: clock["now"])
