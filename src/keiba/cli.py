@@ -174,23 +174,33 @@ def cmd_collect(paths, args):
     from .live.collector import Collector
     root = paths.data_dir / "live"
     if args.action == "tick":
-        col = Collector(root)
-        out = col.tick(notify=_notify)
-        if out["saved"]:
-            from .live.wallet import run_live
+        import fcntl
+        root.mkdir(parents=True, exist_ok=True)
+        # 見回りは1つずつ（重なると状態の書込みで落ち、取得ずみの記録も消える）。鍵はプロセスが終われば外れる
+        # （PR #15 と同じ鍵。ページ・状態の保存から、まむへの入力を正式な名前に置くまでを、1つの見回りの中で行う。みに💚20261127-6）
+        with open(root / "tick.lock", "a") as lock:
             try:
-                out["live"] = run_live(paths)
-                out["mam_packets"] = _place(paths, col, _due(paths, col, out), out)   # 締切前で置けていない時点だけ。締切を過ぎた時点は置かない
-                if out["live"].get("settled"):
-                    from datetime import date
-                    from .review import write_review
-                    write_review(paths, date.today().strftime("%Y-%m"))
-            except Exception as exc:  # 予想の失敗で収集を止めない
-                out["live_error"] = repr(exc)
-                _notify("予想・精算に失敗", repr(exc)[:120])
-        if "mam_packets" not in out:
-            _republish(paths, col, out)
-        print(json.dumps(out, ensure_ascii=False))
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print(json.dumps({"skipped": "前の見回りがまだ動いている"}, ensure_ascii=False))
+                return
+            col = Collector(root)
+            out = col.tick(notify=_notify)
+            if out["saved"]:
+                from .live.wallet import run_live
+                try:
+                    out["live"] = run_live(paths)
+                    out["mam_packets"] = _place(paths, col, _due(paths, col, out), out)   # 締切前で置けていない時点だけ。締切を過ぎた時点は置かない
+                    if out["live"].get("settled"):
+                        from datetime import date
+                        from .review import write_review
+                        write_review(paths, date.today().strftime("%Y-%m"))
+                except Exception as exc:  # 予想の失敗で収集を止めない
+                    out["live_error"] = repr(exc)
+                    _notify("予想・精算に失敗", repr(exc)[:120])
+            if "mam_packets" not in out:
+                _republish(paths, col, out)
+            print(json.dumps(out, ensure_ascii=False))
     elif args.action == "install":
         import os
         from pathlib import Path

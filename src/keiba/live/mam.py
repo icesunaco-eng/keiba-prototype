@@ -178,14 +178,11 @@ def _material(s, r: dict, tp: str):
     return [cards.index[-1], *at_tp.index]
 
 
-def unplaced(paths, now: datetime) -> set[tuple[str, str]]:
-    """締切前なのに、まむへの入力がまだ置かれていない時点（レース×時点）。
-    数えるのは、export_packets が入力を作る時点と同じ条件（_material）：その時点の締切までに出馬表のページを保存してあり、
-    15分前はその時点のオッズのページもある。取得済みの記録（state の taken）を書く前に止まっても、ページが保存されていれば数える。
-    発走時刻・締切の分からない時点は数えない。置き場を調べられないとき（OSError）はそのまま上げる。"""
+def _due_keys(paths, state: dict, snaps, now: datetime) -> set[tuple[str, str]]:
+    """締切前なのに入力が置かれていない時点（レース×時点）を、状態と保存したページの記録だけから選ぶ（ページは読まない）。
+    数えるのは export_packets が入力を作る時点と同じ条件（_material）。発走時刻・締切の分からない時点は数えない。
+    snaps は呼ぶ時にまだ読んでいなければ None（締切の残るレースがあるときだけ読む）。"""
     root = paths.data_dir / "live"
-    state = _state(root)
-    snaps = None
     due = set()
     for rk, r in state.get("races", {}).items():
         if not r or not r.get("post_time"):
@@ -205,6 +202,12 @@ def unplaced(paths, now: datetime) -> set[tuple[str, str]]:
         s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
         due |= {(rk, tp) for tp in open_tps if _material(s, r, tp) is not None}
     return due
+
+
+def unplaced(paths, now: datetime) -> set[tuple[str, str]]:
+    """締切前なのに、まむへの入力がまだ置かれていない時点（レース×時点）。条件は _due_keys。
+    取得済みの記録（state の taken）を書く前に止まっても、ページが保存されていれば数える。置き場を調べられないとき（OSError）はそのまま上げる。"""
+    return _due_keys(paths, _state(paths.data_dir / "live"), None, now)
 
 
 def _signature(snaps, rows) -> tuple:
@@ -306,14 +309,15 @@ def export_packets(paths, now=None, only: set | None = None, held: dict | None =
     state = _state(root)
     snaps = _snapshots(root)
     if only is None:   # 手の mam export（と、置けていない時点を数えられなかった見回り）：全部を読む
-        _, _, inputs = live_tables(root, state, snaps)
-        keys = sorted(k for k in inputs if k[1] != "result")
         if clock is not None:
-            # 見回り：候補のキーだけ使い、本文・締切・ページの組は候補ごとに _make で同じ読み取りから作る
-            # （ほかの候補を作り直して記録を読み直しても、本文と照らすページの組が食い違わない。みに💚20261127-4 の案）
-            todo = [(rk, tp, None) for rk, tp in keys]
+            # 見回り（置けていない時点を数えられなかった回）：ふだんと同じく、状態と記録だけから締切前で置けていない時点のキーを選び、
+            # 本文・締切・ページの組は候補ごとに _make で同じ読み取りから作る（全時点は読まない。ほかの時点のページが読めなくても置ける。
+            # ほかの候補を作り直して記録を読み直しても、本文と照らすページの組が食い違わない。みに💚20261127-4・-6 の案）
+            todo = [(rk, tp, None) for rk, tp in sorted(_due_keys(paths, state, snaps, clock()))]
         else:
-            # 手の mam export：候補ごとに、本文を作った時の状態（レース）と入力をひと組で持つ（ページの変化は見ない）
+            # 手の mam export：全部を読み、候補ごとに本文を作った時の状態（レース）と入力をひと組で持つ（ページの変化は見ない）
+            _, _, inputs = live_tables(root, state, snaps)
+            keys = sorted(k for k in inputs if k[1] != "result")
             todo = [(rk, tp, (state["races"][rk], inputs[(rk, tp)])) for rk, tp in keys]
     else:
         todo = [(rk, tp, None) for rk, tp in sorted(only)]

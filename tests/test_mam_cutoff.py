@@ -588,3 +588,45 @@ def test_tick_that_could_not_count_still_matches_each_input_to_its_own_pages(tmp
     for rk in (RK, R12):
         assert json.loads(mam._packet_path(paths, rk, TP).read_text())["source_snapshots"][0] == new[rk]
     _no_leftovers(paths)
+
+
+# ---- 💚20261127-6：見回りの鍵・数えられなかった道の候補の選び方 ----
+
+def test_overlapping_tick_is_skipped_so_pages_cannot_change_under_a_running_tick(tmp_path):
+    """見回りが動いている間（入力を置く途中）に始まった別の見回りは、何もせずに終わる（PR #15 と同じ見回りの鍵）。
+    だから先の見回りが確かめ直している間に、別の見回りが取消のページや発走時刻を保存することは無い。"""
+    paths = _paths(tmp_path)
+    _pages_saved_unplaced(paths)
+    before = (tmp_path / "live" / "snapshots.jsonl").read_text()
+    out, seen = _tick_interrupted_by(paths, AT.replace(minute=33), AT.replace(minute=33),
+                                     lambda: _other_tick(paths, AT.replace(minute=33), "15:37"))
+    assert seen[0] == {"skipped": "前の見回りがまだ動いている"}
+    assert out["mam_packets"] == 1 and json.loads((tmp_path / "live" / "state.json").read_text())["races"][RK]["post_time"] == "15:40"
+    assert (tmp_path / "live" / "snapshots.jsonl").read_text().startswith(before)
+    assert _tick(paths, [AT.replace(minute=34)]).get("skipped") is None   # 鍵は見回りが終われば外れる
+    _placed_once(paths)
+
+
+def test_tick_that_could_not_count_reads_only_the_due_time_point(tmp_path):
+    """置けていない時点を数えられなかった回も、ふだんと同じく状態と記録から対象の時点だけ選んで読む。
+    締切を過ぎた24時間前のオッズのページが読めなくても、締切前の1時間前の入力を置く（みに💚20261127-6 要修正）。"""
+    paths = _paths(tmp_path)
+    bad = _seed_24h_then_1h(paths)
+    real = wallet._read
+    touched = []
+
+    def read(root, rec):
+        import traceback
+        if any(f.filename.endswith("live/mam.py") for f in traceback.extract_stack()):
+            touched.append(rec["path"])
+        if rec["path"] == bad:
+            raise OSError(errno.EIO, "古いページだけ読めない")
+        return real(root, rec)
+
+    def cannot_count(*_a, **_k):
+        raise OSError(errno.EIO, "記録を一時的に読めない")
+
+    with patch.object(wallet, "_read", read), patch.object(mam, "unplaced", cannot_count):
+        out = _tick(paths, [AT.replace(minute=39)])
+    assert out["mam_packets"] == 1 and bad not in touched
+    _placed_once(paths)
