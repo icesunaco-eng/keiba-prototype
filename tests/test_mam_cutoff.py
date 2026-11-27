@@ -161,7 +161,9 @@ def test_unreadable_page_of_a_past_time_point_does_not_block_the_due_one(tmp_pat
     touched = []
 
     def read(root, rec):
-        touched.append(rec["path"])
+        import traceback   # まむへの書き出しから読んだものだけ数える（PR #15 と合わせた版は、ほかの読み手も同じページを読む）
+        if any(f.filename.endswith("live/mam.py") for f in traceback.extract_stack()):
+            touched.append(rec["path"])
         if rec["path"] == bad:
             raise OSError(errno.EIO, "古いページだけ読めない")
         return real(root, rec)
