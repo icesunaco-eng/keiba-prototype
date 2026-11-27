@@ -238,27 +238,33 @@ def _make(root: Path, state: dict, snaps, rk: str, tp: str, held: dict | None = 
 
 
 def _recheck(root: Path, rk: str, tp: str, dl: datetime, sig: tuple, clock):
-    """置く直前の確かめ直し（_publish_once の check）。最新の状態（state.json）と保存したページの記録を読み直し、
-    締切を過ぎた・発走時刻（締切）やその時点のページが変わった・レースが消えた、なら _Stale を上げる。
-    clock が None（手の mam export）なら締切は問わない。sig が None（手の mam export）ならページの変化は見ず、
-    発走時刻（締切）の変化とレースが消えたかだけを見る（入力の締切の欄を最新に合わせる。中身はそのときあるページのまま）。"""
-    def check():
+    """置く直前の確かめ直し（_publish_once の check）。この順に見て、置けないなら _Stale を上げる（みに💚20261127-2 の案）：
+    1. 最新の状態（state.json）：レースが消えた → gone、締切（発走時刻）が作った時と違う → changed（新しい状態で本文から作り直す）
+    2. 保存したページの記録（sig が None の手の mam export は見ない）：その時点のページが作った時と違う → changed
+    3. 状態をもう一度読む：ページの記録を読む間に別の見回りが発走時刻を変えていたら changed
+    4. 最後に時計（clock が None の手の mam export は見ない）：最新の締切を過ぎていたら late
+    時計を最後にするので、時計を見た後に長い読み取りが入らない（見直しと置く操作のあいだは、リンク1回分だけ残る）。"""
+    def deadline_now():
         r = _state(root).get("races", {}).get(rk)
         try:
-            now_dl = deadline(r["race_date"], r["post_time"], tp)
+            return r, deadline(r["race_date"], r["post_time"], tp)
         except (KeyError, TypeError, ValueError):
             raise _Stale("gone")
-        if clock is not None and clock() >= now_dl:
-            raise _Stale("late")
+
+    def check():
+        r, now_dl = deadline_now()
         if now_dl != dl:
             raise _Stale("changed")
-        if sig is None:
-            return
-        snaps = _snapshots(root)
-        s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
-        rows = _material(s, r, tp)
-        if rows is None or _signature(snaps, rows) != sig:
-            raise _Stale("changed")
+        if sig is not None:
+            snaps = _snapshots(root)
+            s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
+            rows = _material(s, r, tp)
+            if rows is None or _signature(snaps, rows) != sig:
+                raise _Stale("changed")
+            if deadline_now()[1] != dl:
+                raise _Stale("changed")
+        if clock is not None and clock() >= dl:
+            raise _Stale("late")
     return check
 
 
@@ -301,21 +307,22 @@ def export_packets(paths, now=None, only: set | None = None, held: dict | None =
     snaps = _snapshots(root)
     if only is None:   # 手の mam export（と、置けていない時点を数えられなかった見回り）：全部を読む
         _, _, inputs = live_tables(root, state, snaps)
-        todo = [(rk, tp, inputs[(rk, tp)]) for rk, tp in sorted(inputs) if tp != "result"]
+        # 候補ごとに、本文を作った時の状態（レース）と入力をひと組で持つ（途中で状態を読み直しても、ほかの候補の締切と中身が食い違わない）
+        todo = [(rk, tp, (state["races"][rk], inputs[(rk, tp)])) for rk, tp in sorted(inputs) if tp != "result"]
     else:
         todo = [(rk, tp, None) for rk, tp in sorted(only)]
     out_dir = paths.data_dir / "mam" / "outbox"
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
-    for rk, tp, inp in todo:
+    for rk, tp, built in todo:
         for _ in range(REMAKE_LIMIT):
-            if inp is None:
+            if built is None:
                 made = _make(root, state, snaps, rk, tp, held)
                 if made is None:
                     break
                 r, dl, sig, inp = made
             else:
-                r = state["races"][rk]
+                r, inp = built   # 本文を作った時のレース（読み直した後の状態ではない）
                 dl = deadline(r["race_date"], r["post_time"], tp)
                 sig = None   # 手の mam export：ページの変化は見ない（そのときあるページで置く）
                 if clock is not None:
@@ -331,7 +338,7 @@ def export_packets(paths, now=None, only: set | None = None, held: dict | None =
             except _Stale as stale:
                 if stale.reason != "changed":
                     break   # 締切を過ぎた・レースが消えた
-                state, snaps, inp = _state(root), _snapshots(root), None   # 新しい状態で作り直す
+                state, snaps, built = _state(root), _snapshots(root), None   # 新しい状態で本文から作り直す
                 continue
             if placed is not None:   # None：同時に動いた別の書き出しが先に置いた
                 written.append(placed)

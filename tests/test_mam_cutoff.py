@@ -471,3 +471,90 @@ def test_manual_export_keeps_the_pages_it_read_when_only_pages_change(tmp_path):
     packet = json.loads(mam._packet_path(paths, RK, TP).read_text())
     assert packet["source_snapshots"][0] == first_card and packet["deadline"].endswith("T14:40+09:00")
     _no_leftovers(paths)
+
+
+# ---- 💚20261127-2：時計は最後・読む間の発走時刻の変化・手の一括書き出しの組 ----
+
+def _during_recheck_snapshots(action):
+    """置く直前の確かめ直しの中で、保存したページの記録を読んでいる最中に action() を1回だけ動かす差し替え。"""
+    real = mam._snapshots
+    done = []
+
+    def snapshots(root):
+        import traceback
+        if not done and any(f.name == "check" and f.filename.endswith("live/mam.py") for f in traceback.extract_stack()):
+            done.append(1)
+            out = real(root)
+            action()
+            return out
+        return real(root)
+    return snapshots
+
+
+def test_clock_is_checked_last_so_a_slow_read_cannot_cross_the_deadline(tmp_path):
+    """14:39:59 に置き直しを始め、確かめ直しの中でページの記録を読む間に 14:40:01 になったら置かない（時計は最後に見る）。"""
+    paths = _paths(tmp_path)
+    _pages_saved_unplaced(paths)
+    clock = [DL11 - timedelta(seconds=1)]
+
+    def slow():
+        clock[0] = DL11 + timedelta(seconds=1)
+    with patch.object(mam, "_snapshots", _during_recheck_snapshots(slow)):
+        out = _tick(paths, clock)
+    assert out.get("mam_packets", 0) == 0 and not mam._packet_path(paths, RK, TP).exists()
+    _no_leftovers(paths)
+
+
+def test_post_time_changed_while_reading_pages_in_the_recheck_is_seen(tmp_path):
+    """確かめ直しで状態を読んだ後、ページの記録を読む間に別の見回りが発走を 15:37 に繰り上げたら、最後に状態を読み直して置かない。"""
+    paths = _paths(tmp_path)
+    _pages_saved_unplaced(paths)
+
+    def moved():
+        state_path = tmp_path / "live" / "state.json"
+        state = json.loads(state_path.read_text())
+        state["races"][RK]["post_time"] = "15:37"
+        state_path.write_text(json.dumps(state, ensure_ascii=False))
+    with patch.object(mam, "_snapshots", _during_recheck_snapshots(moved)):
+        out = _tick(paths, [AT.replace(minute=38)])
+    assert out.get("mam_packets", 0) == 0 and not mam._packet_path(paths, RK, TP).exists()
+    _no_leftovers(paths)
+
+
+def test_manual_export_of_several_time_points_keeps_deadline_and_pages_together(tmp_path):
+    """手の mam export で同じレースの15分前と1時間前をまとめて置く途中、15分前を置く前に発走が 15:37 に繰り上がった。
+    1時間前も新しい締切（14:37）で本文から作り直し、14:37 より後のページ（14:38 の出馬表）は入れない。"""
+    paths = _paths(tmp_path)
+    live = tmp_path / "live"
+    at = [AT.replace(minute=35)]
+    seed = REAL_COLLECTOR(live, client=_client(), now=lambda: at[0])
+    seed.state["races"][RK] = {"race_number": 11, "post_time": "15:40", "race_date": "2025-08-30", "venue": "京都",
+                               "field_size": 8, "known_at": AT.isoformat()}
+    early = seed._save(RK, "card", TP, "/sample", "card-1435", card_html(IDS))
+    at[0] = AT.replace(minute=38)
+    late = seed._save(RK, "card", TP, "/sample", "card-1438", card_html(IDS) + "<!-- 14:38 -->")
+    at[0] = AT.replace(hour=15, minute=20)
+    seed._save(RK, "card", "15m", "/sample", "card-15m", card_html(IDS))
+    seed._save(RK, "odds_trio", "15m", "/sample", "trio-15m", trio_html(time="15時19分"))
+    seed._write_state()
+    real = mam._write_complete
+    started = []
+
+    def write(path, text):
+        real(path, text)
+        if not started:   # 最初の本文（15分前）を書き終えた所で、別の見回りが発走を繰り上げた
+            started.append(json.loads(text)["time_point"])
+            state_path = live / "state.json"
+            state = json.loads(state_path.read_text())
+            state["races"][RK]["post_time"] = "15:37"
+            state_path.write_text(json.dumps(state, ensure_ascii=False))
+
+    with patch.object(mam, "_write_complete", write), redirect_stdout(io.StringIO()):
+        cli.cmd_mam(paths, SimpleNamespace(action="export"))
+    assert started == ["15m"]
+    one = json.loads(mam._packet_path(paths, RK, TP).read_text())
+    assert one["deadline"].endswith("T14:37+09:00") and one["race"]["post_time"] == "15:37"
+    assert one["source_snapshots"][0] == early["sha256"] and late["sha256"] not in one["source_snapshots"]
+    fifteen = json.loads(mam._packet_path(paths, RK, "15m").read_text())
+    assert fifteen["deadline"].endswith("T15:22+09:00")
+    _no_leftovers(paths)
