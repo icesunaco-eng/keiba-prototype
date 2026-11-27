@@ -307,8 +307,14 @@ def export_packets(paths, now=None, only: set | None = None, held: dict | None =
     snaps = _snapshots(root)
     if only is None:   # 手の mam export（と、置けていない時点を数えられなかった見回り）：全部を読む
         _, _, inputs = live_tables(root, state, snaps)
-        # 候補ごとに、本文を作った時の状態（レース）と入力をひと組で持つ（途中で状態を読み直しても、ほかの候補の締切と中身が食い違わない）
-        todo = [(rk, tp, (state["races"][rk], inputs[(rk, tp)])) for rk, tp in sorted(inputs) if tp != "result"]
+        keys = sorted(k for k in inputs if k[1] != "result")
+        if clock is not None:
+            # 見回り：候補のキーだけ使い、本文・締切・ページの組は候補ごとに _make で同じ読み取りから作る
+            # （ほかの候補を作り直して記録を読み直しても、本文と照らすページの組が食い違わない。みに💚20261127-4 の案）
+            todo = [(rk, tp, None) for rk, tp in keys]
+        else:
+            # 手の mam export：候補ごとに、本文を作った時の状態（レース）と入力をひと組で持つ（ページの変化は見ない）
+            todo = [(rk, tp, (state["races"][rk], inputs[(rk, tp)])) for rk, tp in keys]
     else:
         todo = [(rk, tp, None) for rk, tp in sorted(only)]
     out_dir = paths.data_dir / "mam" / "outbox"
@@ -321,14 +327,12 @@ def export_packets(paths, now=None, only: set | None = None, held: dict | None =
                 if made is None:
                     break
                 r, dl, sig, inp = made
-            else:
+                if clock is None:
+                    sig = None   # 手の mam export は、作り直した後もページの変化は見ない（はじめの入力と同じ扱い）
+            else:   # 手の mam export だけ
                 r, inp = built   # 本文を作った時のレース（読み直した後の状態ではない）
                 dl = deadline(r["race_date"], r["post_time"], tp)
-                sig = None   # 手の mam export：ページの変化は見ない（そのときあるページで置く）
-                if clock is not None:
-                    s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
-                    rows = _material(s, r, tp)
-                    sig = _signature(snaps, rows) if rows is not None else ()
+                sig = None   # ページの変化は見ない（そのときあるページで置く）
             if clock is not None and clock() >= dl:
                 break   # 締切を過ぎた時点は置かない（まむが答えても受け付けない）
             if _packet_path(paths, rk, tp).exists():   # 置く場所・受付で読む場所と同じ名前

@@ -558,3 +558,33 @@ def test_manual_export_of_several_time_points_keeps_deadline_and_pages_together(
     fifteen = json.loads(mam._packet_path(paths, RK, "15m").read_text())
     assert fifteen["deadline"].endswith("T15:22+09:00")
     _no_leftovers(paths)
+
+
+def test_tick_that_could_not_count_still_matches_each_input_to_its_own_pages(tmp_path):
+    """置けていない時点を数えられなかった見回り（全部を読む道）でも、候補ごとに本文とページの組を同じ読み取りで作る。
+    11R を書き終えた所で、別の見回りが 11R・12R の出馬表を取り直した。11R は作り直し、12R も新しい出馬表で作る
+    （前は 11R を作り直した後の記録と 12R の古い本文を照らして、古い本文のまま置いた。みに💚20261127-4 重大）。"""
+    paths = _paths(tmp_path)
+    clock = [AT]
+    _unplaced_pages(paths, clock, fresh=False)   # 11R は 14:30、12R は 14:35 にページを保存、どちらも置けていない
+    real = mam._write_complete
+    started, new = [], {}
+
+    def write(path, text):
+        real(path, text)
+        if not started:
+            started.append(1)
+            col = REAL_COLLECTOR(tmp_path / "live", client=_client(), now=lambda: AT.replace(minute=36))
+            for rk in (RK, R12):
+                new[rk] = col._save(rk, "card", TP, "/sample", "card-again", card_html(IDS) + f"<!-- {rk} 取り直し -->")["sha256"]
+
+    def cannot_count(*_a, **_k):
+        raise OSError(errno.EIO, "記録を一時的に読めない")
+
+    clock[0] = AT.replace(minute=36)
+    with patch.object(mam, "unplaced", cannot_count), patch.object(mam, "_write_complete", write):
+        out = _tick(paths, clock, another=True)
+    assert out["mam_packets"] == 2
+    for rk in (RK, R12):
+        assert json.loads(mam._packet_path(paths, rk, TP).read_text())["source_snapshots"][0] == new[rk]
+    _no_leftovers(paths)
