@@ -47,6 +47,10 @@ def export_packets(paths) -> list[Path]:
         f = out_dir / f"{rk.replace('|', '_')}_{tp}.json"
         if f.exists() or not wallet.input_ready(rk, tp, inp, r, wallet.prediction_clock()):
             continue   # その時点の取得を待つ（一度書いた入力は書き直さない）
+        if inp.get("roster_issue"):
+            # 出馬表の名簿が欠けた・重なった・頭数が一覧と合わない：締切まで回復しなくても、欠けた名簿の入力は固定しない
+            # （画面の代替の予想は出すが、まむへの入力は書き直さないので出さない。時間内に名簿が戻れば、その時点で出す）
+            continue
         gate = inp["gate"]
         packet = {
             "schema": SCHEMA_IN, "race_key": rk, "time_point": tp,

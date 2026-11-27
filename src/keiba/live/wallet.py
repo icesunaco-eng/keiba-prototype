@@ -109,6 +109,13 @@ def card_problem(nums: list[int], field_size) -> str | None:
     return None
 
 
+def roster_issue(card_all, field_size) -> str | None:
+    """出馬表の名簿が信用できない理由（ページの形の問題か card_problem）。無ければ None。
+    収集（三連複・未発売の印を途中にする）・予想（card_issue）・まむの入力の発行が同じ判定を使う。"""
+    return "・".join(getattr(card_all, "problems", None) or []) or \
+        card_problem([c.get("horse_number") for c in card_all], field_size)
+
+
 def complete_records(df: pd.DataFrame) -> pd.DataFrame:
     """目録の行のうち、途中（incomplete）の印の無いもの。0行のときも列はそのまま（空の絞り込みを列の選び方と取り違えない）。"""
     if "incomplete" not in df.columns or not len(df):
@@ -235,8 +242,7 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                 if tp == "15m" and not (len(win) or len(trio)):
                     continue  # 15分前は配分の見直しだけ。新しいオッズが無ければ作らない
                 active = [int(c["horse_number"]) for c in card]  # 出走馬（取消を除く）。オッズの組はこれとぴったり照らす
-                card_issue = ("・".join(getattr(card_all, "problems", [])) or
-                              card_problem([c["horse_number"] for c in card_all], r.get("field_size")))
+                card_issue = roster = roster_issue(card_all, r.get("field_size"))
                 card_at = datetime.fromisoformat(cards.iloc[-1]["fetched_at"])
                 opens = dl - timedelta(minutes=CAPTURE_LEAD_MIN)
                 if not card_issue and card_at < opens:
@@ -267,6 +273,7 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                                     "gate": _with_card_issue(odds_gate(t, trio_rec, r, tp) if tp != "24h" or trio_rec is not None else
                                                              {"pass": False, "reasons": ["前日はオッズを使わない（未発売のことが多い）"]},
                                                              card_issue),
+                                    "roster_issue": roster,   # 名簿そのものの問題（まむの入力はこれがあると出さない）
                                     "card_fetched_at": cards.iloc[-1]["fetched_at"],
                                     "snapshots": [cards.iloc[-1]["sha256"], *win["sha256"].tolist()[-1:], *trio["sha256"].tolist()[-1:]]}
             res = s[s["kind"] == "result"] if len(s) else s

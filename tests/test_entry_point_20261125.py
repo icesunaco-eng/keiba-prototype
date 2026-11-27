@@ -261,7 +261,7 @@ def _cli_tick(paths, monkeypatch, now, pages=None, months=None):
     monkeypatch.setattr(mam, "export_packets", lambda p: [])
     monkeypatch.setattr(wallet, "run_live", lambda p, **k: _REAL_RUN_LIVE(p, now=now))
     import keiba.review as review
-    monkeypatch.setattr(review, "write_review", lambda p, month, *a: (months if months is not None else []).append(month))
+    monkeypatch.setattr(review, "write_review", lambda p, month, *a, **k: (months if months is not None else []).append(month))
     out = StringIO()
     with redirect_stdout(out):
         cli.cmd_collect(paths, types.SimpleNamespace(action="tick"))
@@ -366,13 +366,13 @@ def test_previous_month_review_is_rewritten_after_any_stop(env, monkeypatch, mod
     old_json = (paths.data_dir / "review" / f"{month}.json").read_bytes()   # 精算の前の8月の月次（返還0円）
     calls, exports = [], []
 
-    def writer(p, target, *a):
+    def writer(p, target, *a, **k):
         calls.append(target)
         if target == month and calls.count(month) == 1 and mode in ("write_error", "stop_in_write"):
             if mode == "stop_in_write":
                 raise KeyboardInterrupt()              # 見回りがここで止まった（電源・強制終了）
             raise OSError("一時的に書けない")
-        return real_write(p, target, *a)
+        return real_write(p, target, *a, **k)
 
     def export(p):
         exports.append(1)
@@ -704,11 +704,11 @@ def test_review_of_month_without_settlements_is_retried(env, monkeypatch):
     today = _date.today().strftime("%Y-%m")                         # 見回りが月次を書く「今日の月」（精算は無い）
     calls = []
 
-    def writer(p, target, *a):
+    def writer(p, target, *a, **k):
         calls.append(target)
         if target == today and calls.count(today) == 1:
             raise OSError("一時的に書けない")
-        return _REAL_WRITE_REVIEW(p, target, *a)
+        return _REAL_WRITE_REVIEW(p, target, *a, **k)
 
     def tick(at):
         class Cl:
@@ -770,7 +770,8 @@ def test_mam_packet_on_storage_without_hard_links(env, monkeypatch):
 
 
 def _replay_trio_rows(directory, mode):
-    """mode：row_missing（14:25は1-2-3の行が丸ごと欠け、14:30から完全）、display_row（馬番の無い表示だけの空の行が1行ある）。"""
+    """mode：row_missing（14:25は1-2-3の行が丸ごと欠け、14:30から完全）、display_row（馬番の無い表示だけの空の行が1行ある）。
+    card_short：14:30より前は出馬表が途中まで（8番の行が無い・一覧は8頭）。card_short_always：締切まで途中のまま。"""
     import re as _re
     paths = _paths(directory)
     root = paths.data_dir / "live"
@@ -785,6 +786,10 @@ def _replay_trio_rows(directory, mode):
             return pages[name].replace("15時41分", "15時40分")
         if name == CARD and mode == "card_preparing" and clock["now"] < T("14:30"):
             return _re.sub(r'<td class="num">\d+</td>', '<td class="num"></td>', pages[name])   # 出馬表が準備中（馬番が空）
+        if name == CARD and (mode == "card_short_always" or (mode == "card_short" and clock["now"] < T("14:30"))):
+            rows = _re.findall(r"<tr>.*?</tr>", pages[name], flags=_re.S)
+            assert len(rows) == 8
+            return pages[name].replace(rows[-1], "")   # 出馬表が途中まで（8番の行が無い。一覧は8頭）
         if name == "pw156ou1/66" and clock["now"] < T("14:30"):
             html = pages[name]
             if mode in ("row_missing", "card_preparing"):
@@ -904,7 +909,7 @@ def test_month_end_stop_right_after_live_started_keeps_the_month(env, monkeypatc
 
     with pytest.raises(KeyboardInterrupt):
         tick(datetime(2025, 8, 31, 23, 55, tzinfo=JST))
-    assert "2025-08" in json.loads((col.root / "state.json").read_text())["review_months"]
+    assert "2025-08" in json.loads((col.root / "state.json").read_text())["live_months"]   # 始める印と同じ保存
     assert not (paths.data_dir / "review" / "2025-08.json").exists()
     tick(datetime(2025, 9, 2, 10, 0, tzinfo=JST))                   # 翌々日に再開（9/1は動いていない）
     for f in ("2025-08.json", "2025-08.html"):
@@ -969,3 +974,160 @@ def test_race_missing_from_list_through_ordinary_ticks(tmp_path):
     tick(day_before("15:31"))                                       # 一覧に戻り「未発表」
     assert f"{RK}|24h" in Collector(root, client=client).state["taken"]
     assert tick(day_before("15:41"))["missed"] == 0 and not any(f"{RK}|24h" in m for m in told)
+
+
+
+# ---- 💚20261127-1（みにの再検証）の指摘 ---------------------------------------------------------------------
+
+def _mam_1h(paths):
+    f = paths.data_dir / "mam" / "outbox" / f"{RK.replace('|', '_')}_1h.json"
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+
+
+def test_short_card_is_recaptured_before_prediction_and_mam(tmp_path):
+    """止める：14:25は一覧8頭・出馬表7頭（8番の行が無い）。三連複は8頭分そろっている。14:25は取得済みにせず、
+    予想・まむの入力も作らない。14:30に完全な出馬表（3番取消）を取り直し、その時点の正式の予想とまむの入力を作る。"""
+    paths, root, client, tick, told = _replay_trio_rows(tmp_path / "short", "card_short")
+    tick("14:00")
+    tick("14:25")
+    assert f"{RK}|1h" not in Collector(root, client=client).state["taken"]
+    recs = [json.loads(x) for x in (root / "snapshots.jsonl").read_text(encoding="utf-8").splitlines()]
+    trio = [x for x in recs if x["kind"] == "odds_trio" and x["time_point"] == "1h"]
+    assert len(trio) == 1 and "名簿" in trio[0]["incomplete"] and "頭数" in trio[0]["incomplete"]
+    assert _mam_1h(paths) is None                                    # 欠けた名簿の入力を固定しない
+    led = Ledger(paths.ledger_path, read_only=True)
+    assert not [p for p in led.predictions() if p["race_key"] == RK and p["time_point"] == "1h"]
+    led.close()
+    tick("14:30")
+    assert client.calls.count("pw156ou1/66") == 2                    # 取り直した
+    assert f"{RK}|1h" in Collector(root, client=client).state["taken"]
+    assert official.material_time(official.capture_records(root)[(RK, "1h")], T("14:40")) == T("14:30")
+    packet = _mam_1h(paths)
+    assert packet["race"]["field_size"] == 8 and packet["scratched_known"] == [3]
+    assert [h["horse_number"] for h in packet["horses"]] == [1, 2, 4, 5, 6, 7, 8]
+    src = Source(paths, "live")
+    p = src.preds[RK][("ml_lgbm", "1h")]
+    assert p["odds_gate"]["pass"] and not p["odds_gate"].get("card_issue")
+    assert tick("14:41")["missed"] == 0 and not any(f"{RK}|1h" in m for m in told)
+
+
+def test_short_card_through_the_deadline_is_missed_and_not_sent_to_mam(tmp_path):
+    """止める：出馬表が締切まで途中のまま（一覧8頭・出馬表7頭）。取得済みにせず、時間帯が過ぎたら取り損ねとして知らせる。
+    画面の代わりの予想にはお金を配分せず、欠けた名簿のまむの入力は出さない。"""
+    paths, root, client, tick, told = _replay_trio_rows(tmp_path / "always", "card_short_always")
+    for hm in ("14:00", "14:25", "14:30", "14:35", "14:41", "14:46"):
+        last = tick(hm)
+    assert f"{RK}|1h" not in Collector(root, client=client).state["taken"]
+    assert last["missed"] >= 1 and any(f"{RK}|1h" in m for m in told)
+    assert _mam_1h(paths) is None
+    led = Ledger(paths.ledger_path, read_only=True)
+    preds = [p for p in led.predictions() if p["race_key"] == RK and p["time_point"] == "1h"]
+    led.close()
+    for p in preds:
+        for a, v in (p.get("allocation") or {}).items():
+            if isinstance(v, dict):
+                assert not v.get("stakes"), (p["method"], a, v)
+
+
+@pytest.mark.parametrize("short", [False, True, "before_draw"])
+def test_unreleased_odds_with_short_card_is_not_counted(tmp_path, short):
+    """前日の時点で一覧に「未発表」と出ていても、同じ回の出馬表が途中まで（一覧8頭・出馬表7頭）なら材料に数えない。
+    完全な出馬表なら今までどおり未発売として数える。馬番が全部空（枠順の確定前。本番の前日朝の1Rで実例）も
+    今までどおり数える（予想の側もこの時点の入力を作らない）。"""
+    import re as _re
+    from tests.test_live_collector import race_list
+    day_before = lambda hm: datetime.fromisoformat(f"2026-11-21T{hm}:00+09:00")
+    root = tmp_path / "live"
+    clock = {"now": day_before("15:00")}
+
+    def page(name):
+        if name.startswith("pw01dli"):
+            return INDEX
+        if name == LIST:
+            return race_list(odds=False).replace("15時41分", "15時40分").replace("18頭", "8頭")
+        html = _pages(clock)[name]
+        if name == CARD and short == "before_draw":
+            html = _re.sub(r'<td class="num">\d+</td>', '<td class="num"></td>', html)
+        elif name == CARD and short:
+            html = html.replace(_re.findall(r"<tr>.*?</tr>", html, flags=_re.S)[-1], "")
+        return html
+    col = Collector(root, client=FakeClient(page), now=lambda: clock["now"])
+    col.state["races"][RK] = {"race_date": DAY, "venue": "京都", "race_number": 11, "post_time": "15:40",
+                             "field_size": 8, "surface": "芝", "distance_m": 1600, "list_cname": LIST,
+                             "known_at": day_before("09:00").isoformat(), "odds_status": "未発表"}
+    col.state["refreshed_at"] = day_before("15:10").isoformat()
+    col._write_state()
+    clock["now"] = day_before("15:26")
+    col.capture(RK, "24h")
+    counted = short is not True
+    assert (f"{RK}|24h" in col.state["taken"]) == counted
+    dl = deadline(DAY, "15:40", "24h")
+    assert (official.material_time(official.capture_records(root).get((RK, "24h"), []), dl) is not None) == counted
+
+
+def test_tick_does_not_wait_for_manual_review_lock(env, monkeypatch):
+    """直してから：手で動かす月次（keiba review）が出力の鍵を持っている間に見回りが月次を書く回になっても、
+    収集の鍵を持ったまま待たない。書けなかった月は review_months に残し（失敗として知らせない）、次の見回りが
+    収集の鍵を取れる。鍵が外れた後の見回りで月次を書く。"""
+    import fcntl
+    import threading
+    import keiba.review as review
+    paths, col, rk = env
+    _cancel(col.root, rk)
+    col.state["races"][rk].update(list_cname="L", result_links=[["/x", "R"]], known_at="2025-08-30T09:00:00+09:00")
+    col._write_state()
+    _cli_tick(paths, monkeypatch, datetime(2025, 8, 30, 16, 10, tzinfo=JST), {"R": empty_result(rk)})
+    monkeypatch.setattr(review, "write_review", _REAL_WRITE_REVIEW)
+    told = []
+
+    def tick(at):
+        class Cl:
+            count = 0
+            def get(self, path, cname): return "<html></html>"
+            def get_url(self, url): return "<html></html>"
+        real = collector_module.Collector
+        monkeypatch.setattr(collector_module, "Collector", lambda root: real(root, client=Cl(), now=lambda: at))
+        monkeypatch.setattr(real, "refresh", lambda self, force=False: None)
+        monkeypatch.setattr(real, "check_notices", lambda self, log=print: None)
+        monkeypatch.setattr(cli, "_notify", lambda *a, **k: told.append(a))
+        monkeypatch.setattr(mam, "export_packets", lambda p: [])
+        monkeypatch.setattr(wallet, "run_live", lambda p, **k: _REAL_RUN_LIVE(p, now=at))
+        out = StringIO()
+        try:
+            with redirect_stdout(out):
+                cli.cmd_collect(paths, types.SimpleNamespace(action="tick"))
+        finally:
+            monkeypatch.setattr(collector_module, "Collector", real)
+        return json.loads(out.getvalue().splitlines()[-1])
+
+    out = paths.data_dir / "review"
+    out.mkdir(parents=True, exist_ok=True)
+    with open(out / ".lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)                             # 手で動かす月次が書いている間
+        done = threading.Event()
+        th = threading.Thread(target=lambda: (tick(datetime(2025, 9, 7, 16, 0, tzinfo=JST)), done.set()))
+        th.start()
+        assert done.wait(60), "見回りが月次の鍵を待って止まった"         # 8月の返還を精算する回（月次を書く回）
+        th.join()
+        state = json.loads((col.root / "state.json").read_text())
+        assert "2025-08" in state["review_months"] and not state.get("live_failures")
+        assert not (out / "2025-08.json").exists() or "2025-08" in review.stale_months(paths)
+        with open(col.root / "tick.lock", "a") as lock:              # 収集の鍵は外れている（次の見回りが動ける）
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock, fcntl.LOCK_UN)
+    assert not told
+    tick(datetime(2025, 9, 7, 16, 5, tzinfo=JST))                   # 鍵が外れた後のふつうの見回り
+    assert (out / "2025-08.json").exists() and "2025-08" not in review.stale_months(paths)
+    assert not json.loads((col.root / "state.json").read_text()).get("review_months")
+
+
+def test_ordinary_live_run_without_settlement_does_not_rewrite_reviews(env, monkeypatch):
+    """あとで（負荷）：精算の無いふつうの予想・精算の回（最後まで終わった回）は、月次を作り直さない。
+    始める印と一緒に残した月（live_months）は、最後まで終わったら外す。"""
+    paths, col, rk = env
+    col.state["live_pending"] = True
+    col._write_state()
+    months = []
+    _cli_tick(paths, monkeypatch, datetime(2025, 8, 30, 14, 0, tzinfo=JST), months=months)
+    state = json.loads((col.root / "state.json").read_text())
+    assert months == [] and not state.get("review_months") and "live_months" not in state

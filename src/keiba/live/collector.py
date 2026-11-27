@@ -414,14 +414,21 @@ class Collector:
                     return saved
         else:
             active = None   # この回の出馬表で取消でない馬番（三連複のページに全組が載っているかを見る）
+            roster = None   # この回の出馬表の名簿が信用できない理由（予想・まむの発行と同じ wallet.roster_issue）
+            numbered = False   # 馬番が1つでも読めたか（全部空なら枠順の確定前。予想の側もこの時点の入力を作らない）
             if r.get("card_cname"):  # 出馬表は毎時点取る（取消を、その時点の締切までの情報で反映するため）
+                from .wallet import roster_issue
                 card_page = self.client.get("/JRADB/accessD.html", r["card_cname"])
                 saved.append(self._save(rk, "card", tp, "/JRADB/accessD.html", r["card_cname"], card_page))
                 try:
-                    active = [c["horse_number"] for c in jra.parse_card(card_page)
+                    card_all = jra.parse_card(card_page)
+                    # 一覧の頭数と合わない・馬番の欠け・重複・読めない行（取消の馬も名簿に残るので、取消込みの全行で見る）
+                    roster = roster_issue(card_all, r.get("field_size"))
+                    numbered = any(c.get("horse_number") is not None for c in card_all)
+                    active = [c["horse_number"] for c in card_all
                               if not c.get("scratch") and c.get("horse_number") is not None] or None
-                except Exception:   # 出馬表が読めない回は組の照合をしない（材料の判定は予想の側の名簿の検査に任せる）
-                    active = None
+                except Exception as exc:   # 出馬表が読めない回：名簿を照らせないので、この回の材料を途中にする
+                    roster, active = f"出馬表を読めない（{type(exc).__name__}）", None
             odds_links = r.get("odds_links") or []
             if not odds_links:
                 status = fresh.get("odds_status") if fresh else None   # 今回の一覧のこのレースの行の欄だけ（行が無ければ確かめていない）
@@ -431,6 +438,11 @@ class Collector:
                     # 一覧のオッズの欄が無い・「未発表」と出ていない：未発売とは言えないので材料に数えず、時間帯の間は取り直す
                     saved[-1]["incomplete"] = (f"オッズの欄が「{status or '無い'}」（未発表と出ていない）" if fresh else
                                                "今回の一覧にこのレースの行が無い（未発表か確かめていない）")
+                elif roster and (numbered or roster.startswith("出馬表を読めない")):
+                    # 未発売でも、同じ回の出馬表の名簿が途中まで（馬番の欠け・重複・頭数が一覧と合わない）なら、この回の
+                    # 材料はそろっていない（時間帯の間は取り直す）。馬番が全部空の出馬表は枠順の確定前（前日の朝の1R など。
+                    # 本番の原本で9時点）：予想の側もこの時点の入力を作らないので、今までどおり未発売の印で数える
+                    saved[-1]["incomplete"] = f"同じ回の出馬表の名簿が信用できない：{roster}"
                 self._append_index(saved[-1])
             else:
                 path, cname = odds_links[0]
@@ -444,7 +456,11 @@ class Collector:
                         issue = None
                         if kind == "trio":
                             issue = jra.trio_page_issue(page2, active)
-                            if issue is None and not active:
+                            if issue is None and roster:
+                                # 同じ回の出馬表の名簿が途中まで（頭数が一覧と合わない・馬番の欠け・重複）：組を照らせず、
+                                # この回の名簿で予想・まむの入力を作ると欠けた名簿で固定されるので、途中として時間帯の間は取り直す
+                                issue = f"同じ回の出馬表の名簿が信用できず、三連複の組を照らせない：{roster}"
+                            elif issue is None and not active:
                                 # 同じ回の出馬表で名簿（取消でない馬番）が取れない（準備中・リンク欠け等）：載っている組を照らせない
                                 issue = "同じ回の出馬表の名簿が無く、三連複の組を照らせない"
                         saved.append(self._save(rk, f"odds_{kind}", tp, p2, c2, page2, issue))
@@ -557,12 +573,16 @@ class Collector:
 
     def live_started(self, months=()) -> bool:
         """予想・精算を始める印を先に残す。返すのは、前の回の印が残っていたか（＝最後まで終わっていない）。
-        months：この回で月次を書く予定の月。始める印と同じ保存で review_months に足す（この直後に止まって、
-        日や月をまたいで再開しても、書く予定だった月を次の見回りが書く。月次が書けるまで外さない）。"""
+        months：この回が書くかもしれない月（今日の月）。始める印と同じ保存で live_months に残す。
+        前の回が最後まで終わっていなければ、前の回の live_months を月次の書く予定（review_months）へ移す（同じ保存）。
+        これで、始めた直後に止まって日や月をまたいで再開しても、その月の月次を書く。最後まで終わった回は移さないので、
+        精算の無いふつうの回に毎回月次を作り直さない（精算した回の月は、精算の側から渡す）。"""
         before = bool(self.state.get("live_running"))
+        if before:
+            self.state["review_months"] = sorted(set(self.state.get("review_months") or [])
+                                                 | set(self.state.get("live_months") or []))
         self.state["live_running"] = True
-        self.state["review_months"] = sorted(set(self.state.get("review_months") or []) | set(months)
-                                             | {self.now().strftime("%Y-%m")})
+        self.state["live_months"] = sorted(set(months) | {self.now().strftime("%Y-%m")})
         self._write_state()
         return before
 
@@ -575,6 +595,8 @@ class Collector:
         self.state["live_failures"] = (told + new)[-200:] if failures else []
         self.state["live_pending"] = bool(failures)
         self.state["live_running"] = bool(failures)
+        if not failures:
+            self.state.pop("live_months", None)   # 最後まで終わった（月次の書く予定は review_months に残っている）
         if failures and not new and not retry_now:
             self.state["live_retry_at"] = (self.now() + timedelta(minutes=LIVE_RETRY_MINUTES)).isoformat(timespec="seconds")
         else:

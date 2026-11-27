@@ -212,13 +212,22 @@ def _replace_text(path: Path, text: str):
     tmp.replace(path)
 
 
-def write_review(paths, month: str | None, start: str | None = None, end: str | None = None) -> Path:
+class ReviewBusy(BlockingIOError):
+    """ほかの出力（手で動かす keiba review など）が月次を書いている間で、待たずに戻った。"""
+
+
+def write_review(paths, month: str | None, start: str | None = None, end: str | None = None, wait: bool = True) -> Path:
+    """月次（または期間）の振り返りを書く。wait=False なら、ほかの出力が書いている間は待たずに ReviewBusy を上げる
+    （見回りは収集の鍵を持ったまま待たない。書けなかった月は review_months に残して次の見回りで書く）。"""
     import fcntl
     out = paths.data_dir / "review"
     out.mkdir(parents=True, exist_ok=True)
     # 月次は1つずつ書く（見回りと手で動かす keiba review が重なると、古い中身が後から上書きし、目印だけ新しくなることがある）
     with open(out / ".lock", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError as exc:
+            raise ReviewBusy(*exc.args) from exc
         count = settlement_counts(paths).get(month, 0) if month else None   # 先に数える（作る途中に増えた分は、次の回に書き直す）
         r = build_review(paths, month, start, end)
         path = _write_review_files(out, month or f"{start}_{end}", r)

@@ -131,9 +131,10 @@ def cmd_review(paths, args):
 
 def _write_reviews(paths, col, months: set) -> list[str]:
     """月次の振り返りを書く。書く月は、書き始める前に状態（review_months）へ残し、HTML・JSON・目印まで書けた月だけ外す
+    （ほかの出力が月次を書いている間は待たずに残し、次の見回りで書く）
     （精算の無い月も、書き込みの失敗・途中の停止のあと次の見回りで書き直す）。精算の行数と月次の目印が食い違う月
     （精算の直後に止まった等）も見つけて足す。返すのは書けなかった月の失敗の文（次の見回りでまた書く）。"""
-    from .review import stale_months, write_review
+    from .review import ReviewBusy, stale_months, write_review
     try:
         stale = set(stale_months(paths))
     except Exception:   # 台帳を読めない回（書き込み中の鍵など）は、残っている月と渡した月だけ書く
@@ -146,7 +147,11 @@ def _write_reviews(paths, col, months: set) -> list[str]:
     failed, left = [], []
     for month in todo:
         try:
-            write_review(paths, month)
+            write_review(paths, month, wait=False)
+        except ReviewBusy:
+            # 手で動かす keiba review などが月次を書いている：収集の鍵を持ったまま待たない（次の見回りが止まる）。
+            # 失敗ではないので知らせず、この月は残して次の見回りで書く
+            left.append(month)
         except Exception as exc:   # 1つの月が書けなくても、ほかの月は書く
             failed.append(f"{month} の月次の振り返り：{exc!r}"[:200])
             left.append(month)
