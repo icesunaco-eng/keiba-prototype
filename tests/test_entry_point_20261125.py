@@ -258,7 +258,7 @@ def _cli_tick(paths, monkeypatch, now, pages=None, months=None):
     monkeypatch.setattr(real, "refresh", lambda self, force=False: None)
     monkeypatch.setattr(real, "check_notices", lambda self, log=print: None)
     monkeypatch.setattr(cli, "_notify", lambda *a, **k: None)
-    monkeypatch.setattr(mam, "export_packets", lambda p: [])
+    monkeypatch.setattr(mam, "export_packets", lambda p, **k: [])
     monkeypatch.setattr(wallet, "run_live", lambda p, **k: _REAL_RUN_LIVE(p, now=now))
     import keiba.review as review
     monkeypatch.setattr(review, "write_review", lambda p, month, *a, **k: (months if months is not None else []).append(month))
@@ -374,7 +374,7 @@ def test_previous_month_review_is_rewritten_after_any_stop(env, monkeypatch, mod
             raise OSError("一時的に書けない")
         return real_write(p, target, *a, **k)
 
-    def export(p):
+    def export(p, **k):
         exports.append(1)
         if len(exports) == 1 and mode == "mam_error":
             raise OSError("まむの出力先が一時的に書けない")
@@ -511,17 +511,15 @@ def test_mam_packet_cut_while_writing_is_written_again(env, monkeypatch):
     """まむへの入力を書く途中で止まっても、半端なファイルを残さない（次の回にもう一度書く）。"""
     from pathlib import Path as _P
     paths, col, rk = env
-    real = _P.write_text
+    real = mam._write_complete
 
-    def cut(self, data, *a, **k):
-        if "outbox" in str(self) and (self.suffix in (".json", ".tmp")):
-            real(self, data[:20], *a, **k)
-            raise KeyboardInterrupt()
-        return real(self, data, *a, **k)
-    monkeypatch.setattr(_P, "write_text", cut)
+    def cut(tmp, text):   # PR #18 の書き方（書き終えてから一度だけ置く）を、書く途中で止める
+        _P(tmp).write_text(text[:20], encoding="utf-8")
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(mam, "_write_complete", cut)
     with pytest.raises(KeyboardInterrupt):
         mam.export_packets(paths)
-    monkeypatch.setattr(_P, "write_text", real)
+    monkeypatch.setattr(mam, "_write_complete", real)
     out = paths.data_dir / "mam" / "outbox"
     assert not [f for f in out.glob("*.json")]                       # 半端な .json は残らない
     written = mam.export_packets(paths)
@@ -720,7 +718,7 @@ def test_review_of_month_without_settlements_is_retried(env, monkeypatch):
         monkeypatch.setattr(real, "refresh", lambda self, force=False: None)
         monkeypatch.setattr(real, "check_notices", lambda self, log=print: None)
         monkeypatch.setattr(cli, "_notify", lambda *a, **k: None)
-        monkeypatch.setattr(mam, "export_packets", lambda p: [])
+        monkeypatch.setattr(mam, "export_packets", lambda p, **k: [])
         monkeypatch.setattr(wallet, "run_live", lambda p, **k: _REAL_RUN_LIVE(p, now=at))
         monkeypatch.setattr(review, "write_review", writer)
         out = StringIO()
@@ -899,7 +897,7 @@ def test_month_end_stop_right_after_live_started_keeps_the_month(env, monkeypatc
         monkeypatch.setattr(real, "refresh", lambda self, force=False: None)
         monkeypatch.setattr(real, "check_notices", lambda self, log=print: None)
         monkeypatch.setattr(cli, "_notify", lambda *a, **k: None)
-        monkeypatch.setattr(mam, "export_packets", lambda p: [])
+        monkeypatch.setattr(mam, "export_packets", lambda p, **k: [])
         monkeypatch.setattr(wallet, "run_live", lambda p, **k: run(p, now=at))
         out = StringIO()
         try:
@@ -1108,7 +1106,7 @@ def test_tick_does_not_wait_for_manual_review_lock(env, monkeypatch):
         monkeypatch.setattr(real, "refresh", lambda self, force=False: None)
         monkeypatch.setattr(real, "check_notices", lambda self, log=print: None)
         monkeypatch.setattr(cli, "_notify", lambda *a, **k: told.append(a))
-        monkeypatch.setattr(mam, "export_packets", lambda p: [])
+        monkeypatch.setattr(mam, "export_packets", lambda p, **k: [])
         monkeypatch.setattr(wallet, "run_live", lambda p, **k: _REAL_RUN_LIVE(p, now=at))
         out = StringIO()
         try:
@@ -1156,7 +1154,7 @@ def test_ordinary_live_run_without_settlement_does_not_rewrite_reviews(env, monk
         monkeypatch.setattr(real, "refresh", lambda self, force=False: None)
         monkeypatch.setattr(real, "check_notices", lambda self, log=print: None)
         monkeypatch.setattr(cli, "_notify", lambda *a, **k: None)
-        monkeypatch.setattr(mam, "export_packets", lambda p: [])
+        monkeypatch.setattr(mam, "export_packets", lambda p, **k: [])
         monkeypatch.setattr(wallet, "run_live", lambda p, **k: {"predicted": 1, "settled": 0, "months": []})
         monkeypatch.setattr(review, "write_review", lambda p, month, *a, **k: (months.append(month), _REAL_WRITE_REVIEW(p, month, *a, **k)))
         try:

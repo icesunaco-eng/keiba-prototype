@@ -38,7 +38,7 @@ def cli_tick(paths, monkeypatch, now, pages, notice):
     monkeypatch.setattr(real, "refresh", lambda self, force=False: None)
     monkeypatch.setattr(c.jra, "parse_race_list", lambda p: {"races": []})
     monkeypatch.setattr(cli, "_notify", lambda *a, **k: None)
-    monkeypatch.setattr(mam, "export_packets", lambda p: [])
+    monkeypatch.setattr(mam, "export_packets", lambda p, **k: [])
     cli.cmd_collect(paths, types.SimpleNamespace(action="tick"))
 
 def test_A_real_entry_point_settles_cancellation(env, monkeypatch):

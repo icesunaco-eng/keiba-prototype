@@ -20,6 +20,7 @@ from collections import Counter
 import pickle
 import sqlite3
 from datetime import datetime, timedelta
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -175,14 +176,17 @@ def time_reasons(odds_time, fetched_at: str, race: dict, tp: str, label: str = "
 def odds_gate(trio: dict, trio_rec, race: dict, tp: str) -> dict:
     """三連複オッズの合格判定（週末の確認の物差し）。"""
     g = {"trio_found": trio.get("found"), "trio_expected": trio.get("expected"), "duplicates": trio.get("duplicates"),
-         "unreadable": trio.get("unreadable"), "extra": trio.get("extra"), "missing": trio.get("missing"), "fetched_at": None, "odds_time": None, "snapshot_sha256": None}
+         "unreadable": trio.get("unreadable"), "extra": trio.get("extra"), "missing": trio.get("missing"),
+         "no_votes": trio.get("no_votes", []), "fetched_at": None, "odds_time": None, "snapshot_sha256": None}
     reasons = []
     if trio_rec is None:
         reasons.append("三連複オッズのページが無い")
     else:
         g["fetched_at"], g["snapshot_sha256"] = trio_rec["fetched_at"], trio_rec["sha256"]
         g["odds_time"] = trio.get("odds_time")
-        if not trio.get("ok"):
+        if trio.get("implausible"):  # 組のずれ・重複もあれば、理由は両方残す
+            reasons.append(f"票数なし{len(trio['no_votes'])}組を除くと倍率の逆数の合計が1未満（倍率が欠けている）")
+        if not trio.get("ok") and not (trio.get("implausible") and trio.get("complete")):
             reasons.append(f"組が出走馬の全組と合わない（{trio.get('found')}/{trio.get('expected')}・重複{trio.get('duplicates')}"
                            f"・余分{trio.get('extra', 0)}・不足{trio.get('missing', 0)}）")
         dl = deadline(race["race_date"], race["post_time"], tp)
@@ -214,9 +218,11 @@ def result_ready(res: dict, field_size) -> bool:
                           [r["horse_number"] for r in rows]) is None
 
 
-def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None = None,
+                tps: tuple = ("24h", "1h", "15m")) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """集めたページから、正規の表と同じ形の races / runners と、時点ごとの入力を作る。
-    held に辞書を渡すと、読み取りで保留にしたレースと理由を入れて返す（ファイルには書かない）。"""
+    held に辞書を渡すと、読み取りで保留にしたレースと理由を入れて返す（ファイルには書かない）。
+    tps：入力を作る時点（ふだんは3つとも。まむへの1つの時点の書き出しは、その時点だけ）。"""
     from .. import official
     races, runners, inputs = [], [], {}
     held = {} if held is None else held
@@ -228,7 +234,7 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                           "surface": r.get("surface"), "distance_m": r.get("distance_m"), "going": None, "race_class": None,
                           "field_size": r.get("field_size"), "attr_source": "jra_live",
                           "race_type": "障害候補" if r.get("surface") == "障害" else "平地候補"})
-            for tp in ("24h", "1h", "15m"):
+            for tp in tps:   # まむへの1つの時点の書き出しは、その時点だけ作る（ほかの時点の出馬表を読み直さない）
                 if not r.get("post_time"):
                     continue
                 dl = deadline(r["race_date"], r["post_time"], tp)
@@ -654,6 +660,36 @@ def market_probs(trio_odds: dict) -> dict:
     return {c: v / total for c, v in inv.items()}
 
 
+def _mam_use(mp: dict, roster: list) -> tuple[bool, bool, str | None]:
+    """保存済みのまむの予想を統合にどう使うか：(使う, 正式にしてよい, 理由)。
+    取り決め（docs/requests/aisu-integration-reply.md）：正式は「同じ時点・同じ出走馬」で全組がそろったときだけ。
+    同じ出走馬かは、まむに渡した入力の出走馬（issued_horses）と統合の時の出走馬（出馬表）で決める。
+    全組がそろったかは確率の組から計算し、保存した印（complete）は真偽値の True であることだけを追加で確かめる。
+    受付は合計1に直して7桁に丸めて保存する。"""
+    probs = mp.get("trios_all")
+    if probs is None or probs == {}:
+        if mp.get("complete") is True:   # 受付は確率が無ければ False を保存する。True なら保存行が書き換わっている
+            return True, False, "まむ：全組の印が True なのに確率が無い（保存行の矛盾。参考表示）"
+        return True, False, "まむ：確率が無い（順位だけ）。正式な確率にしない（参考表示）"
+    combos_now = {"-".join(map(str, c)) for c in combinations(sorted(roster), 3)}
+    if not isinstance(probs, dict) or not any(probs.values()) or not all(
+            c in combos_now and type(v) in (int, float) and (v == 0 or 1e-7 <= v <= 1) for c, v in probs.items()):
+        return False, False, "まむ：保存済みの確率を使えない（数でない・範囲外・今の出走馬にない組）"
+    total, tolerance = sum(probs.values()), len(probs) * 5e-8 + 1e-9
+    if abs(total - 1) > tolerance:
+        return False, False, f"まむ：保存済みの確率の合計が1でない（合計 {total:.12g}、許す幅は1±{tolerance:.2g}）"
+    issued = mp.get("issued_horses")
+    if not isinstance(issued, list) or any(type(n) is not int for n in issued):
+        return True, False, "まむ：予想に使った入力の出走馬が分からない（古い版の受付・入力が読めない）。参考表示"
+    if sorted(issued) != sorted(roster):
+        return True, False, "まむ：予想に使った入力と今の出走馬が違う（同じ出走馬の予想ではないので参考表示）"
+    if set(probs) != combos_now:
+        return True, False, "まむ：全組の確率がそろっていない（足りない組を埋めて正式な確率にはしない。参考表示）"
+    if mp.get("complete") is not True:  # 受付は真偽値で保存する。それ以外の値の行は手を加えられたものとして正式にしない
+        return True, False, "まむ：保存した全組の印が真偽値の True でない（保存行の矛盾。参考表示）"
+    return True, True, None
+
+
 def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state, now: datetime) -> int:
     """統合の3版を記録する。入力が欠けたら黙って外さず、理由を残して未配分にする。"""
     from datetime import timezone
@@ -665,16 +701,26 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state, no
     model, cal = models["ml_lgbm"]
     ml = {"-".join(map(str, sorted(nums[i] for i in c))): p
           for c, p in ev.trio_probs(cal.strength(np.asarray(model.score(g), dtype=float)), cal.gamma).items()}
+    roster = [c["horse_number"] for c in inp["card"]]
+    combos_now = {"-".join(map(str, c)) for c in combinations(sorted(roster), 3)}
     for m, w in INT_METHODS.items():
         if (rk, tp, m) in done:
             continue
         reasons, sources, formal = [], {}, True
         if gate["pass"]:
             sources["market"] = market_probs(inp["trio"]["odds"])
+            if inp["trio"].get("no_votes"):
+                # 欠けた組の確率の埋め方は、あいすとの取り決めに無い。決まるまで統合は参考表示だけ（配分・成績の比較に入れない）
+                formal = False
+                reasons.append(f"市場推定確率：票数なしが{len(inp['trio']['no_votes'])}組あり、全組の確率がそろわない"
+                               "（扱いが決まるまで正式な確率にしない。参考表示）")
         else:
             reasons.append("市場推定確率：三連複オッズが合格していない（" + " / ".join(gate.get("reasons", [])) + "）")
         if "ml" in w:
             sources["ml"] = ml
+            if set(ml) != combos_now:  # 学習の出走馬は最新の時点の出馬表から作る。後の時点の取消が混ざると組がずれる
+                formal = False
+                reasons.append("学習：予想した出走馬が、この時点の出走馬と違う（後の時点の出馬表が混ざっている。参考表示）")
         if "mam" in w:
             mp = mam_preds.get((rk, tp))
             if mp is None:
@@ -682,10 +728,12 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state, no
                     continue  # 締切まではまむの予想を待つ
                 reasons.append("まむ：締切までに予想が無い")
             else:
-                sources["mam"] = mp.get("trios_all") or {}
-                if not mp.get("complete"):
+                use, ok, why = _mam_use(mp, roster)
+                if use:
+                    sources["mam"] = mp.get("trios_all") or {}
+                if not ok:
                     formal = False
-                    reasons.append("まむ：全組の確率がそろっていない（足りない組を埋めて正式な確率にはしない。参考表示）")
+                    reasons.append(why)
         missing = [k for k in w if k not in sources]
         if missing:
             formal = False
@@ -728,6 +776,7 @@ def odds_check(paths) -> pd.DataFrame:
         g = inp["gate"]
         rows.append({"race_key": rk, "time_point": tp, "deadline": g.get("deadline"), "pass": g["pass"], "reasons": " / ".join(g["reasons"]),
                      "trio": f"{g.get('trio_found')}/{g.get('trio_expected')}", "duplicates": g.get("duplicates"),
+                     "no_votes": len(g.get("no_votes") or []),
                      "odds_time": g.get("odds_time"), "fetched_at": g.get("fetched_at"),
                      "scratched_known": ",".join(map(str, inp["scratched"])), "snapshot_sha256": g.get("snapshot_sha256")})
     return pd.DataFrame(rows)

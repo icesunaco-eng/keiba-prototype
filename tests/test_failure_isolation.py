@@ -107,7 +107,7 @@ def test_tick_retries_and_notifies_once(two, monkeypatch):
     for name in ("refresh", "check_notices"):
         monkeypatch.setattr(Collector, name, lambda self, *a, **k: None)
     monkeypatch.setattr(Collector, "due", lambda self: [])
-    monkeypatch.setattr(mam, "export_packets", lambda p: [])
+    monkeypatch.setattr(mam, "export_packets", lambda p, **k: [])
     sent = []
     monkeypatch.setattr(cli, "_notify", lambda *a, **k: sent.append(a))
     for _ in range(3):
@@ -129,7 +129,7 @@ def test_review_is_rebuilt_after_interruption(two, monkeypatch, where):
         monkeypatch.setattr(Collector, name, lambda self, *a, **k: None)
     monkeypatch.setattr(Collector, "due", lambda self: [])
     monkeypatch.setattr(cli, "_notify", lambda *a, **k: None)
-    monkeypatch.setattr(mam, "export_packets", lambda p: [])
+    monkeypatch.setattr(mam, "export_packets", lambda p, **k: [])
     written = []
     monkeypatch.setattr(review, "write_review", lambda p, month, *a, **k: written.append(month))
 

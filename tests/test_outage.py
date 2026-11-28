@@ -23,7 +23,7 @@ def env(tmp_path,monkeypatch):
     col.state["races"][RK].update(list_cname=LIST,result_links=[["/r","R"]]); col.state["live_pending"]=True
     col.state["taken"][f"{RK}|1h"]="x"; col._write_state()
     monkeypatch.setattr(cli,"_notify",lambda *a,**k:None)
-    monkeypatch.setattr(mam,"export_packets",lambda p:[])
+    monkeypatch.setattr(mam,"export_packets",lambda p,**k:[])
     return paths,col
 
 def tick(paths,monkeypatch,at,where,bad):

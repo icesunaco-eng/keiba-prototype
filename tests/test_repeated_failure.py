@@ -19,7 +19,7 @@ def play(tmp_path, monkeypatch):
     paths = types.SimpleNamespace(data_dir=tmp_path)
     sent, runs = [], []
     monkeypatch.setattr(cli, "_notify", lambda *a, **k: sent.append(a))
-    monkeypatch.setattr(mam, "export_packets", lambda p: [])
+    monkeypatch.setattr(mam, "export_packets", lambda p, **k: [])
     from keiba import review
     monkeypatch.setattr(review, "write_review", lambda *a, **k: None)
     real = Collector
