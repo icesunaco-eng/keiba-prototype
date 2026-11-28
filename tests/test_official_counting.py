@@ -29,6 +29,7 @@ def world(tmp_path, preds, posts=None, settle=True, snaps=()):
     races = {rk: {"race_date": rk[:10], "venue": rk.split("|")[1], "race_number": int(rk.split("|")[2]), "post_time": p,
                   "field_size": 8} for rk, p in posts.items()}
     (live / "state.json").write_text(json.dumps({"races": races}, ensure_ascii=False))
+    (live / "none.html").write_text("<html></html>")   # 原本の中身は使わない（目録の時刻だけの試験）。読めない原本の扱いにはしない
     (live / "snapshots.jsonl").write_text("".join(
         json.dumps({"race_key": rk, "time_point": tp, "kind": kind, "fetched_at": at.isoformat(), "path": "none.html",
                     "sha256": "x"}, ensure_ascii=False) + "\n" for rk, tp, kind, at in snaps))
