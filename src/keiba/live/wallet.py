@@ -184,6 +184,10 @@ def odds_gate(trio: dict, trio_rec, race: dict, tp: str) -> dict:
     else:
         g["fetched_at"], g["snapshot_sha256"] = trio_rec["fetched_at"], trio_rec["sha256"]
         g["odds_time"] = trio.get("odds_time")
+        bad = trio_rec.get("incomplete") if hasattr(trio_rec, "get") else None
+        if isinstance(bad, str) and bad:
+            # 取得のときに途中と記録したページ（名簿と照らせない等）は、後で一覧の頭数などが変わっても合格にしない
+            reasons.append(f"取得のときに途中と記録した三連複のページ（{bad}）")
         if trio.get("implausible"):  # 組のずれ・重複もあれば、理由は両方残す
             reasons.append(f"票数なし{len(trio['no_votes'])}組を除くと倍率の逆数の合計が1未満（倍率が欠けている）")
         if not trio.get("ok") and not (trio.get("implausible") and trio.get("complete")):
@@ -246,10 +250,13 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                     if got_round and len(s) and "capture_round" in s.columns else s
                 before = use["fetched_at"].map(lambda x: datetime.fromisoformat(x) <= dl) if len(use) else use
                 cards = use[(use["kind"] == "card") & before] if len(use) else use
+                if got_round and len(cards):
+                    # 取得の回の印がある：お金・まむに使う出馬表は、この時点のいちばん新しい回のもの（ほかの時点の出馬表は使わない）
+                    cards = cards[cards["time_point"] == tp]
                 other_round = False
                 if not len(cards) and got_round and len(s):
-                    # いちばん新しい回に出馬表が無い（一覧の出馬表リンクが欠けた等）：前の回の出馬表で締切の代わりの予想は
-                    # 作るが、回の違う原本の組なので、お金は配分せず、まむへの入力も出さない（下の card_issue・roster）
+                    # いちばん新しい回に出馬表が無い（一覧の出馬表リンクが欠けた等）：前の回・ほかの時点の出馬表で締切の代わりの
+                    # 予想は作るが、回の違う原本の組なので、お金は配分せず、まむへの入力も出さない（下の card_issue・roster）
                     cards = s[(s["kind"] == "card") & s["fetched_at"].map(lambda x: datetime.fromisoformat(x) <= dl)]
                     other_round = bool(len(cards))
                 if not len(cards):
@@ -284,7 +291,7 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                     card_issue = (f"出馬表が取得の時間帯より前の取得（時間帯 {opens.astimezone(dl.tzinfo):%H:%M}〜"
                                   f"{dl:%H:%M}・取得 {card_at.astimezone(dl.tzinfo):%H:%M}）")
                 if other_round:
-                    roster = roster or "この時点のいちばん新しい取得の回に出馬表が無い（前の回の出馬表は参考だけ）"
+                    roster = roster or "この時点のいちばん新しい取得の回に出馬表が無い（前の回・ほかの時点の出馬表は参考だけ）"
                     card_issue = card_issue or roster
                 w = {"ok": False, "odds": {}}
                 if len(win):

@@ -34,7 +34,7 @@ MARKS = ("食い違い", "食い違いなし", "判定できず")
 
 
 def _results(paths) -> tuple:
-    """（レース → 実際の結果, 予定表, 入力, レースの表）。レースの表は予定表と予定表から外したレース（races_archive）を重ねた
+    """（レース → 実際の結果, 予定表, 入力, レースの表, 原本を読めなかったレース → 理由）。レースの表は予定表と予定表から外したレース（races_archive）を重ねた
     読むだけの表（同じレースは予定表を優先）。月次のオッズの判定も、この同じ入力から作る（予定表から外れても過去の判定を消さない）。"""
     root = paths.data_dir / "live"
     state = json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {"races": {}}
@@ -43,7 +43,11 @@ def _results(paths) -> tuple:
         if all(x.get(k) is not None for k in ("race_key", "race_date", "venue", "race_number")):
             races[x["race_key"]] = {k: v for k, v in x.items() if k != "race_key"}
     races.update(state.get("races", {}))
-    _, _, inputs = live_tables(root, {**state, "races": races}, _snapshots(root))
+    held: dict = {}
+    _, _, inputs = live_tables(root, {**state, "races": races}, _snapshots(root), held)
+    # 原本を読めなかったレース（live_tables はそのレースだけ飛ばし、held にレースの鍵で理由を残す）。結果がまだ公表されて
+    # いないレースとは分ける（月次はこのレースの月を確定しない。build_review）
+    unread = {rk: why for rk, why in held.items() if rk.count("|") == 2}
     out = {}
     for (rk, tp), res in inputs.items():
         if tp != "result":
@@ -53,7 +57,7 @@ def _results(paths) -> tuple:
         finished = [(r["horse_number"], r["finish_position"]) for r in res["rows"] if r["status"] == "finished"]
         wins = sorted(winning_combos(finished))   # 3着同着なら的中の組は複数（仮想財布の精算と同じ決め方）
         out[rk] = {"actual": wins[0] if wins else None, "actuals": wins, "payouts": res["trio_payouts"]}
-    return out, state, inputs, races
+    return out, state, inputs, races, unread
 
 
 CMP_METHODS = ["int_market", "ml_lgbm", "int_market_ml", "int_market_ml_mam"]
@@ -113,7 +117,12 @@ def build_review(paths, month: str | None, start: str | None = None, end: str | 
         preds = [p for p in preds if sel.is_shown(*key(p))]
         setts = [s for s in setts if sel.is_counted(*key(s))]
         led.close()
-    results, state, inputs, races = _results(paths)
+    results, state, inputs, races, unread = _results(paths)
+    bad = sorted(rk for rk in unread if _in_range(rk[:10], month, start, end))
+    if bad:
+        # その月のレースの原本を読めない（一時的に無い・壊れている）。読めた分だけで月次を作ると、結果・的中・比較を落とした
+        # 中身で上書きし、目印まで今の数になって戻らない。書かずに例外にして、次の見回りでもう一度作る
+        raise ReviewUnreadable(f"{len(bad)}レースの原本を読めない（{bad[0]}：{unread[bad[0]]}）"[:300])
     review = {"month": month or f"{start}〜{end}", "races_predicted": len({p["race_key"] for p in preds}),
               "races_with_result": len({p["race_key"] for p in preds if p["race_key"] in results}),
               "versions": sorted({p["version"] for p in preds}),
@@ -267,6 +276,10 @@ def _replace_text(path: Path, text: str):
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
+
+
+class ReviewUnreadable(OSError):
+    """その月のレースの原本を読めなかったので、月次を書かなかった（JSON・HTML・目印はそのまま。次の見回りで作り直す）。"""
 
 
 class ReviewBusy(BlockingIOError):

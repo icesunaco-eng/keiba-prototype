@@ -230,3 +230,138 @@ def test_two_rounds_in_the_same_second_keep_both_originals(tmp_path):
     for x in _recs(root):
         if x.get("path"):
             assert hashlib.sha256((root / x["path"]).read_bytes()).hexdigest() == x["sha256"]
+
+
+# ---- 💚20261128-4 止める1：ほかの時点の出馬表・途中の印の三連複でお金を配分する ------------------------------
+
+def _replay_post_delay(directory, control):
+    """15:40発走の15:10に15分前の出馬表を取る（三連複のタブは無い）。15:15の一覧で発走が16:20に延び、新しい1時間前の
+    時間帯（15:05〜15:20）になる。control でなければ一覧の出馬表リンクが欠け、単勝・三連複だけ取れる（三連複は同じ回の
+    名簿が無いので途中の印）。"""
+    from contextlib import redirect_stdout
+    from io import StringIO
+    from types import SimpleNamespace
+    from keiba import cli
+    from keiba.live import collector as collector_module
+    from tests.test_capture_window_shift import CARD, LIST, _pages, _paths
+    from tests.test_live_collector import FakeClient, INDEX, race_list
+    from tests.test_live_wallet import result_html, trio_html, win_html
+    paths = _paths(directory)
+    clock = {"now": T("14:45")}
+    told = []
+
+    def fetch(name):
+        now = clock["now"]
+        if name.startswith("pw01dli"):
+            return INDEX
+        delayed = now >= T("15:15")
+        pages = _pages({"now": T("14:25")})
+        if name == LIST:
+            listing = race_list(odds=True, result=now >= T("16:50")).replace("18頭", "8頭")
+            if delayed:
+                listing = listing.replace("15時40分", "16時20分")
+                if not control:
+                    listing = listing.replace(f"?CNAME={CARD}", "")
+            return listing
+        if name == "pw15orl10/AA" and not delayed:
+            return pages[name].splitlines()[0]
+        if name == "pw151ou1/11":
+            return win_html(time=f"{now:%H}時{now:%M}分")
+        if name == "pw156ou1/66":
+            return trio_html(time=f"{now:%H}時{now:%M}分")
+        if name == "pw01sde1008202605061120261122/BD":
+            return result_html([1, 2, 3, 4, 5, 6, 7, 8])
+        return pages[name]
+    client = FakeClient(fetch)
+
+    def tick(hm):
+        clock["now"] = T(hm)
+        out = StringIO()
+        with patch.object(collector_module, "Collector",
+                          lambda folder: Collector(folder, client=client, now=lambda: clock["now"])), \
+                patch.object(Collector, "check_notices", lambda self, log=print: None), \
+                patch.object(cli, "_notify", lambda *a: told.append(a)), \
+                patch.object(wallet, "prediction_clock", lambda: clock["now"]), \
+                patch.object(Ledger, "_now", lambda _: clock["now"].astimezone(timezone.utc).isoformat(timespec="seconds")), \
+                redirect_stdout(out):
+            cli.cmd_collect(paths, SimpleNamespace(action="tick"))
+        return json.loads(out.getvalue().splitlines()[-1])
+    return paths, tick
+
+
+def _ev_settlements(paths):
+    led = Ledger(paths.ledger_path, read_only=True)
+    try:
+        return [(s["time_point"], s["status"], s["stake"]) for s in led.settlements()
+                if s["race_key"] == RK and s["method"] == "ml_lgbm" and s["wallet"] == "ev_weighted"]
+    finally:
+        led.close()
+
+
+@pytest.mark.parametrize("control", [False, True])
+def test_post_delay_does_not_pair_another_time_points_card_with_new_odds(tmp_path, control):
+    paths, tick = _replay_post_delay(tmp_path / ("ctl" if control else "mix"), control)
+    for hm in ("14:45", "15:10", "15:15", "15:20"):
+        tick(hm)
+    p = Source(paths, "live").preds[RK][("ml_lgbm", "1h")]
+    assert p["odds_gate"]["pass"] is control
+    assert bool(p["allocation"]["ev_weighted"]["total"]) is control
+    assert (_mam_1h(paths) is not None) is control
+    tick("16:50")
+    st = _ev_settlements(paths)
+    if control:
+        assert st and st[0][1] == "settled" and st[0][2] > 0
+    else:
+        assert st == [("1h", "not_allocated_gate", 0)]
+        reasons = " ".join(p["odds_gate"]["reasons"])
+        assert "途中と記録した三連複" in reasons and "出馬表が無い" in reasons
+
+
+def test_incomplete_trio_stays_rejected_after_the_list_count_changes(tmp_path):
+    """14:25に一覧8頭・出馬表7頭で、三連複を途中と記録した。後で一覧の頭数だけ7頭に直り、新しい原本は取れない。
+    取得のときの途中の印は外さず、オッズの判定は不合格（お金は配分しない）。"""
+    paths, root, client, tick, told = _replay_trio_rows(tmp_path / "cnt", "card_short_always")
+    tick("14:00")
+    tick("14:25")
+    recs = [x for x in _recs(root) if x["time_point"] == "1h" and x["kind"] == "odds_trio"]
+    assert recs and recs[-1].get("incomplete")
+    state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    state["races"][RK]["field_size"] = 7                     # 一覧の頭数だけ直った
+    _, _, inputs = wallet.live_tables(root, state, wallet._snapshots(root))
+    g = inputs[(RK, "1h")]["gate"]
+    assert not g["pass"] and any("途中と記録した三連複" in r for r in g["reasons"])
+
+
+# ---- 💚20261128-4 止める2：原本を読めない回に月次を上書きする ------------------------------------------------
+
+def test_review_is_not_written_while_an_original_is_unreadable(tmp_path):
+    """結果まで取った月の月次を書いた後、その月のレースの原本（結果のページ）が一時的に読めない。月次は書かずに
+    （JSON・HTML・目印はそのまま）失敗として次の回に残し、原本が戻った回に書き直す。"""
+    paths, root, client, tick, told = _replay_trio_rows(tmp_path / "unr", "display_row")
+    for hm in ("14:00", "14:25", "14:41"):
+        tick(hm)
+    month = DAY[:7]
+    review.write_review(paths, month)
+    out = paths.data_dir / "review"
+    files = {n: (out / n).read_bytes() for n in (f"{month}.json", f"{month}.html", review.MARKS_FILE)}
+    card = next(x for x in reversed(_recs(root)) if x["kind"] == "card")
+    src = root / card["path"]
+    hold = tmp_path / "hold.html"
+    src.rename(hold)
+    try:
+        with pytest.raises(review.ReviewUnreadable):
+            review.build_review(paths, month)
+        marks = json.loads((out / review.MARKS_FILE).read_text(encoding="utf-8"))
+        marks[month] = "v=1;old"                               # 書き直しが必要な月
+        (out / review.MARKS_FILE).write_text(json.dumps(marks), encoding="utf-8")
+        files[review.MARKS_FILE] = (out / review.MARKS_FILE).read_bytes()
+        res = tick("14:46")
+        assert any("ReviewUnreadable" in x for x in res.get("review_error", [])), res
+        assert {n: (out / n).read_bytes() for n in files} == files   # 1バイトも変えない
+        assert month in review.stale_months(paths)
+    finally:
+        hold.rename(src)
+    tick("14:51")                                               # 原本が戻った回に書き直す
+    assert month not in review.stale_months(paths)
+    saved = json.loads((out / f"{month}.json").read_text(encoding="utf-8"))
+    assert saved["races_predicted"] == 1 and saved["odds_gate"]
