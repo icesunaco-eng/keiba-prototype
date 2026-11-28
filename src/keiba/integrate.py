@@ -16,10 +16,17 @@ def pool(method_probs: dict[str, dict[str, float]], weights: dict[str, float]) -
     used = {m: p for m, p in method_probs.items() if weights.get(m, 0) > 0 and p}
     if not used:
         return {}
-    combos = set().union(*used.values())
-    floor = {m: min(v for v in p.values() if v > 0) / 2 for m, p in used.items()}
+    # 集合の並びは起動ごとに変わる。組の順に計算して、合計の丸めと同率の並びを毎回同じにする
+    combos = sorted(set().union(*used.values()))
+    floor = {m: _half_min(p) for m, p in used.items()}
     logp = {c: sum(weights[m] * math.log(p.get(c) or floor[m]) for m, p in used.items()) for c in combos}
     top = max(logp.values())
     raw = {c: math.exp(v - top) for c, v in logp.items()}
     total = sum(raw.values())
-    return {c: v / total for c, v in sorted(raw.items(), key=lambda x: -x[1])}
+    return {c: v / total for c, v in sorted(raw.items(), key=lambda x: (-x[1], x[0]))}
+
+
+def _half_min(p: dict[str, float]) -> float:
+    """付いていない組に使う値：その方式の最小の正の確率の半分。極小値の半分は0に潰れるので、そのときは最小値そのもの。"""
+    m = min(v for v in p.values() if v > 0)
+    return m / 2 or m
