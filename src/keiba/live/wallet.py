@@ -15,7 +15,10 @@
 from __future__ import annotations
 
 import json
+import os
+from collections import Counter
 import pickle
+import sqlite3
 from datetime import datetime, timedelta
 from itertools import combinations
 from pathlib import Path
@@ -30,9 +33,9 @@ from ..ledger import Ledger, canonical, code_hash, sha
 from ..models import rule_v1
 from ..models.trio import fit_calibration
 from ..integrate import pool
-from ..settle import settle_trio
+from ..settle import missing_payouts, result_problem, settle_trio
 from . import jra
-from .collector import DEADLINE_MIN, deadline
+from .collector import CAPTURE_LEAD_MIN, DEADLINE_MIN, deadline
 
 WALLET_METHODS = ("ml_lgbm", "ml_market")
 # あいす統合（別枠の参考予想）。重みは あいすの回答（2026-11-19）どおり固定。市場のみが比べる基準
@@ -81,6 +84,8 @@ def _snapshots(root: Path) -> pd.DataFrame:
             pos = end
     df = pd.DataFrame(rows, columns=None if rows else ["race_key", "kind", "time_point", "path", "sha256", "fetched_at"])
     df.attrs["bad_lines"] = bad
+    if bad:
+        print(f"snapshots.jsonl に読めない行が {bad}件（飛ばした）")
     return df
 
 
@@ -105,6 +110,36 @@ def card_problem(nums: list[int], field_size) -> str | None:
     return None
 
 
+def roster_issue(card_all, field_size) -> str | None:
+    """出馬表の名簿が信用できない理由（ページの形の問題か card_problem）。無ければ None。
+    収集（三連複・未発売の印を途中にする）・予想（card_issue）・まむの入力の発行が同じ判定を使う。"""
+    return "・".join(getattr(card_all, "problems", None) or []) or \
+        card_problem([c.get("horse_number") for c in card_all], field_size)
+
+
+def card_state(card_all, field_size) -> tuple[str, str | None]:
+    """出馬表の状態：("ok", None) 名簿が信用できる／("undrawn", None) 枠順の確定前（ページの形に問題が無く、取消でない行が
+    あり、その馬番が全部空で、レース一覧の頭数が全部の行の数か取消でない行の数と同じ。枠順の前に取消になった馬は馬番の無い
+    取消の行として残るので、どちらの数とも照らす）／("bad", 理由) 取得・読み取りの失敗や途中まで。
+    未発売の印と組めるのは ok と undrawn だけ（undrawn は予想の側もその時点の入力を作らない）。"""
+    issue = roster_issue(card_all, field_size)
+    if not issue:
+        return "ok", None
+    active = [c for c in card_all if not c.get("scratch")]
+    if not getattr(card_all, "problems", None) and active and field_size \
+            and int(field_size) in (len(card_all), len(active)) and all(c.get("horse_number") is None for c in active):
+        return "undrawn", None
+    return "bad", issue
+
+
+def complete_records(df: pd.DataFrame) -> pd.DataFrame:
+    """目録の行のうち、途中（incomplete）の印の無いもの。0行のときも列はそのまま（空の絞り込みを列の選び方と取り違えない）。"""
+    if "incomplete" not in df.columns or not len(df):
+        return df
+    keep = df["incomplete"].map(lambda x: not (isinstance(x, str) and x)).astype(bool)
+    return df[keep.to_numpy()]
+
+
 def _with_card_issue(gate: dict, issue: str | None) -> dict:
     if issue:
         gate = dict(gate, card_issue=issue, reasons=[*gate.get("reasons", []), issue])
@@ -119,6 +154,9 @@ def time_reasons(odds_time, fetched_at: str, race: dict, tp: str, label: str = "
     dl = deadline(race["race_date"], race["post_time"], tp)
     if fetched > dl:
         out.append(f"{label}締切後の取得（締切 {dl:%H:%M}・取得 {fetched:%H:%M}）")
+    opens = dl - timedelta(minutes=CAPTURE_LEAD_MIN)
+    if fetched < opens:   # 発走時刻が後で変わり、取得の時間帯より前になったページ：締切の代わりの予想でもお金に使わない
+        out.append(f"{label}取得の時間帯より前の取得（時間帯 {opens:%H:%M}〜{dl:%H:%M}・取得 {fetched:%H:%M}）")
     if not odds_time:
         out.append(f"{label}オッズの時刻が分からない")
         return out
@@ -146,6 +184,10 @@ def odds_gate(trio: dict, trio_rec, race: dict, tp: str) -> dict:
     else:
         g["fetched_at"], g["snapshot_sha256"] = trio_rec["fetched_at"], trio_rec["sha256"]
         g["odds_time"] = trio.get("odds_time")
+        bad = trio_rec.get("incomplete") if hasattr(trio_rec, "get") else None
+        if isinstance(bad, str) and bad:
+            # 取得のときに途中と記録したページ（名簿と照らせない等）は、後で一覧の頭数などが変わっても合格にしない
+            reasons.append(f"取得のときに途中と記録した三連複のページ（{bad}）")
         if trio.get("implausible"):  # 組のずれ・重複もあれば、理由は両方残す
             reasons.append(f"票数なし{len(trio['no_votes'])}組を除くと倍率の逆数の合計が1未満（倍率が欠けている）")
         if not trio.get("ok") and not (trio.get("implausible") and trio.get("complete")):
@@ -162,9 +204,22 @@ def odds_gate(trio: dict, trio_rec, race: dict, tp: str) -> dict:
 def _write_held(root: Path, held: dict):
     """読み取りで保留にしたレースと理由（data/live/held.json）。毎回書き直す（今の状態だけ）。"""
     try:
-        (root / "held.json").write_text(json.dumps(held, ensure_ascii=False, indent=1), encoding="utf-8")
+        from .collector import write_atomic
+        write_atomic(root / "held.json", json.dumps(held, ensure_ascii=False, indent=1))
     except OSError:
         pass
+
+
+def result_ready(res: dict, field_size) -> bool:
+    """結果のページがそろっていて、精算・的中の集計に使えるか（仮想財布と月次の振り返りが同じ判定を使う）。"""
+    rows = res.get("rows") or []
+    if not rows or res.get("page_incomplete"):
+        return False
+    finished = [(r["horse_number"], r["finish_position"]) for r in rows if r["status"] == "finished"]
+    scratched = {r["horse_number"] for r in rows if r["status"] in ("withdrawn", "excluded")}
+    payouts = {p["combo"]: p["payout_yen"] for p in res.get("trio_payouts") or []} or None
+    return result_problem(finished, len(finished), scratched, payouts, len(rows), field_size,
+                          [r["horse_number"] for r in rows]) is None
 
 
 def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None = None,
@@ -172,21 +227,38 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
     """集めたページから、正規の表と同じ形の races / runners と、時点ごとの入力を作る。
     held に辞書を渡すと、読み取りで保留にしたレースと理由を入れて返す（ファイルには書かない）。
     tps：入力を作る時点（ふだんは3つとも。まむへの1つの時点の書き出しは、その時点だけ）。"""
+    from .. import official
     races, runners, inputs = [], [], {}
     held = {} if held is None else held
     for rk, r in state.get("races", {}).items():
-        s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
-        races.append({"race_key": rk, "race_date": r["race_date"], "venue": r["venue"], "race_number": r["race_number"],
-                      "surface": r.get("surface"), "distance_m": r.get("distance_m"), "going": None, "race_class": None,
-                      "field_size": r.get("field_size"), "attr_source": "jra_live",
-                      "race_type": "障害候補" if r.get("surface") == "障害" else "平地候補"})
-        try:  # 1レースの読み取りの失敗で、ほかのレースを止めない（そのレースだけ保留にして理由を残す）
+        n_races, n_runners = len(races), len(runners)
+        try:   # 原本はレースごとに読む。1件読めなくても（ファイルが無い等）、ほかのレースの予想・精算は止めない
+            s = snaps[snaps["race_key"] == rk] if len(snaps) else snaps
+            races.append({"race_key": rk, "race_date": r["race_date"], "venue": r["venue"], "race_number": r["race_number"],
+                          "surface": r.get("surface"), "distance_m": r.get("distance_m"), "going": None, "race_class": None,
+                          "field_size": r.get("field_size"), "attr_source": "jra_live",
+                          "race_type": "障害候補" if r.get("surface") == "障害" else "平地候補"})
             for tp in tps:   # まむへの1つの時点の書き出しは、その時点だけ作る（ほかの時点の出馬表を読み直さない）
                 if not r.get("post_time"):
                     continue
                 dl = deadline(r["race_date"], r["post_time"], tp)
-                before = s["fetched_at"].map(lambda x: datetime.fromisoformat(x) <= dl) if len(s) else s
-                cards = s[(s["kind"] == "card") & before] if len(s) else s
+                # その時点の材料がそろったか（official.material。見回り・正式の判定と同じ）。そろった取得の回が分かれば、
+                # この時点の出馬表・オッズはその回のひと組だけを使う（判定に使った原本と、予想に使う原本を同じにする）
+                got_at, got_round = official.material(official.record_tuples(s[s["time_point"] == tp]), dl) if len(s) else (None, None)
+                captured = got_at is not None
+                use = s[(s["time_point"] != tp) | (s["capture_round"] == got_round)] \
+                    if got_round and len(s) and "capture_round" in s.columns else s
+                before = use["fetched_at"].map(lambda x: datetime.fromisoformat(x) <= dl) if len(use) else use
+                cards = use[(use["kind"] == "card") & before] if len(use) else use
+                if got_round and len(cards):
+                    # 取得の回の印がある：お金・まむに使う出馬表は、この時点のいちばん新しい回のもの（ほかの時点の出馬表は使わない）
+                    cards = cards[cards["time_point"] == tp]
+                other_round = False
+                if not len(cards) and got_round and len(s):
+                    # いちばん新しい回に出馬表が無い（一覧の出馬表リンクが欠けた等）：前の回・ほかの時点の出馬表で締切の代わりの
+                    # 予想は作るが、回の違う原本の組なので、お金は配分せず、まむへの入力も出さない（下の card_issue・roster）
+                    cards = s[(s["kind"] == "card") & s["fetched_at"].map(lambda x: datetime.fromisoformat(x) <= dl)]
+                    other_round = bool(len(cards))
                 if not len(cards):
                     continue
                 card_all = jra.parse_card(_read(root, cards.iloc[-1]))
@@ -205,13 +277,22 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                 if len(card) < 3:
                     held[f"{rk}|{tp}"] = f"出走馬（番号の読める・取消でない馬）が{len(card)}頭で、三連複を作れない"
                     continue
-                win = s[(s["kind"].isin(["odds_win", "odds_first"])) & (s["time_point"] == tp) & before]
-                trio = s[(s["kind"] == "odds_trio") & (s["time_point"] == tp)]  # 締切後のものも判定に出して不合格にする
+                win = use[(use["kind"].isin(["odds_win", "odds_first"])) & (use["time_point"] == tp) & before]
+                trio = use[(use["kind"] == "odds_trio") & (use["time_point"] == tp)]  # 締切後のものも判定に出して不合格にする
                 if tp == "15m" and not (len(win) or len(trio)):
                     continue  # 15分前は配分の見直しだけ。新しいオッズが無ければ作らない
                 active = [int(c["horse_number"]) for c in card]  # 出走馬（取消を除く）。オッズの組はこれとぴったり照らす
-                card_issue = ("・".join(getattr(card_all, "problems", [])) or
-                              card_problem([c["horse_number"] for c in card_all], r.get("field_size")))
+                card_issue = roster = roster_issue(card_all, r.get("field_size"))
+                card_at = datetime.fromisoformat(cards.iloc[-1]["fetched_at"])
+                opens = dl - timedelta(minutes=CAPTURE_LEAD_MIN)
+                if not card_issue and card_at < opens:
+                    # 出馬表が取得の時間帯より前（一覧の出馬表リンクが欠けた・発走時刻が後で変わった等）：その後の取消を
+                    # 見落としているかもしれないので、オッズが時間帯の中でもお金に使わない（オッズの時刻の検査と同じ扱い）
+                    card_issue = (f"出馬表が取得の時間帯より前の取得（時間帯 {opens.astimezone(dl.tzinfo):%H:%M}〜"
+                                  f"{dl:%H:%M}・取得 {card_at.astimezone(dl.tzinfo):%H:%M}）")
+                if other_round:
+                    roster = roster or "この時点のいちばん新しい取得の回に出馬表が無い（前の回・ほかの時点の出馬表は参考だけ）"
+                    card_issue = card_issue or roster
                 w = {"ok": False, "odds": {}}
                 if len(win):
                     win_page = _read(root, win.iloc[-1])
@@ -228,30 +309,34 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                     page = _read(root, trio_rec)
                     t = jra.parse_trio_odds(page, active)
                     t["odds_time"] = jra.parse_odds_time(page)
-                inputs[(rk, tp)] = {"card": card, "scratched": scratched, "win": w, "trio": t,
+                inputs[(rk, tp)] = {"card": card, "scratched": scratched, "win": w, "trio": t, "captured": captured,
                                     "gate": _with_card_issue(odds_gate(t, trio_rec, r, tp) if tp != "24h" or trio_rec is not None else
                                                              {"pass": False, "reasons": ["前日はオッズを使わない（未発売のことが多い）"]},
                                                              card_issue),
+                                    "roster_issue": roster,   # 名簿そのものの問題（まむの入力はこれがあると出さない）
                                     "card_fetched_at": cards.iloc[-1]["fetched_at"],
                                     "snapshots": [cards.iloc[-1]["sha256"], *win["sha256"].tolist()[-1:], *trio["sha256"].tolist()[-1:]]}
             res = s[s["kind"] == "result"] if len(s) else s
             if len(res):  # 結果が出たレースは確定行（過去走として使う）。発走前の入力（判定・予想用）はそのまま残す
                 parsed = jra.parse_result(_read(root, res.iloc[-1]))
-                cards = s[s["kind"] == "card"]
-                card = {c["horse_number"]: c for c in jra.parse_card(_read(root, cards.iloc[-1]))} if len(cards) else {}
-                for row in parsed["rows"]:
-                    runners.append(_runner(rk, r, {**card.get(row["horse_number"], {}), **{k: v for k, v in row.items() if v is not None}}, row["status"]))
                 inputs[(rk, "result")] = parsed
-                continue
+                if parsed["rows"]:
+                    cards = s[s["kind"] == "card"]
+                    card = {c["horse_number"]: c for c in jra.parse_card(_read(root, cards.iloc[-1]))} if len(cards) else {}
+                    for row in parsed["rows"]:
+                        runners.append(_runner(rk, r, {**card.get(row["horse_number"], {}), **{k: v for k, v in row.items() if v is not None}}, row["status"]))
+                    continue
+                # 結果の行が無い（途中のページ・取りやめなど）：発走前の馬のまま（結果待ち）
             last = max((tp for tp in ("24h", "1h", "15m") if (rk, tp) in inputs), key=TP_ORDER.get, default=None)
             if last:
                 for c in inputs[(rk, last)]["card"]:
                     runners.append(_runner(rk, r, c, "pending"))
-        except Exception as exc:
+        except Exception as exc:   # ファイルが無い・空・壊れている（lxml の ParserError など）：そのレースだけ保留にして理由を残す
+            del races[n_races:], runners[n_runners:]
             for key in [k for k in inputs if k[0] == rk]:
                 inputs.pop(key)
-            runners[:] = [x for x in runners if x["race_key"] != rk]
             held[rk] = f"{type(exc).__name__}: {exc}"[:200]
+            print(f"{rk} の原本を読めないので、このレースだけ飛ばした：{exc!r}"[:300])
     return pd.DataFrame(races), pd.DataFrame(runners), inputs
 
 
@@ -271,7 +356,10 @@ def _models(paths, feat_hist: pd.DataFrame, tp: str, day: str):
     """学習モデルと市場組み合わせを、その日までのデータで1日1回学習してキャッシュする。ルールは学習しない（較正だけ）。"""
     cache = paths.data_dir / "live" / "models" / f"{day}-{tp}-{code_hash()[:8]}.pkl"
     if cache.exists():
-        return pickle.loads(cache.read_bytes())
+        try:
+            return pickle.loads(cache.read_bytes())
+        except Exception:   # 壊れた控え（前の版が書く途中で止まった等）：使わずに学習し直して書き直す
+            pass
     cache.parent.mkdir(parents=True, exist_ok=True)
     cut = pd.Timestamp(day) - pd.Timedelta(days=ev.CALIB_DAYS)
     train, calib = feat_hist[feat_hist["race_date"] < cut], feat_hist[feat_hist["race_date"] >= cut]
@@ -285,7 +373,12 @@ def _models(paths, feat_hist: pd.DataFrame, tp: str, day: str):
     for m, v in RULE_METHODS.items():
         model = rule_v1.RuleV1Model(tp, v)
         out[m] = (model, fit_calibration(ev._calibration_set(calib, model.score(calib))))
-    cache.write_bytes(pickle.dumps(out))
+    tmp = cache.with_name(f".{cache.name}.{os.getpid()}.tmp")   # 書き終えてから置き換える（途中で止まっても壊れた控えを残さない）
+    try:
+        tmp.write_bytes(pickle.dumps(out))
+        tmp.replace(cache)
+    finally:
+        tmp.unlink(missing_ok=True)
     return out
 
 
@@ -304,96 +397,275 @@ def _features(paths, lr, lrun):
     return feat, ev.eligible_features(feat[~feat["race_key"].isin(pending)], all_races, 5)
 
 
-def run_live(paths, log=print) -> dict:
+def _finite(payload: dict):
+    """非数・無限を含む予想は台帳に書かない（書き直せない・画面と集計が壊れる）。"""
+    try:
+        json.dumps(payload, allow_nan=False, default=str)
+    except ValueError as exc:
+        raise ValueError(f"予想に非数・無限がある：{exc}") from exc
+
+
+def _write_together(led, rows: list[tuple]) -> int:
+    """予想1行分の精算（配分ごと）をまとめて書く。途中で失敗したら1つも残さない（台帳は追記専用で消せない）。"""
+    if not rows:
+        return 0
+    for *_, body in rows:
+        _finite(body)
+    led.conn.execute("SAVEPOINT settle_row")
+    try:
+        for row in rows:
+            led.add_settlement(*row)
+    except BaseException:
+        led.conn.execute("ROLLBACK TO settle_row")
+        led.conn.execute("RELEASE settle_row")
+        raise
+    led.conn.execute("RELEASE settle_row")
+    return len(rows)
+
+
+def _failed(failed: list, label: str, exc: Exception):
+    """1つの失敗を記録して次へ進む。台帳の失敗（ロックなど）は回ごとやり直すので、そのまま上げる。"""
+    if isinstance(exc, sqlite3.Error):
+        raise exc
+    failed.append(f"{label}：{exc!r}"[:200])
+    print(f"{label} に失敗したので、そこだけ飛ばした：{exc!r}"[:300])
+
+
+def prediction_clock() -> datetime:
+    """予想を作ってよいか（発走前か）を見る時計。"""
+    from .collector import JST as _JST
+    return datetime.now(_JST)
+
+
+def input_ready(rk: str, tp: str, inp: dict, race: dict, now: datetime) -> bool:
+    """その時点の入力で確定してよいか：その時点の材料がそろったか（official.material_time。数える側と同じ判定）、締切を過ぎた（取れなかったので、ある材料で作る）。
+    前の時点の出馬表しか無いうちに作ると、馬体重もオッズも無いまま固定される（台帳・まむへの入力は書き直さない）。"""
+    return inp["captured"] or now >= deadline(race["race_date"], race["post_time"], tp)
+
+
+def _unsettled_archived(paths, root: Path, state: dict) -> tuple[dict, object]:
+    """予定表から外したレース（races_archive.jsonl）のうち、正式な予想があるのに精算が3配分そろっていないもの。
+    Macが長く止まって、精算（取りやめの返還など）の前に予定表から外れても、仮想財布の精算を続けられるようにする。
+    予想は作らない（発走ずみなので run_live の予想の側で飛ばされる）。
+    返す値：（レース, 読んだなら正式の選び方）。正式の選び方は重いので、候補があるときだけ読む。"""
+    from .. import official
+    from .collector import ARCHIVE_FILE, read_jsonl
+
+    if not paths.ledger_path.exists() or not (root / ARCHIVE_FILE).exists():
+        return {}, None
+    archived = {}
+    for x in read_jsonl(root / ARCHIVE_FILE)[0]:
+        rk = x.get("race_key")
+        if isinstance(rk, str) and rk not in state.get("races", {}) and all(x.get(k) is not None for k in ("race_date", "venue", "race_number")):
+            archived[rk] = {k: v for k, v in x.items() if k not in ("race_key", "archived_at")}
+    if not archived:
+        return {}, None
+    led = Ledger(paths.ledger_path, read_only=True)
+    try:
+        have = Counter((s["race_key"], s["time_point"], s["method"], s["version"]) for s in led.settlements())
+        cand = [p for p in led.predictions()
+                if p["race_key"] in archived and p["version"].startswith("live-")
+                and isinstance(p.get("allocation"), dict) and "kelly" in p["allocation"]
+                and have[(p["race_key"], p["time_point"], p["method"], p["version"])] < len(ALLOC_METHODS)]
+        if not cand:
+            return {}, None
+        sel = official.load(led.conn, root)
+    finally:
+        led.close()
+    need = {p["race_key"] for p in cand if sel.is_counted(p["race_key"], p["time_point"], p["method"], p["version"])}
+    return {rk: archived[rk] for rk in need}, sel
+
+
+def run_live(paths, log=print, now: datetime | None = None) -> dict:
     root = paths.data_dir / "live"
     state = json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {"races": {}}
+    archived, sel0 = _unsettled_archived(paths, root, state)   # sel0：読んだなら正式の選び方（台帳はまだ変わっていないので使い回す）
+    state = {**state, "races": {**archived, **state.get("races", {})}}
     snaps = _snapshots(root)
     held = {"_snapshots_bad_lines": snaps.attrs["bad_lines"]} if snaps.attrs.get("bad_lines") else {}
     lr, lrun, inputs = live_tables(root, state, snaps, held)
     _write_held(root, held)
-    if lrun.empty:
-        return {"predicted": 0, "settled": 0, "held": len(held)}
+    if lrun.empty:   # 予想を作る馬がいない回も、精算（取りやめの返還など）は行う
+        led = Ledger(paths.ledger_path)
+        failed: list[str] = []
+        months: set = set()
+        n_set = _settle(led, inputs, state, root, now, failed, months)
+        led.commit()
+        led.close()
+        return {"predicted": 0, "settled": n_set, "held": len(held), "months": sorted(months),
+                **({"failed": failed, "retry_now": False} if failed else {})}
     feat, hist = _features(paths, lr, lrun)
     version = f"live-{code_hash()[:8]}"
     led = Ledger(paths.ledger_path)
     done = {(p["race_key"], p["time_point"], p["method"]) for p in led.predictions(version)}
-    mam_preds = {(p["race_key"], p["time_point"]): p for p in led.predictions() if p["method"] == "text_ai"}
+    from .. import official
+    sel = sel0 if sel0 is not None else official.load(led.conn, root)
+    done |= {(rk, tp, m) for rk, m, tp in sel.shown}   # 正式な版を保存ずみの時点は、版が変わっても作らない
+    mam_preds = {(p["race_key"], p["time_point"]): p for p in led.predictions()
+                 if p["method"] == "text_ai" and sel.is_shown(p["race_key"], p["time_point"], "text_ai", p["version"])}
     n_pred = n_set = 0
+    failed: list[str] = []
+    from .collector import race_started
+    clock = now or prediction_clock()
     for (rk, tp), inp in sorted(inputs.items()):
         if tp == "result":
             continue
-        g = feat[feat["race_key"] == rk].sort_values("horse_number")
-        g = g[g["horse_number"].isin([c["horse_number"] for c in inp["card"]])]
-        if len(g) < 3:
+        if race_started(rk, state["races"].get(rk), clock):
+            continue   # 発走後は予想を作らない（コードの版が変わっても、結果を見た後の予想を台帳に足さない）
+        if clock > official.save_limit(rk, tp, state["races"][rk].get("post_time")):
+            continue   # 締切＋10分より後は作らない
+        if not input_ready(rk, tp, inp, state["races"][rk], clock):
+            continue   # この時点の取得を待つ
+        try:
+            g = feat[feat["race_key"] == rk].sort_values("horse_number")
+            g = g[g["horse_number"].isin([c["horse_number"] for c in inp["card"]])]
+            if len(g) < 3:
+                continue
+            g = g.assign(live_win_odds=g["horse_number"].map(inp["win"]["odds"]) if inp["win"]["ok"] else np.nan)
+            models = _models(paths, hist, "1h" if tp == "15m" else tp, str(g["race_date"].iloc[0].date()))
+        except Exception as exc:
+            _failed(failed, f"{rk}|{tp} の予想の準備", exc)
             continue
-        g = g.assign(live_win_odds=g["horse_number"].map(inp["win"]["odds"]) if inp["win"]["ok"] else np.nan)
-        models = _models(paths, hist, "1h" if tp == "15m" else tp, str(g["race_date"].iloc[0].date()))
         for m in (*WALLET_METHODS, *RULE_METHODS):
             if (rk, tp, m) in done:
                 continue
-            model, cal = models[m]
-            if m == "ml_market":
-                if not inp["win"]["ok"]:
-                    continue
-                model.odds_col = "live_win_odds"
-            sc = np.asarray(model.score(g), dtype=float)
-            if m in RULE_METHODS:
-                v = RULE_METHODS[m]
-                rg = rule_v1.score_frame(g, tp, rule_v1.VARIANTS[v]["prefix"])
-                payload = ev.predict_race(g, sc, cal, "rule", tp, version, rg)
-                payload["notes"] = [f"ルール {v}（役割A・比較用。配分しない）"]
-                payload["allocation"] = {"status": "not_allocated_role_a"}
-            else:
-                payload = ev.predict_race(g, sc, cal, m, tp, version, None)
-                nums = g["horse_number"].astype(int).tolist()
-                probs = {"-".join(map(str, sorted(nums[i] for i in c))): p
-                         for c, p in ev.trio_probs(cal.strength(sc), cal.gamma).items()}
-                gate = inp["gate"]
-                odds = inp["trio"]["odds"] if gate["pass"] else None
-                payload["allocation"] = {a: (lambda x: {"status": x.status if gate["pass"] else "not_allocated_gate",
-                                                        "stakes": x.stakes, "total": x.total})(
-                    allocate(probs, odds, a, calibrated=cal.n_races >= 30)) for a in ALLOC_METHODS}
-                payload["odds_gate"] = gate
-                payload["trio_probs_full"] = {c: round(p, 7) for c, p in probs.items()}
-            payload["inputs"] = {"snapshots": inp["snapshots"], "card_fetched_at": inp["card_fetched_at"],
-                                 "scratched_known": inp["scratched"], "win_odds_ok": inp["win"]["ok"]}
-            payload["period"] = "live"
-            led.add_prediction(rk, tp, m, version, payload, sha(canonical(inp["snapshots"]))[:16],
-                               sha(model.fingerprint() + canonical(cal.__dict__))[:16], code_hash())
-            n_pred += 1
+            try:
+                model, cal = models[m]
+                if m == "ml_market":
+                    if not inp["win"]["ok"]:
+                        continue
+                    model.odds_col = "live_win_odds"
+                sc = np.asarray(model.score(g), dtype=float)
+                if m in RULE_METHODS:
+                    v = RULE_METHODS[m]
+                    rg = rule_v1.score_frame(g, tp, rule_v1.VARIANTS[v]["prefix"])
+                    payload = ev.predict_race(g, sc, cal, "rule", tp, version, rg)
+                    payload["notes"] = [f"ルール {v}（役割A・比較用。配分しない）"]
+                    payload["allocation"] = {"status": "not_allocated_role_a"}
+                else:
+                    payload = ev.predict_race(g, sc, cal, m, tp, version, None)
+                    nums = g["horse_number"].astype(int).tolist()
+                    probs = {"-".join(map(str, sorted(nums[i] for i in c))): p
+                             for c, p in ev.trio_probs(cal.strength(sc), cal.gamma).items()}
+                    gate = inp["gate"]
+                    odds = inp["trio"]["odds"] if gate["pass"] else None
+                    payload["allocation"] = {a: (lambda x: {"status": x.status if gate["pass"] else "not_allocated_gate",
+                                                            "stakes": x.stakes, "total": x.total})(
+                        allocate(probs, odds, a, calibrated=cal.n_races >= 30)) for a in ALLOC_METHODS}
+                    payload["odds_gate"] = gate
+                    payload["trio_probs_full"] = {c: round(p, 7) for c, p in probs.items()}
+                payload["inputs"] = {"snapshots": inp["snapshots"], "card_fetched_at": inp["card_fetched_at"],
+                                     "scratched_known": inp["scratched"], "win_odds_ok": inp["win"]["ok"]}
+                payload["period"] = "live"
+                _finite(payload)
+                led.add_prediction(rk, tp, m, version, payload, sha(canonical(inp["snapshots"]))[:16],
+                                   sha(model.fingerprint() + canonical(cal.__dict__))[:16], code_hash())
+                n_pred += 1
+            except Exception as exc:
+                _failed(failed, f"{rk}|{tp}|{m} の予想", exc)
         # ---- あいす統合（別枠の参考予想）----
         if tp in INT_TIME_POINTS:
-            n_pred += _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state)
-    # 精算（財布を持つ方式だけ。まむ（text_ai）など、ほかの live 版の予想もまとめて精算する）
-    preds = {}
-    for p in led.predictions():
-        if p["version"].startswith("live-") and isinstance(p.get("allocation"), dict) and "kelly" in p["allocation"]:
-            preds[(p["race_key"], p["time_point"], p["method"], p["version"])] = p
-    settled = {(s["race_key"], s["method"], s["version"], s["wallet"]) for s in led.settlements()}
-    for (rk, tp), res in inputs.items():
-        if tp != "result":
-            continue
-        rows = res["rows"]
-        finishers = sum(r["status"] == "finished" for r in rows)
-        scratched = {r["horse_number"] for r in rows if r["status"] in ("withdrawn", "excluded")}
-        payouts = {p["combo"]: p["payout_yen"] for p in res["trio_payouts"]} or None
-        for (m, ver) in sorted({(k[2], k[3]) for k in preds if k[0] == rk}):
-            p = preds.get((rk, "15m", m, ver)) or preds.get((rk, "1h", m, ver))
-            if not p:
-                continue
-            for a in ALLOC_METHODS:
-                if (rk, m, ver, a) in settled:
-                    continue
-                stakes = p["allocation"][a]["stakes"]
-                st = settle_trio(stakes, finishers, scratched, payouts) if stakes else None
-                led.add_settlement(rk, p["time_point"], m, ver, a,
-                                   {"status": st.status if st else p["allocation"][a]["status"],
-                                    "stake": st.stake if st else 0, "returned": st.returned if st else 0,
-                                    "hits": st.hits if st else []})
-                n_set += 1
+            try:
+                n_pred += _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state, clock)
+            except Exception as exc:
+                _failed(failed, f"{rk}|{tp} の統合", exc)
+    retry_now = bool(failed)   # 予想の失敗は締切＋10分までに毎回やり直す（精算だけの失敗は間隔をあけてよい）
+    months: set = set()
+    n_set = _settle(led, inputs, state, root, now, failed, months)
     led.commit()
     led.close()
-    return {"predicted": n_pred, "settled": n_set, "version": version, "held": len(held)}
+    return {"predicted": n_pred, "settled": n_set, "version": version, "held": len(held), "months": sorted(months),
+            **({"failed": failed, "retry_now": retry_now} if failed else {})}
+
+
+def _wrote(n: int, rk: str, months: set) -> int:
+    if n:
+        months.add(rk[:7])   # 精算を書いたレースの月（月次の振り返りを作り直す）
+    return n
+
+
+def _settle(led, inputs: dict, state: dict, root: Path, now: datetime | None = None, failed: list | None = None,
+            months: set | None = None) -> int:
+    """精算を書く（予想を作らない回でも行う）。書いた行の数を返す。months に渡すと、精算を書いたレースの月を入れる。"""
+    n_set = 0
+    failed = [] if failed is None else failed
+    months = set() if months is None else months
+    # 精算（財布を持つ方式だけ。まむ（text_ai）など、ほかの live 版の予想もまとめて精算する）
+    preds = {}
+    from .. import official
+    sel = official.load(led.conn, root)
+    for p in led.predictions():
+        if not sel.is_counted(p["race_key"], p["time_point"], p["method"], p["version"]):
+            continue   # 精算するのは正式な版だけ
+        if p["version"].startswith("live-") and isinstance(p.get("allocation"), dict) and "kelly" in p["allocation"]:
+            preds[(p["race_key"], p["time_point"], p["method"], p["version"])] = p
+    settled = {(s["race_key"], s["time_point"], s["method"], s["version"], s["wallet"]) for s in led.settlements()}
+    # JRAが取りやめを発表し、結果の行が無いレース：全額返還（不成立）として精算する
+    from .collector import CANCEL_FILE, JST as _JST, cancelled_result, load_cancellations, race_started
+    cancels = load_cancellations(root / CANCEL_FILE)
+    now = now or datetime.now(_JST)
+    races = state.get("races", {})
+    void = {rk for rk in {k[0] for k in preds}
+            if race_started(rk, races.get(rk), now)
+            and cancelled_result(rk, cancels, inputs.get((rk, "result")), races.get(rk), now)}
+    for rk in sorted(void):
+        try:
+            for (m, ver) in sorted({(k[2], k[3]) for k in preds if k[0] == rk}):
+                try:
+                    p = preds.get((rk, "15m", m, ver)) or preds.get((rk, "1h", m, ver))
+                    if not p:
+                        continue
+                    todo = []   # 3配分を全部計算できてから、まとめて書く
+                    for a in ALLOC_METHODS:
+                        if (rk, p["time_point"], m, ver, a) in settled:
+                            continue
+                        stakes = p["allocation"][a]["stakes"]
+                        st = settle_trio(stakes, 0, set(), None) if stakes else None
+                        todo.append((rk, p["time_point"], m, ver, a,
+                                     {"status": st.status if st else p["allocation"][a]["status"],
+                                      "stake": st.stake if st else 0, "returned": st.returned if st else 0,
+                                      "hits": [], "cancelled": True}))
+                    n_set += _wrote(_write_together(led, todo), rk, months)
+                except Exception as exc:
+                    _failed(failed, f"{rk}|{m}|{ver} の取りやめの返還", exc)
+        except Exception as exc:
+            _failed(failed, f"{rk} の取りやめの返還", exc)
+    for (rk, tp), res in inputs.items():
+        try:
+            if tp != "result" or rk in void:
+                continue
+            rows = res["rows"]
+            finishers = sum(r["status"] == "finished" for r in rows)
+            scratched = {r["horse_number"] for r in rows if r["status"] in ("withdrawn", "excluded")}
+            payouts = {p["combo"]: p["payout_yen"] for p in res["trio_payouts"]} or None
+            finished = [(r["horse_number"], r["finish_position"]) for r in rows if r["status"] == "finished"]
+            if not result_ready(res, (state["races"].get(rk) or {}).get("field_size")):
+                continue   # 結果を一部しか読めていない：不成立の返還などを書かず、次の回で完全な結果を待つ
+            for (m, ver) in sorted({(k[2], k[3]) for k in preds if k[0] == rk}):
+                try:
+                    p = preds.get((rk, "15m", m, ver)) or preds.get((rk, "1h", m, ver))
+                    if not p:
+                        continue
+                    todo = []   # 3配分を全部計算できてから、まとめて書く
+                    for a in ALLOC_METHODS:
+                        if (rk, p["time_point"], m, ver, a) in settled:
+                            continue
+                        stakes = p["allocation"][a]["stakes"]
+                        if stakes and missing_payouts(stakes, finished, scratched, payouts):
+                            continue   # 買った的中組の払戻が読めていない（同着の一部欠けなど）：0円で確定させず、次の回を待つ
+                        st = settle_trio(stakes, finishers, scratched, payouts) if stakes else None
+                        if st and st.status == "unsettled_no_payout":
+                            continue   # 払戻が分からない：台帳は書き直せないので「未精算」を確定行にせず、払戻が読めた回に精算する
+                        todo.append((rk, p["time_point"], m, ver, a,
+                                     {"status": st.status if st else p["allocation"][a]["status"],
+                                      "stake": st.stake if st else 0, "returned": st.returned if st else 0,
+                                      "hits": st.hits if st else []}))
+                    n_set += _wrote(_write_together(led, todo), rk, months)
+                except Exception as exc:
+                    _failed(failed, f"{rk}|{m}|{ver} の精算", exc)
+        except Exception as exc:
+            _failed(failed, f"{rk} の精算", exc)
+    return n_set
 
 
 def market_probs(trio_odds: dict) -> dict:
@@ -434,13 +706,12 @@ def _mam_use(mp: dict, roster: list) -> tuple[bool, bool, str | None]:
     return True, True, None
 
 
-def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) -> int:
+def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state, now: datetime) -> int:
     """統合の3版を記録する。入力が欠けたら黙って外さず、理由を残して未配分にする。"""
     from datetime import timezone
     added = 0
     r = state["races"][rk]
     dl = deadline(r["race_date"], r["post_time"], tp)
-    now = datetime.now(dl.tzinfo)
     gate = inp["gate"]
     nums = g["horse_number"].astype(int).tolist()
     model, cal = models["ml_lgbm"]
@@ -501,6 +772,7 @@ def _integrated(led, rk, tp, inp, g, models, version, done, mam_preds, state) ->
                       "市場推定確率＝発走前の三連複オッズの逆数を合計1に直したもの（的中確率としての正確さは未確認・補正なし）"],
             "horses": [{"n": n} for n in nums], "confidence": "Z" if not allow else "–",
         }
+        _finite(payload)
         led.add_prediction(rk, tp, m, version, payload, sha(canonical(inp["snapshots"]))[:16],
                            sha(canonical(w))[:16], code_hash())
         added += 1
@@ -512,9 +784,14 @@ def odds_check(paths) -> pd.DataFrame:
     root = paths.data_dir / "live"
     state = json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {"races": {}}
     _, _, inputs = live_tables(root, state, _snapshots(root))
+    return odds_rows(inputs, state["races"], prediction_clock())
+
+
+def odds_rows(inputs: dict, races: dict, now: datetime) -> pd.DataFrame:
+    """live_tables の入力から、時点ごとの三連複オッズの判定の行を作る（odds_check と、予定表から外したレースも読む月次が使う）。"""
     rows = []
     for (rk, tp), inp in sorted(inputs.items()):
-        if tp == "result":
+        if tp == "result" or not input_ready(rk, tp, inp, races[rk], now):
             continue
         g = inp["gate"]
         rows.append({"race_key": rk, "time_point": tp, "deadline": g.get("deadline"), "pass": g["pass"], "reasons": " / ".join(g["reasons"]),
@@ -526,8 +803,13 @@ def odds_check(paths) -> pd.DataFrame:
 
 
 def wallet_summary(paths) -> pd.DataFrame:
+    if not paths.ledger_path.exists():   # まだ一度も予想していない（入れた直後）：空の表
+        return pd.DataFrame(columns=["method", "wallet", "races", "bet_races", "stake", "returned", "roi"])
     led = Ledger(paths.ledger_path, read_only=True)
-    rows = [s for s in led.settlements() if s["version"].startswith("live-")]
+    from .. import official
+    sel = official.load(led.conn, paths.data_dir / "live")
+    rows = [s for s in led.settlements() if s["version"].startswith("live-")
+            and sel.is_counted(s["race_key"], s["time_point"], s["method"], s["version"])]
     led.close()
     if not rows:
         return pd.DataFrame(columns=["method", "wallet", "races", "bet_races", "stake", "returned", "roi"])

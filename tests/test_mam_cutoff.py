@@ -316,6 +316,27 @@ def _tick_interrupted_by(paths, start, resume, between):
     return out, seen
 
 
+
+def _resave_round(col, rk, html):
+    """別の見回りが、その時点を取り直した（実物の見回りと同じく、出馬表とその回のオッズの記録をひとつの取得の回の印で保存）。
+    PR #15 と合わせた版は、材料のそろい方をいちばん新しい取得の回のひと組で見るので、出馬表だけの記録は新しい組にならない。
+    返すのは新しい出馬表の記録。"""
+    import uuid
+    rows = [json.loads(x) for x in (col.root / "snapshots.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+    same = [x for x in rows if x.get("race_key") == rk and x.get("time_point") == TP]
+    last = same[-1].get("capture_round") if same else None
+    col._round = uuid.uuid4().hex[:12]
+    try:
+        card = col._save(rk, "card", TP, "/sample", "card-again", html)
+        for x in same:
+            if x["kind"] != "card" and (x.get("capture_round") == last or last is None):
+                rec = {k: v for k, v in x.items() if k not in ("fetched_at", "capture_round")}
+                rec.update(fetched_at=col.now().isoformat(timespec="seconds"), capture_round=col._round)
+                col._append_index(rec)
+    finally:
+        col._round = None
+    return card
+
 def _pages_saved_unplaced(paths):
     """14:30 に 11R のページを保存したが、入力は置けずに終わった状態。"""
     def eio(*_a, **_k):
@@ -375,7 +396,7 @@ def test_page_saved_by_another_tick_meanwhile_is_used_in_the_remade_input(tmp_pa
 
     def resave():
         col = REAL_COLLECTOR(tmp_path / "live", client=_client(), now=lambda: AT.replace(minute=35))
-        return col._save(RK, "card", TP, "/sample", "card-again", card_html(IDS) + "<!-- 取り直し -->")
+        return _resave_round(col, RK, card_html(IDS) + "<!-- 取り直し -->")
     out, seen = _tick_interrupted_by(paths, AT.replace(minute=33), AT.replace(minute=35), resave)
     assert out["mam_packets"] == 1
     packet = json.loads(mam._packet_path(paths, RK, TP).read_text())
@@ -576,7 +597,7 @@ def test_tick_that_could_not_count_still_matches_each_input_to_its_own_pages(tmp
             started.append(1)
             col = REAL_COLLECTOR(tmp_path / "live", client=_client(), now=lambda: AT.replace(minute=36))
             for rk in (RK, R12):
-                new[rk] = col._save(rk, "card", TP, "/sample", "card-again", card_html(IDS) + f"<!-- {rk} 取り直し -->")["sha256"]
+                new[rk] = _resave_round(col, rk, card_html(IDS) + f"<!-- {rk} 取り直し -->")["sha256"]
 
     def cannot_count(*_a, **_k):
         raise OSError(errno.EIO, "記録を一時的に読めない")

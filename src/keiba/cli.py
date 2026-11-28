@@ -13,6 +13,7 @@
   keiba review [--month YYYY-MM]  月次の振り返り（data/review/<月>.html・.json）
   keiba mam export        まむ（文章AI方式）への入力の束を data/mam/outbox/ に書く
   keiba mam import <file> まむの予想を検証して台帳に入れる（締切後は受け付けない）
+  keiba app [--port 8765] [--open] [--notify] [--lan]  確認アプリ（予想を見る・購入を記録する。ふだんはこのMacの中だけ）
   keiba all        上を順に全部
 """
 from __future__ import annotations
@@ -97,8 +98,9 @@ def cmd_live(paths, args):
         print(json.dumps(run_live(paths), ensure_ascii=False))
     elif args.action == "check":
         df = odds_check(paths)
+        from .live.collector import write_atomic
         out = paths.data_dir / "live" / "odds_check.csv"
-        df.to_csv(out, index=False)
+        write_atomic(out, df.to_csv(index=False))   # 確認アプリが書く途中を読まない
         print(df.to_string(index=False) if len(df) else "まだ判定するページがない")
         if len(df):
             print(f"合格 {int(df['pass'].sum())} / {len(df)}（1h・15m）→ {out}")
@@ -125,6 +127,37 @@ def cmd_review(paths, args):
         return
     month = args.month or date.today().strftime("%Y-%m")
     print(f"月次の振り返り → {write_review(paths, month)}")
+
+
+def _write_reviews(paths, col, months: set) -> list[str]:
+    """月次の振り返りを書く。書く月は、書き始める前に状態（review_months）へ残し、HTML・JSON・目印まで書けた月だけ外す
+    （ほかの出力が月次を書いている間は待たずに残し、次の見回りで書く）
+    （精算の無い月も、書き込みの失敗・途中の停止のあと次の見回りで書き直す）。精算の行数と月次の目印が食い違う月
+    （精算の直後に止まった等）も見つけて足す。返すのは書けなかった月の失敗の文（次の見回りでまた書く）。"""
+    from .review import ReviewBusy, stale_months, write_review
+    try:
+        stale = set(stale_months(paths))
+    except Exception:   # 台帳を読めない回（書き込み中の鍵など）は、残っている月と渡した月だけ書く
+        stale = set()
+    todo = sorted(set(col.state.get("review_months") or []) | set(months) | stale)
+    if not todo:
+        return []
+    col.state["review_months"] = todo
+    col._write_state()
+    failed, left = [], []
+    for month in todo:
+        try:
+            write_review(paths, month, wait=False)
+        except ReviewBusy:
+            # 手で動かす keiba review などが月次を書いている：収集の鍵を持ったまま待たない（次の見回りが止まる）。
+            # 失敗ではないので知らせず、この月は残して次の見回りで書く
+            left.append(month)
+        except Exception as exc:   # 1つの月が書けなくても、ほかの月は書く
+            failed.append(f"{month} の月次の振り返り：{exc!r}"[:200])
+            left.append(month)
+    col.state["review_months"] = left
+    col._write_state()
+    return failed
 
 
 def _due(paths, col, out: dict):
@@ -177,7 +210,6 @@ def cmd_collect(paths, args):
         import fcntl
         root.mkdir(parents=True, exist_ok=True)
         # 見回りは1つずつ（重なると状態の書込みで落ち、取得ずみの記録も消える）。鍵はプロセスが終われば外れる
-        # （PR #15 と同じ鍵。ページ・状態の保存から、まむへの入力を正式な名前に置くまでを、1つの見回りの中で行う。みに💚20261127-6）
         with open(root / "tick.lock", "a") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -186,20 +218,45 @@ def cmd_collect(paths, args):
                 return
             col = Collector(root)
             out = col.tick(notify=_notify)
-            if out["saved"]:
+            if col.live_pending():   # 新しいページ・取りやめ・前の回の失敗のどれかがある
                 from .live.wallet import run_live
+                from datetime import date as _date
+                # 前の回が最後まで終わっていない（途中で止まった・失敗した）か。今日の月を、始める印と同じ保存で月次の書く予定に足す
+                interrupted = col.live_started({_date.today().strftime("%Y-%m")})
                 try:
                     out["live"] = run_live(paths)
                     out["mam_packets"] = _place(paths, col, _due(paths, col, out), out)   # 締切前で置けていない時点だけ。締切を過ぎた時点は置かない
-                    if out["live"].get("settled"):
-                        from datetime import date
-                        from .review import write_review
-                        write_review(paths, date.today().strftime("%Y-%m"))
-                except Exception as exc:  # 予想の失敗で収集を止めない
+                    months: set = set()
+                    if out["live"].get("settled") or interrupted:
+                        # 前の回が精算を書いた後に止まっていると、この回の精算は0件でも月次は古いまま
+                        from datetime import date, timedelta
+                        days = [date.today(), *([date.today() - timedelta(days=1)] if interrupted else [])]
+                        # 精算を書いたレースの月も（長く止まった後に予定表から外れたレースなど、前の月のことがある）
+                        months = {x.strftime("%Y-%m") for x in days} | set(out["live"].get("months") or [])
+                    review_failed = _write_reviews(paths, col, months)
+                    failed = out["live"].get("failed")   # 一部のレース・方式だけの失敗：ほかは書けている。次の回にやり直す
+                    new = col.live_finished((failed or []) + review_failed, out["live"].get("retry_now", True))
+                    if new:
+                        _notify("予想・精算の一部に失敗", "; ".join(new)[:120])
+                except Exception as exc:  # 予想の失敗で収集を止めない（次の回にやり直す）
                     out["live_error"] = repr(exc)
-                    _notify("予想・精算に失敗", repr(exc)[:120])
+                    if col.live_finished([repr(exc)[:200]]):
+                        _notify("予想・精算に失敗", repr(exc)[:120])
+            else:
+                # 予想・精算は動かさない回でも、精算が増えたのに古いままの月次があれば書き直す
+                failed = _write_reviews(paths, col, set())
+                if failed:
+                    out["review_error"] = failed
+                    told = col.state.get("review_told", [])
+                    new = [f for f in failed if f not in told]
+                    col.state["review_told"] = (told + new)[-50:]
+                    col._write_state()
+                    if new:
+                        _notify("月次の振り返りを書けない", "; ".join(new)[:120])
+                elif col.state.pop("review_told", None) is not None:
+                    col._write_state()
             if "mam_packets" not in out:
-                _republish(paths, col, out)
+                _republish(paths, col, out)   # 締切前なのに置けていない入力があれば、その時点だけ置く
             print(json.dumps(out, ensure_ascii=False))
     elif args.action == "install":
         import os
@@ -252,8 +309,19 @@ def main(argv=None):
     p.add_argument("--to", dest="end", default=None, help="期間の終わり YYYY-MM-DD")
     p = sub.add_parser("live")
     p.add_argument("action", choices=["run", "check", "wallets"])
+    p = sub.add_parser("app")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--open", action="store_true", help="起動したらブラウザで開く")
+    p.add_argument("--store", default=None, help="購入記録の保存先（試すとき用。既定 data/app/purchases.sqlite）")
+    p.add_argument("--mode", choices=["live", "check"], default="live", help="最初に見るデータ（check＝検証データ。画面の確認用）")
+    p.add_argument("--notify", action="store_true", help="自信度Aと、買い目に取消馬が残るレースを発走20分前からMacに通知")
+    p.add_argument("--lan", action="store_true", help="同じWi-FiのiPhoneから開けるようにする（.env の KEIBA_APP_PASSPHRASE が要る）")
     args = ap.parse_args(argv)
     paths = load_paths(args.paths)
+    if args.cmd == "app":
+        from .app.server import serve
+        serve(paths, args.port, args.open, args.store, args.mode, args.lan, args.notify)
+        return 0
     if args.cmd == "all":
         for f in (cmd_ingest, cmd_features, cmd_evaluate, cmd_report, cmd_verify):
             f(paths, args)

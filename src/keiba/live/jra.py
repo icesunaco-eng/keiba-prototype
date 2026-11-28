@@ -59,6 +59,23 @@ class Client:
         return body.decode("cp932", errors="replace")
 
 
+    def get_url(self, url: str) -> str:
+        """JRAの普通のページ（ニュースの一覧など）を GET で取る。数の上限と間隔は get と同じ。"""
+        if not url.startswith("https://www.jra.go.jp/"):
+            raise ValueError("JRAのページだけ取る")
+        if self.count >= self.max_requests:
+            raise RuntimeError("この実行で取るページ数の上限に達した")
+        wait = self.interval - (time.monotonic() - self._last)
+        if wait > 0:
+            time.sleep(wait)
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with self._opener(req, timeout=30) as res:
+            body = res.read()
+        self._last = time.monotonic()
+        self.count += 1
+        return body.decode("cp932", errors="replace")
+
+
 def links(page: str) -> list[tuple[str, str]]:
     """ページ内のリンク（パス, cname）を全部。onclick の doAction と href の ?CNAME= の両方。"""
     out = [(p, c) for p, c in _ACTION.findall(page)]
@@ -232,10 +249,22 @@ _JOCKEY = re.compile(r"pw04kmk0(\d{5})")
 _TRAINER = re.compile(r"pw05cmk0(\d{5})")
 
 
+def page_complete(page: str) -> bool:
+    """ページが最後（</html>）まで届いているか。途中で切れたページは、払戻の数字が欠けても読めてしまうので使わない。"""
+    return bool(re.search(r"</html>\s*$", page or "", re.I))
+
+
 def parse_result(page: str) -> dict:
-    """レース結果ページ。着順の表と三連複の払戻（同着なら複数）。"""
+    """レース結果ページ。着順の表と三連複の払戻（同着なら複数）。
+    ページが最後まで届いていなければ、何も読まずに page_incomplete=True を返す（結果待ちのまま）。"""
+    if not page_complete(page):
+        return {"rows": [], "trio_payouts": [], "page_incomplete": True}
     doc = lxml_html.fromstring(page)
     rows = []
+    # 見出し「レース結果 2026年2月7日（土曜）1回東京3日 8レース」：どのレースのページかを確かめるのに使う
+    head = _t(doc.xpath('//h1//span[contains(@class,"opt")]')[0]) if doc.xpath('//h1//span[contains(@class,"opt")]') else ""
+    hm = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日.*?\d+回(" + "|".join(VENUES) + r")\d+日\s*(\d{1,2})レース", head)
+    race_id = (f"{hm.group(1)}-{int(hm.group(2)):02d}-{int(hm.group(3)):02d}|{hm.group(4)}|{int(hm.group(5))}" if hm else None)
     for tr in doc.xpath('//table[contains(@class,"striped")]/tbody/tr'):
         cell = lambda c: _t(tr.xpath(f'./td[contains(@class,"{c}")]')[0]) if tr.xpath(f'./td[contains(@class,"{c}")]') else ""
         num = cell("num")
@@ -264,7 +293,53 @@ def parse_result(page: str) -> dict:
         nums = [int(x) for x in re.findall(r"\d+", combo)]
         if len(nums) == 3 and yen:
             trio.append({"combo": "-".join(map(str, sorted(nums))), "payout_yen": int(yen)})
-    return {"rows": rows, "trio_payouts": trio}
+    return {"rows": rows, "trio_payouts": trio, "race_id": race_id}
+
+
+VENUES = ("札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉")
+# 読む見出しの形（実物の例）：
+#   本日【2月7日（土曜）】の東京競馬は第8レース以降を取りやめといたします
+#   本日【2月8日（日曜）】の小倉競馬は第4レースを取りやめ、発走時刻をさらに変更します。
+#   本日【2月8日（日曜）】の東京競馬および京都競馬は開催を中止します
+#   明日【9月21日（祝日・月曜）】の中山競馬は開催を中止します
+#   本日【5月31日（土曜）】の東京競馬第9レースの取りやめおよび第10レース以降の発走時刻変更
+#   第2回中京競馬第7日第2競走の取りやめ          （日付が無い形。回次・日次で予定表のレースと照らす）
+_V = "(?:" + "|".join(VENUES) + ")"
+_R = "(?:レース|競走)"
+_CANCEL = re.compile(r"^(?:本日|明日)?【(\d{1,2})月(\d{1,2})日[（(][^）)]*[）)]】の"
+                     r"(" + _V + r"競馬(?:(?:および|及び|・|、|と)" + _V + r"競馬)*)は?"
+                     r"(?:第(\d{1,2})" + _R + r"以降を|第(\d{1,2})" + _R + r"(?:を|の)|全レースを|開催を)?(?:取りやめ|取り止め|中止)")
+_CANCEL_KAI = re.compile(r"^第(\d{1,2})回(" + _V + r")競馬第(\d{1,2})日第(\d{1,2})" + _R + r"(以降)?(?:を|の)?(?:取りやめ|取り止め|中止)")
+
+
+def parse_cancellations(page: str, year: int, month: int | None = None) -> list[dict]:
+    """JRAのニュースの月別一覧から、レースの取りやめのお知らせを読む。見出しが決まった形のものだけ。
+    返す行：race_date・venue・from_race（この番号から）・to_race（この番号まで。None なら最後まで）・title・href。
+    日付の無い形（第2回中京競馬第7日…）は race_date が None で、kai・nichi を入れて返す（収集が予定表で日付を決める）。
+    「〜の開催中止に伴う指定席の取扱い」「夜間発売を取りやめ」「前日発売を取りやめ」のような関連のお知らせは、
+    形が違うので拾わない。"""
+    doc = lxml_html.fromstring(page)
+    out = []
+    for a in doc.xpath('//li//div[contains(@class,"news_line")]//a'):
+        txt = a.xpath('.//div[contains(@class,"txt")]')
+        title = _t(txt[0]) if txt else _t(a)
+        m = _CANCEL.match(title)
+        if m:
+            mon, day, venues, after, only = m.groups()
+            start = int(after or only or 1)
+            y = year + 1 if month and month == 12 and int(mon) == 1 else year   # 12月の一覧に載った「1月」のお知らせは翌年
+            for venue in re.findall(_V, venues):
+                out.append({"race_date": f"{y}-{int(mon):02d}-{int(day):02d}", "venue": venue,
+                            "from_race": start, "to_race": int(only) if only else None,
+                            "title": title, "href": a.get("href")})
+            continue
+        k = _CANCEL_KAI.match(title)
+        if k:
+            kai, venue, nichi, num, after = k.groups()
+            out.append({"race_date": None, "venue": venue, "kai": int(kai), "nichi": int(nichi),
+                        "from_race": int(num), "to_race": None if after else int(num),
+                        "title": title, "href": a.get("href")})
+    return out
 
 
 def _clock(text: str):
@@ -414,6 +489,43 @@ def parse_trio_odds(page: str, horses) -> dict:
             "no_votes": sorted(no_votes), "implausible": implausible, "complete": complete,
             "nested_table": nested,
             "extra": len(extra), "missing": len(missing), "extra_examples": extra[:5], "missing_examples": missing[:5]}
+
+
+def trio_page_issue(page: str, horses=None) -> str | None:
+    """三連複のページが途中なら理由。そろっていれば None。途中とみなすのは：表が無い・馬番の行が無い・馬番の行の倍率の欄が空・
+    発表時刻が無い・horses（その回の出馬表で取消でない馬番）の全組のうち載っていない組がある。
+    馬番の無い表示だけの行は見ない。「票数なし」「取消」など文字の入った欄は空ではない（使えるかは parse_trio_odds の判定）。"""
+    from itertools import combinations
+    doc = lxml_html.fromstring(page)
+    tables = doc.xpath(f"//table[{_has_class('fuku3')}]")
+    if not tables:
+        return "三連複の表が無い"
+    listed, empty = set(), 0
+    for table in tables:
+        cap = table.xpath("./caption")
+        m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", _t(cap[0])) if len(cap) == 1 else None
+        for tr in _rows(table):
+            ths, tds = tr.xpath("./th"), tr.xpath("./td")
+            if len(ths) != 1 or not _t(ths[0]).isdigit():
+                continue   # 馬番の無い行（見出し・表示だけの行）は見ない
+            if len(tds) != 1 or not _t(tds[0]):
+                empty += 1   # 馬番の行の倍率の欄は1つだけ（実物の形）。欄が無い・空・ほかの欄が並ぶ行は、まだそろっていない
+                continue
+            if m:
+                listed.add(tuple(sorted({int(m.group(1)), int(m.group(2)), int(_t(ths[0]))})))
+    if not listed and not empty:
+        return "三連複の馬番の行が無い"
+    if empty:
+        return f"三連複の倍率の欄が空か、形がそろっていない（{empty}行）"
+    if parse_odds_time(page) is None:
+        return "オッズの発表時刻が無い"
+    if horses:
+        want = {tuple(sorted(c)) for c in combinations(sorted({int(h) for h in horses}), 3)}
+        missing = want - listed
+        if missing:
+            ex = "-".join(map(str, sorted(missing)[0]))
+            return f"三連複の組が載っていない（{len(missing)}組。例 {ex}）"
+    return None
 
 
 def _is_no_votes(td) -> bool:

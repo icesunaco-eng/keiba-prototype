@@ -1,6 +1,7 @@
 """これからのレースの予想・配分・精算（合成のページで端から端まで。ネットにはつながない）。"""
+import re
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from itertools import combinations
 
 import pandas as pd
@@ -53,8 +54,9 @@ def result_html(order):
     rows = "".join(f'<tr><td class="place">{p}</td><td class="num">{n}</td><td class="horse"><a href="#">x</a></td>'
                    f'<td class="time">1:35.{p}</td><td class="f_time">34.{p}</td><td class="pop">{p}</td></tr>' for p, n in enumerate(order, 1))
     combo = "-".join(map(str, sorted(order[:3])))
-    return (f'<table class="basic narrow-xy striped"><tbody>{rows}</tbody></table>'
-            f'<li class="trio"><dl><dd><div class="line"><div class="num">{combo}</div><div class="yen">4,560円</div></div></dd></dl></li>')
+    return (f'<html><body><table class="basic narrow-xy striped"><tbody>{rows}</tbody></table>'
+            f'<li class="trio"><dl><dd><div class="line"><div class="num">{combo}</div><div class="yen">4,560円</div></div></dd></dl></li>'
+            '</body></html>')
 
 
 def test_parsers_self_check():
@@ -106,6 +108,49 @@ def test_live_predict_allocate_settle(tmp_path):
         assert out["settled"] == 3 * 5  # （財布2方式＋統合3版）× 3配分
         w = wallet_summary(paths)
         assert set(w["wallet"]) == {"equal_payout", "ev_weighted", "kelly"} and (w["stake"] <= 10_000).all()
+    finally:
+        jra.parse_card = orig
+
+
+def test_partial_result_waits_for_full_result(tmp_path):
+    """結果を一部しか読めない（8頭中2頭）なら精算を書かない。完全な結果が来たら、そこで精算する。"""
+    orig = jra.parse_card
+    jra.parse_card = lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)]
+    try:
+        paths, col = _setup(tmp_path)
+        run_live(paths)
+        col._save(RK, "result", "result", "/JRADB/x", "c", result_html([3, 1]))
+        assert run_live(paths)["settled"] == 0              # 不成立の返還にはしない
+        col._save(RK, "result", "result", "/JRADB/x", "c2", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
+        assert run_live(paths)["settled"] == 3 * 5
+        from keiba.ledger import Ledger
+        led = Ledger(paths.ledger_path, read_only=True)
+        assert not [s for s in led.settlements() if s["status"] == "refunded_void"]
+        led.close()
+    finally:
+        jra.parse_card = orig
+
+
+def test_missing_payouts_wait_until_they_arrive(tmp_path):
+    """払戻がまだ載っていない結果では「未精算」を台帳に書かない（書き直せないため）。払戻が載った回に精算する。"""
+    orig = jra.parse_card
+    jra.parse_card = lambda page: [dict(c, horse_id=f"H{int(c['horse_number']) - 1:04d}") for c in orig(page)]
+    try:
+        paths, col = _setup(tmp_path)
+        run_live(paths)
+        page = re.sub(r'<li class=\"trio\">.*?</li>', '', result_html([3, 1, 2, 4, 5, 6, 7, 8]))
+        col._save(RK, "result", "result", "/JRADB/x", "c", page)
+        first = run_live(paths)["settled"]          # 買い目の無い配分（払戻に関係しない）だけが先に書かれる
+        from keiba.ledger import Ledger
+        led = Ledger(paths.ledger_path, read_only=True)
+        early = list(led.settlements())
+        led.close()
+        assert first == len(early) and all(not s.get("stake") for s in early)
+        col._save(RK, "result", "result", "/JRADB/x", "c2", result_html([3, 1, 2, 4, 5, 6, 7, 8]))
+        assert first + run_live(paths)["settled"] == 3 * 5   # 払戻が載った回に、買い目のある分を精算
+        led = Ledger(paths.ledger_path, read_only=True)
+        assert not [s for s in led.settlements() if s["status"] == "unsettled_no_payout"]
+        led.close()
     finally:
         jra.parse_card = orig
 
@@ -222,6 +267,14 @@ def test_mam_export_and_import(tmp_path):
         assert "text_ai" in set(w["method"])
     finally:
         jra.parse_card = orig
+
+
+def test_known_scratch_marked_only_in_odds_line(tmp_path):
+    """確認アプリ側の試験から：馬番が残り、馬名の横のオッズ欄だけに取消の印がある形。"""
+    card = card_html([f"H{h:04d}" for h in range(N)]).replace(
+        'ウマ7</a></div>', 'ウマ7</a></div><div class="odds"><div class="odds_line"><span class="num"><strong>取消</strong></span></div></div>')
+    r = _gate(tmp_path, card=card)
+    assert r["scratched_known"] == "8" and r["trio"] == "56/35" and not r["pass"]
 
 
 def test_integrated_versions(tmp_path):
@@ -685,11 +738,19 @@ def test_win_odds_with_good_time_is_used(tmp_path):
 def test_previous_day_24h_odds_are_dated_by_fetch_day(tmp_path):
     """指摘1：前日に取った24時間前のオッズの発表時刻は、取得した日の時刻。レース当日の時刻として「締切後・古い」にしない。"""
     from keiba.live.wallet import _snapshots, live_tables
-    paths, col = _setup(tmp_path, tp="24h", day=29)  # レースは 8/30 15:40。24時間前の締切は 8/29 15:40。取得 8/29 14:30・発表 14:25
+    # レースは 8/30 15:40。24時間前の締切は 8/29 15:40（取得の時間帯 15:25〜15:40）。取得 8/29 15:30・発表 15:25（実物：11/21 15:25取得・15:24発表）
+    paths, col = _setup(tmp_path, tp="24h", day=29, at=(15, 30), trio=trio_html(time="15時25分"), win=win_html(time="15時25分"))
     root = tmp_path / "live"
     inp = live_tables(root, json.loads((root / "state.json").read_text()), _snapshots(root))[2][(RK, "24h")]
     assert inp["gate"]["pass"], inp["gate"]["reasons"]
     assert inp["win"]["ok"]
+
+
+def _race_closing_after(fetched: str, tp: str = "24h") -> dict:
+    """取得の5分後が締切になるレース（取得を時間帯の中に置き、発表時刻の日付の読み方だけを試す）。"""
+    from keiba.live.collector import DEADLINE_MIN
+    post = datetime.fromisoformat(fetched) + timedelta(minutes=DEADLINE_MIN[tp] + 5)
+    return {"race_date": post.date().isoformat(), "post_time": f"{post:%H:%M}"}
 
 
 @pytest.mark.parametrize("fetched,odds_time,ok", [
@@ -700,8 +761,7 @@ def test_previous_day_24h_odds_are_dated_by_fetch_day(tmp_path):
 ])
 def test_odds_time_date_rolls_back_only_across_midnight(fetched, odds_time, ok):
     from keiba.live.wallet import time_reasons
-    race = {"race_date": "2025-08-31", "post_time": "15:40"}
-    assert (not time_reasons(odds_time, fetched, race, "24h")) == ok
+    assert (not time_reasons(odds_time, fetched, _race_closing_after(fetched), "24h")) == ok
 
 
 def test_index_line_cut_before_newline_does_not_swallow_next_record(tmp_path):
@@ -790,8 +850,15 @@ def test_odds_but_no_readable_numbers_leaves_reason(tmp_path):
 ])
 def test_clock_skew_tolerance_across_midnight(fetched, odds_time, ok):
     from keiba.live.wallet import time_reasons
-    race = {"race_date": "2025-09-01", "post_time": "15:40"}
-    assert (not time_reasons(odds_time, fetched, race, "24h")) == ok
+    assert (not time_reasons(odds_time, fetched, _race_closing_after(fetched), "24h")) == ok
+
+
+def test_odds_fetched_before_the_capture_window_are_not_used():
+    """💚20261125-6 止める①：発走時刻が後で変わって、取得の時間帯より前になったオッズは使わない。"""
+    from keiba.live.wallet import time_reasons
+    race = {"race_date": "2025-08-30", "post_time": "15:45"}            # 1時間前の時間帯は 14:30〜14:45
+    assert any("時間帯より前" in r for r in time_reasons("14:24", "2025-08-30T14:25:00+09:00", race, "1h"))
+    assert not time_reasons("14:29", "2025-08-30T14:30:00+09:00", race, "1h")
 
 
 NO_VOTES = '<td class="zero">票数なし</td>'

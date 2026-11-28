@@ -1,4 +1,5 @@
 """JRA公式からの収集（ネットにはつながず、合成した小さなHTMLで試す）。"""
+import re
 import json
 from datetime import datetime
 
@@ -60,10 +61,14 @@ def _collector(tmp_path, when, odds=True, result=False):
             return INDEX
         if cname.startswith("pw01drl"):
             return race_list(odds=odds, result=result)
-        if cname.startswith("pw01dde"):
-            return CARD
+        if cname.startswith("pw01dde"):   # 出馬表：一覧と同じ18頭の名簿（名簿が途中までの出馬表は取り直す決まり）
+            from tests.test_live_wallet import card_html
+            return card_html([f"20221{i:05d}" for i in range(18)])
         if cname.startswith("pw15orl"):
             return ODDS
+        if cname.startswith("pw156"):   # 三連複のタブ：実物と同じ形の、倍率のそろったページ（途中のページは取り直す決まり）
+            from tests.test_live_wallet import trio_html
+            return trio_html(n=18)
         return "<html>odds or result</html>"
     clock = {"now": when}
     col = Collector(tmp_path, client=FakeClient(pages), now=lambda: clock["now"])
@@ -95,8 +100,14 @@ def test_result_waits_until_link_appears(tmp_path):
     col, clock = _collector(tmp_path, datetime(2026, 11, 22, 16, 30, tzinfo=JST), result=False)
     col.tick()
     assert "2026-11-22|京都|11|result" not in col.state["taken"]
+    from tests.test_live_wallet import result_html
+    full = result_html([3, 1, 2] + list(range(4, 19)))          # 18頭すべての着順と三連複の払戻がそろった結果
     col.client.pages = lambda c: race_list(result=True) if c.startswith("pw01drl") else "<html>result</html>"
     clock["now"] = datetime(2026, 11, 22, 16, 40, tzinfo=JST)
+    col.tick()
+    assert "2026-11-22|京都|11|result" not in col.state["taken"]   # 中身のない結果ページは取得済みにしない
+    col.client.pages = lambda c: race_list(result=True) if c.startswith("pw01drl") else full
+    clock["now"] = datetime(2026, 11, 22, 16, 45, tzinfo=JST)
     col.tick()
     assert "2026-11-22|京都|11|result" in col.state["taken"]
 
@@ -128,3 +139,102 @@ def test_client_spacing_and_cap():
 def test_no_capture_after_deadline(tmp_path):
     col, _ = _collector(tmp_path, datetime(2026, 11, 22, 15, 32, tzinfo=JST))  # 発走8分前：15m の締切を過ぎている
     assert col.tick()["saved"] == 0
+
+
+def test_pruned_races_are_archived(tmp_path):
+    """予定表から外す（7日より前）ときに、頭数・発走時刻を races_archive.jsonl に追記して残す。"""
+    from keiba.live.collector import Collector
+    col = Collector(tmp_path, client=None, now=lambda: datetime(2026, 12, 1, 10, 0, tzinfo=JST))
+    col.state["races"]["2026-11-21|福島|1"] = {"race_date": "2026-11-21", "venue": "福島", "race_number": 1,
+                                              "race_name": "2歳未勝利", "post_time": "09:45", "field_size": 15}
+    col.state["races"]["2026-11-30|福島|1"] = {"race_date": "2026-11-30", "venue": "福島", "race_number": 1,
+                                              "post_time": "09:45", "field_size": 15}
+    col.refresh = lambda *a, **k: None
+    col.tick(log=lambda *a: None)
+    lines = [json.loads(x) for x in (tmp_path / "races_archive.jsonl").read_text().splitlines()]
+    assert [x["race_key"] for x in lines] == ["2026-11-21|福島|1"]
+    assert lines[0]["field_size"] == 15 and lines[0]["post_time"] == "09:45" and lines[0]["race_name"] == "2歳未勝利"
+    assert "2026-11-21|福島|1" not in col.state["races"] and "2026-11-30|福島|1" in col.state["races"]
+
+
+def test_interrupted_archive_append_is_repaired_and_verified(tmp_path):
+    from keiba.live.collector import ARCHIVE_FILE, archived_keys
+    col = Collector(tmp_path, client=None, now=lambda: datetime(2026, 12, 1, 10, 0, tzinfo=JST))
+    for n in (1, 2):
+        col.state["races"][f"2026-11-21|福島|{n}"] = {"race_date": "2026-11-21", "venue": "福島", "race_number": n,
+                                                     "post_time": "09:45", "field_size": 15}
+    (tmp_path / ARCHIVE_FILE).write_text('{"race_key": "2026-11-14|東京|1", "field_si')   # 前回の追記が途中で止まった
+    col.refresh = lambda *a, **k: None
+    col.tick(log=lambda *a: None)
+    assert archived_keys(tmp_path / ARCHIVE_FILE) == {"2026-11-21|福島|1", "2026-11-21|福島|2"}
+    assert not col.state["races"]
+
+
+def test_failed_archive_write_keeps_races_scheduled(tmp_path, monkeypatch):
+    from keiba.live import collector as c
+    col = Collector(tmp_path, client=None, now=lambda: datetime(2026, 12, 1, 10, 0, tzinfo=JST))
+    col.state["races"]["2026-11-21|福島|1"] = {"race_date": "2026-11-21", "venue": "福島", "race_number": 1,
+                                              "post_time": "09:45", "field_size": 15}
+    col.refresh = lambda *a, **k: None
+
+    def broken(path, lines):
+        raise OSError("disk full")
+    monkeypatch.setattr(c, "append_lines", broken)
+    col.tick(log=lambda *a: None)
+    assert "2026-11-21|福島|1" in col.state["races"]                  # 記録できなければ予定表に残す
+
+
+def test_refresh_keeps_known_head_count(tmp_path, monkeypatch):
+    from keiba.live import collector as c
+    col = Collector(tmp_path, client=None, now=lambda: datetime(2026, 11, 22, 9, 0, tzinfo=JST))
+    rk = "2026-11-22|東京|1"
+    col.state["races"][rk] = {"race_date": "2026-11-22", "venue": "東京", "race_number": 1, "post_time": "10:00",
+                              "field_size": 4, "known_at": "2026-11-21T09:00:00+09:00"}
+    meeting = {"race_date": "2026-11-22", "venue": "東京",
+               "races": [{"race_number": 1, "post_time": "10:00", "field_size": None, "card_cname": "new"}]}   # 頭数の欄だけ読めない
+    monkeypatch.setattr(c.jra, "links", lambda page: [("/JRADB/accessD.html", "pw01drl-test")])
+    monkeypatch.setattr(c.jra, "parse_race_list", lambda page: meeting)
+
+    class Client:
+        count = 0
+
+        def get(self, path, cname):
+            return ""
+    col.client = Client()
+    col.refresh(force=True)
+    race = col.state["races"][rk]
+    assert race["field_size"] == 4 and race["card_cname"] == "new"      # 確かめた頭数は残し、新しい値は取り込む
+
+
+def test_partial_result_is_fetched_again(tmp_path, monkeypatch):
+    """途中までの結果（着順の空欄・払戻の欠け）は「取得済み」にせず、窓の間は次の回に取り直す。"""
+    from keiba.live import collector as c
+    from tests.test_live_wallet import result_html
+    rk = "2026-11-22|東京|1"
+    col = Collector(tmp_path, client=None, now=lambda: datetime(2026, 11, 22, 11, 0, tzinfo=JST))
+    col.state["races"][rk] = {"race_date": "2026-11-22", "venue": "東京", "race_number": 1, "post_time": "10:00",
+                              "field_size": 4, "list_cname": "L", "result_links": [("/JRADB/r", "R")]}
+    partial = result_html([1, 2, 3, 4]).replace('<td class="place">4</td>', '<td class="place"></td>')
+    pages = {"R": partial}
+
+    class Client:
+        count = 0
+
+        def get(self, path, cname):
+            return pages.get(cname, "")
+    col.client = Client()
+    monkeypatch.setattr(c.jra, "parse_race_list", lambda page: {"races": []})
+    saved = col.capture(rk, "result")
+    assert saved and saved[-1]["incomplete"] and f"{rk}|result" not in col.state["taken"]
+    pages["R"] = result_html([1, 2, 3, 4])
+    col.capture(rk, "result")
+    assert f"{rk}|result" in col.state["taken"]
+
+
+def test_result_issue_rules():
+    from keiba.live.collector import result_issue
+    from tests.test_live_wallet import result_html
+    assert result_issue(result_html([3, 1, 2, 4]), 4) is None
+    assert result_issue(re.sub(r'<li class=\"trio\">.*?</li>', '', result_html([3, 1, 2, 4])), 4)          # 払戻がまだ無い
+    assert result_issue(result_html([3, 1, 2, 4]), None)                                     # 頭数が分からない
+    assert result_issue(result_html([3, 1]), 4)                                              # 行が欠けている

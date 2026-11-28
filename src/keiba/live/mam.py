@@ -24,6 +24,7 @@ from pathlib import Path
 from ..allocate import allocate
 from ..ledger import Ledger, canonical, code_hash, sha
 from .collector import deadline
+from . import wallet
 from .wallet import ALLOC_METHODS, _snapshots, live_tables
 
 MAM_VERSION = "live-mam-v1"
@@ -339,8 +340,10 @@ def export_packets(paths, now=None, only: set | None = None, held: dict | None =
                 sig = None   # ページの変化は見ない（そのときあるページで置く）
             if clock is not None and clock() >= dl:
                 break   # 締切を過ぎた時点は置かない（まむが答えても受け付けない）
-            if _packet_path(paths, rk, tp).exists():   # 置く場所・受付で読む場所と同じ名前
-                break
+            if _packet_path(paths, rk, tp).exists() or not wallet.input_ready(rk, tp, inp, r, wallet.prediction_clock()):
+                break   # もう置いた・その時点の取得を待つ（一度書いた入力は書き直さない）
+            if inp.get("roster_issue"):
+                break   # 出馬表の名簿が途中まで：欠けた名簿の入力は固定しない（名簿が戻れば、その時点で出す。PR #15）
             try:   # 置く直前に確かめ直す（手の mam export は、締切は問わずに発走時刻の変化とレースが消えたかだけ見る）
                 placed = _publish_once(paths, rk, tp, _packet_text(rk, tp, r, dl, inp), check=_recheck(root, rk, tp, dl, sig, clock))
             except _Stale as stale:
@@ -375,6 +378,11 @@ def _validate(pred: dict, state: dict, inputs: dict) -> tuple[dict, list]:
         raise Rejected("generated_at（タイムゾーン付き）が無い・読めない")
     if gen.tzinfo is None:
         raise Rejected("generated_at にタイムゾーンが無い")
+    from .. import official
+    if wallet.prediction_clock() > official.save_limit(rk, tp, r["post_time"]):
+        raise Rejected(f"受付の期限（締切＋{official.GRACE_MINUTES}分）を過ぎて届いた")
+    if not wallet.input_ready(rk, tp, inputs[(rk, tp)], r, wallet.prediction_clock()):
+        raise Rejected("その時点の材料（出馬表・オッズ）を取る前に届いた")
     if gen > dl:
         raise Rejected(f"締切後の予想（締切 {dl:%H:%M}・作成 {gen.astimezone(dl.tzinfo):%H:%M}）")
     nums = {c["horse_number"] for c in inputs[(rk, tp)]["card"]}

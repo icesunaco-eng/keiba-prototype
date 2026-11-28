@@ -1,0 +1,306 @@
+"""これからのレースの予想のうち、どれを表示・精算・集計に使うか（2026-11-22 たかむね決定）。
+
+「その時点の材料を取った後、締切＋10分までに最初に保存した版」だけが正式。台帳の行は消さず、読むときに選ぶ。
+  - 下限：その時点の材料（出馬表 → 三連複オッズか「オッズ未発表」の記録）が締切までにそろった時刻。そろわなければ締切
+  - 期限：その時点の締切（24h・1h・15m）＋10分。どちらも台帳に書いた時刻（created_at）で見る。発走時刻が分からなければ使わない
+  - 表示：レース × 方式 × 時点ごとに、材料の後、期限までに最初に保存した版
+  - 集計・精算：レース × 方式ごとに1つ。15分前（無ければ1時間前）の正式な版
+発走時刻が変わったとき（2026-11-23 たかむね決定）：
+  - 締切は、予想を保存した時点で分かっていた発走時刻で決める。後から動かさない（記録は post_times.jsonl、追記だけ）
+  - ただし、最終の発走時刻より後に保存したものは、どの場合も数えない
+成績は見ない（時刻だけで選ぶ）。
+"""
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+GRACE_MINUTES = 10   # 締切のあと、ここまでに保存したものだけが正式
+MATERIAL_ODDS = ("odds_trio", "odds_unavailable")   # 1つの時点の取得で最後に残る記録
+COUNT_TIME_POINTS = ("15m", "1h")   # 精算に使う時点（先にある方）。24時間前の予想は精算しない
+_HHMM = re.compile(r"\d{2}:\d{2}")
+
+
+@dataclass
+class Selection:
+    valid: set = field(default_factory=set)      # 材料の後・期限までに保存した (レース, 時点, 方式, 版)
+    early: set = field(default_factory=set)      # 材料を取る前に保存した
+    late: set = field(default_factory=set)       # 期限より後に保存した
+    unknown: set = field(default_factory=set)    # 発走時刻が分からない
+    shown: dict = field(default_factory=dict)    # (レース, 方式, 時点) → 版
+    counted: dict = field(default_factory=dict)  # (レース, 方式) → (時点, 版)
+    known: dict = field(default_factory=dict)    # (レース, 時点, 方式, 版) → 保存した時点で分かっていた発走時刻（判定に使ったもの）
+    fallback: set = field(default_factory=set)   # valid のうち、材料が時間帯の中でそろわず締切で作った代わりの予想
+
+    def is_shown(self, rk, tp, m, v) -> bool:
+        return self.shown.get((rk, m, tp)) == v
+
+    def is_counted(self, rk, tp, m, v) -> bool:
+        return self.counted.get((rk, m)) == (tp, v)
+
+
+def is_live(method: str, version: str) -> bool:
+    return version.startswith("live-") or method == "text_ai"
+
+
+def _moment(text) -> datetime | None:
+    try:
+        t = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)   # 台帳の時刻は UTC
+
+
+def prediction_rows(conn) -> list[tuple]:
+    """台帳に書いた順の (レース, 時点, 方式, 版, 作った時刻)。"""
+    return [r for r in conn.execute("SELECT race_key,time_point,method,version,created_at FROM predictions ORDER BY rowid")
+            if is_live(r[2], r[3])]
+
+
+def post_times(root: Path, keys) -> dict[str, str]:
+    """発走時刻。予定表 → 収集が残した過去の記録 → 出馬表の原本、の順に探す。"""
+    from .live.collector import ARCHIVE_FILE, read_jsonl
+
+    found: dict[str, str] = {}
+
+    def put(rk, value):
+        if isinstance(rk, str) and isinstance(value, str) and _HHMM.fullmatch(value):
+            found[rk] = value
+
+    # 予定表を先に読み、過去の記録を後に読む。見回りは「過去の記録に書く → 予定表から外す」の順なので、この順なら
+    # 間に外されたレースもどちらかに必ず載っている（逆の順だと、どちらにも無い瞬間を読んで発走時刻を失う）
+    try:
+        current = json.loads((root / "state.json").read_text(encoding="utf-8")).get("races", {})
+    except (OSError, ValueError, AttributeError):
+        current = {}
+    try:
+        for x in read_jsonl(root / ARCHIVE_FILE)[0]:
+            put(x.get("race_key"), x.get("post_time"))
+    except OSError:
+        pass   # 読めなければ原本から探す
+    for rk, r in (current.items() if isinstance(current, dict) else []):
+        put(rk, (r or {}).get("post_time") if isinstance(r, dict) else None)   # 予定表の値を優先（今までどおり）
+    missing = set(keys) - set(found)
+    if missing and (root / "snapshots.jsonl").exists():
+        from .app.data import card_post_time
+        from .live.wallet import _read, _snapshots
+        try:
+            snaps = _snapshots(root)
+            for rk in missing:
+                cards = snaps[(snaps["race_key"] == rk) & (snaps["kind"] == "card")]
+                if not len(cards):
+                    continue
+                try:
+                    put(rk, card_post_time(_read(root, cards.iloc[-1])))
+                except (OSError, ValueError, TypeError):
+                    continue
+        except (OSError, KeyError):
+            pass
+    return found
+
+
+def save_limit(rk: str, tp: str, post_time: str | None) -> datetime | None:
+    """正式になる期限（締切＋10分）。発走時刻が分からなければ None。"""
+    from .live.collector import DEADLINE_MIN, race_post
+
+    post = race_post(rk, {"post_time": post_time}) if post_time and tp in DEADLINE_MIN else None
+    return post - timedelta(minutes=DEADLINE_MIN[tp] - GRACE_MINUTES) if post else None
+
+
+def material(records, dl: datetime) -> tuple[datetime | None, str | None]:
+    """その時点の材料がそろった（時刻, 取得の回）。そろわなければ時刻は None（取得の回はいちばん新しい回。印が無ければ None）。
+    records：その時点の（種類, 取得時刻[, 取得の回, 途中か]）。取得の回の印がある記録は、時間帯の中のいちばん新しい回の
+    ひと組だけで見る（前の回の完全な組と、新しい回の途中の出馬表を混ぜない。新しい回が途中なら、そろうまで取り直す）。
+    印の無い前の版の記録は、今までどおり（時間帯の中の出馬表と、その後の三連複オッズ・未発売の印。途中の記録は除く）。"""
+    from .live.collector import CAPTURE_LEAD_MIN
+
+    # 取得の時間帯（締切の15分前〜締切）の材料だけ。時間帯より前に取ったもの（発走時刻が後で変わったときなど）は早めの参考
+    opens = dl - timedelta(minutes=CAPTURE_LEAD_MIN)
+    got = []
+    for rec in records:
+        k, at = rec[0], rec[1]
+        rnd, bad = (rec[2], rec[3]) if len(rec) >= 4 else (None, False)
+        t = _moment(at)
+        if t and opens <= t <= dl:
+            got.append((k, t, rnd if isinstance(rnd, str) and rnd else None, bool(bad)))
+    # 回の新しさ：その回の最初の取得時刻、同じ秒なら目録に先に書いた回が古い（取得の回の印の文字の順では決めない）
+    rounds: dict[str, tuple] = {}
+    for i, (k, t, rnd, _) in enumerate(got):
+        if rnd:
+            rounds[rnd] = min((t, i), rounds.get(rnd, (t, i)))
+    last = max(rounds, key=rounds.get) if rounds else None
+    if last:
+        got = [x for x in got if x[2] == last]
+    got = [x for x in got if not x[3]]
+    cards = [t for k, t, _, _ in got if k == "card"]
+    t = min((t for k, t, _, _ in got if k in MATERIAL_ODDS and t >= min(cards)), default=None) if cards else None
+    # そろわなくても、いちばん新しい回は返す（締切からの代わりの予想も、その回の資料だけで作る。前の回のオッズと混ぜない）
+    return t, last
+
+
+def material_time(records, dl: datetime) -> datetime | None:
+    """その時点の材料がそろった時刻（material を見る）。取得の時間帯の中でそろわなければ None。
+    予想を作ってよいか（wallet.input_ready）と、正式に数えるかの両方がこの関数を使う。"""
+    return material(records, dl)[0]
+
+
+def record_tuples(df) -> list[tuple]:
+    """目録の行 →（種類, 取得時刻, 取得の回, 途中か）。material に渡す形（見回り・予想・正式の判定が同じ形を使う）。"""
+    rnd = df["capture_round"] if "capture_round" in df.columns else [None] * len(df)
+    bad = df["incomplete"] if "incomplete" in df.columns else [None] * len(df)
+    return [(k, at, r if isinstance(r, str) else None, isinstance(b, str) and bool(b))
+            for k, at, r, b in zip(df["kind"], df["fetched_at"], rnd, bad)]
+
+
+def card_observations(root: Path, keys) -> dict[str, list]:
+    """発走時刻の記録が無いレースの（分かった時刻, 発走時刻）を、保存した出馬表から読む（取得した順）。"""
+    from .app.data import card_post_time
+    from .live.wallet import _read, _snapshots
+
+    out: dict[str, list] = {}
+    if not keys or not (root / "snapshots.jsonl").exists():
+        return out
+    try:
+        snaps = _snapshots(root)
+        cards = snaps[(snaps["kind"] == "card") & snaps["race_key"].isin(list(keys))]
+        for _, rec in cards.iterrows():
+            at = _moment(rec.get("fetched_at"))
+            if not at:
+                continue
+            try:
+                post = card_post_time(_read(root, rec))
+            except (OSError, ValueError, TypeError):
+                continue
+            if post and _HHMM.fullmatch(post):
+                out.setdefault(rec["race_key"], []).append((at, post))
+    except (OSError, KeyError):
+        return out
+    for seen in out.values():
+        seen.sort(key=lambda x: x[0])
+    return out
+
+
+def recorded_posts(root: Path) -> dict[str, list]:
+    """収集が残した発走時刻の記録：レース → （分かった時刻, 発走時刻）の並び。"""
+    from .live.collector import POST_FILE, read_jsonl
+
+    out: dict[str, list] = {}
+    try:
+        rows = read_jsonl(root / POST_FILE)[0]
+    except OSError:
+        return out
+    for x in rows:
+        rk, post, at = x.get("race_key"), x.get("post_time"), _moment(x.get("seen_at"))
+        if isinstance(rk, str) and isinstance(post, str) and _HHMM.fullmatch(post) and at:
+            out.setdefault(rk, []).append((at, post))
+    for seen in out.values():
+        seen.sort(key=lambda x: x[0])
+    return out
+
+
+def post_history(root: Path, keys) -> dict[str, list]:
+    # 「穴埋めが終わった」印を、記録より先に読む。印は記録を書き終えてから立つので、先に印が立っていれば記録はそろっている。
+    # 記録を読んだ後に印を読むと、その間に見回りが穴埋めを終えたとき、途中の記録を「そろった」と取り違える
+    filled = _history_filled(root)
+    out = recorded_posts(root)
+    if filled:
+        out.update(card_observations(root, set(keys) - set(out)))   # 記録を始める前のレースは原本から
+        return out
+    # 収集の初回の穴埋めがまだ終わっていない（途中で止まった・まだ動いていない）：記録が一部だけのことがあるので、
+    # 全部のレースで出馬表の原本の観測を足し合わせる（見回りより先に画面が読んでも、発走時刻と成績を変えない）
+    for rk, obs in card_observations(root, set(keys)).items():
+        out[rk] = sorted(set(out.get(rk, [])) | set(obs), key=lambda x: x[0])
+    return out
+
+
+def _history_filled(root: Path) -> bool:
+    try:
+        return bool(json.loads((root / "state.json").read_text(encoding="utf-8")).get("post_history_filled"))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def known_post(seen: list | None, at: datetime, final: str | None) -> str | None:
+    """その時刻に分かっていた発走時刻。それより前の記録が無ければ最初の記録、記録が無ければ最終の発走時刻。"""
+    if not seen:
+        return final
+    out = seen[0][1]
+    for when, post in seen:
+        if when > at:
+            break
+        out = post
+    return out
+
+
+def capture_records(root: Path) -> dict[tuple, list]:
+    """(レース, 時点) → （種類, 取得時刻, 取得の回, 途中か）の並び。目録が読めなければ空（＝材料は締切までそろわなかった扱い）。
+    途中のページ・未発表と出ていない未発売の印は material が材料に数えない（見回りも取り直す）。途中の記録も残すのは、
+    いちばん新しい取得の回が途中かどうかを見るため。"""
+    from .live.wallet import _snapshots
+
+    out: dict[tuple, list] = {}
+    if not (root / "snapshots.jsonl").exists():
+        return out
+    try:
+        snaps = _snapshots(root)
+        for (rk, tp), rec in zip(zip(snaps["race_key"], snaps["time_point"]), record_tuples(snaps)):
+            if isinstance(rk, str) and isinstance(tp, str):
+                out.setdefault((rk, tp), []).append(rec)
+    except (OSError, KeyError):
+        return {}
+    return out
+
+
+def select(rows: list[tuple], posts: dict[str, str], records: dict[tuple, list],
+           history: dict[str, list] | None = None) -> Selection:
+    from .live.collector import race_post
+
+    sel, first, start, missing = Selection(), {}, {}, set()
+    for i, (rk, tp, m, v, created) in enumerate(rows):
+        at, final = _moment(created), posts.get(rk)
+        known = known_post((history or {}).get(rk), at, final) if at and final else None
+        limit, ended = save_limit(rk, tp, known), race_post(rk, {"post_time": final})
+        if known:
+            sel.known[(rk, tp, m, v)] = known
+        if not limit or not at or not ended:
+            sel.unknown.add((rk, tp, m, v))
+            continue
+        # 材料の判定は、その予想を保存した時点までに取った記録だけで見る（保存した後の取り直しで、保存ずみの正式な予想を
+        # 外さない。予想を作った見回りが見たのと同じ記録）。台帳の時刻は秒まで。取得時刻も秒にそろえて比べる
+        recs = records.get((rk, tp), [])
+        seen = [x for x in recs if (t := _moment(x[1])) and t.replace(microsecond=0) <= at]
+        key = (rk, tp, known, len(seen))   # 保存した時点で見えていた記録が違えば、判定を使い回さない
+        if key not in start:
+            dl = limit - timedelta(minutes=GRACE_MINUTES)
+            got = material_time(seen, dl)
+            if got is None:
+                missing.add(key)   # 材料がそろわなかった：締切からの代わりの予想
+            start[key] = (got or dl).replace(microsecond=0)
+        if at > limit or at >= ended:
+            sel.late.add((rk, tp, m, v))
+        elif at < start[key]:
+            sel.early.add((rk, tp, m, v))
+        else:
+            sel.valid.add((rk, tp, m, v))
+            if key in missing:
+                sel.fallback.add((rk, tp, m, v))
+            if (rk, m, tp) not in first or (at, i) < first[(rk, m, tp)][0]:   # 同じ秒なら、先に書いた行
+                first[(rk, m, tp)] = ((at, i), v)
+    sel.shown = {k: v for k, (_, v) in first.items()}
+    for rk, m, _ in sel.shown:
+        for tp in COUNT_TIME_POINTS:
+            if (rk, m, tp) in sel.shown:
+                sel.counted[(rk, m)] = (tp, sel.shown[(rk, m, tp)])
+                break
+    return sel
+
+
+def load(conn, root: Path) -> Selection:
+    rows = prediction_rows(conn)
+    if not rows:
+        return select(rows, {}, {})
+    keys = {r[0] for r in rows}
+    return select(rows, post_times(root, keys), capture_records(root), post_history(root, keys))

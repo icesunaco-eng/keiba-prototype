@@ -45,6 +45,8 @@ bin/keiba all
 .venv/bin/python -m pytest -q
 ```
 
+確認アプリ（予想を見る・購入を記録する）：`tools/app/確認アプリを開く.command` をダブルクリック、または `bin/keiba app --open`。くわしくは [docs/app.md](docs/app.md)。
+
 ## 決まりごと
 
 [CONTRIBUTING.md](CONTRIBUTING.md) を参照。PDF・画像・実データ・DB・秘密はコミットしません。
