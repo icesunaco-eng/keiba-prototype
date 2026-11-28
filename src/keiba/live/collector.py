@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -274,6 +275,8 @@ class Collector:
                "source": jra.BASE + path, "cname": cname}
         if incomplete:
             rec["incomplete"] = incomplete   # 途中のページ：原本は残すが、正式の材料には数えない（official.capture_records）
+        if getattr(self, "_round", None):
+            rec["capture_round"] = self._round   # 同じ取得の回の出馬表・オッズ・未発売の印をひと組にする（official.material_time）
         self._append_index(rec)
         if race_key:
             self._live_needed()   # 予想・精算がまだ（成功するまでやり直す）
@@ -387,6 +390,15 @@ class Collector:
         return sorted(out, key=lambda x: (self.state["races"][x[0]]["post_time"], x[0]))
 
     def capture(self, rk: str, tp: str) -> list[dict]:
+        # 取得の回の印：この回に保存する出馬表・オッズ・未発売の印に同じ値を付ける。材料がそろったかは、いちばん新しい回の
+        # ひと組だけで見る（前の回の完全な組と、この回の途中の出馬表を混ぜない。予想・まむの入力も同じ組を使う）
+        self._round = uuid.uuid4().hex[:12]
+        try:
+            return self._capture(rk, tp)
+        finally:
+            self._round = None
+
+    def _capture(self, rk: str, tp: str) -> list[dict]:
         r = self.state["races"][rk]
         saved = []
         # 一覧を取り直す（オッズや結果のリンクは発売・確定後に出てくる）
@@ -415,34 +427,37 @@ class Collector:
         else:
             active = None   # この回の出馬表で取消でない馬番（三連複のページに全組が載っているかを見る）
             roster = None   # この回の出馬表の名簿が信用できない理由（予想・まむの発行と同じ wallet.roster_issue）
-            numbered = False   # 馬番が1つでも読めたか（全部空なら枠順の確定前。予想の側もこの時点の入力を作らない）
+            state = None    # この回の出馬表の状態（wallet.card_state：ok／undrawn＝枠順の確定前／bad）
             if r.get("card_cname"):  # 出馬表は毎時点取る（取消を、その時点の締切までの情報で反映するため）
-                from .wallet import roster_issue
+                from .wallet import card_state
                 card_page = self.client.get("/JRADB/accessD.html", r["card_cname"])
                 saved.append(self._save(rk, "card", tp, "/JRADB/accessD.html", r["card_cname"], card_page))
                 try:
                     card_all = jra.parse_card(card_page)
-                    # 一覧の頭数と合わない・馬番の欠け・重複・読めない行（取消の馬も名簿に残るので、取消込みの全行で見る）
-                    roster = roster_issue(card_all, r.get("field_size"))
-                    numbered = any(c.get("horse_number") is not None for c in card_all)
+                    # 一覧の頭数と合わない・馬番の欠け・重複・読めない行・表の数や入れ子の問題（取消込みの全行で見る）
+                    state, roster = card_state(card_all, r.get("field_size"))
+                    if state == "undrawn":
+                        roster = "出馬表の馬番がまだ無い（枠順の確定前）"   # 三連複の組は照らせない（未発売の印とは組める）
                     active = [c["horse_number"] for c in card_all
                               if not c.get("scratch") and c.get("horse_number") is not None] or None
                 except Exception as exc:   # 出馬表が読めない回：名簿を照らせないので、この回の材料を途中にする
-                    roster, active = f"出馬表を読めない（{type(exc).__name__}）", None
+                    state, roster, active = "bad", f"出馬表を読めない（{type(exc).__name__}）", None
             odds_links = r.get("odds_links") or []
             if not odds_links:
                 status = fresh.get("odds_status") if fresh else None   # 今回の一覧のこのレースの行の欄だけ（行が無ければ確かめていない）
                 saved.append({"race_key": rk, "kind": "odds_unavailable", "time_point": tp,
-                              "fetched_at": self.now().isoformat(timespec="seconds"), "odds_status": status})
+                              "fetched_at": self.now().isoformat(timespec="seconds"), "odds_status": status,
+                              "capture_round": self._round})
                 if status != "未発表":
                     # 一覧のオッズの欄が無い・「未発表」と出ていない：未発売とは言えないので材料に数えず、時間帯の間は取り直す
                     saved[-1]["incomplete"] = (f"オッズの欄が「{status or '無い'}」（未発表と出ていない）" if fresh else
                                                "今回の一覧にこのレースの行が無い（未発表か確かめていない）")
-                elif roster and (numbered or roster.startswith("出馬表を読めない")):
-                    # 未発売でも、同じ回の出馬表の名簿が途中まで（馬番の欠け・重複・頭数が一覧と合わない）なら、この回の
-                    # 材料はそろっていない（時間帯の間は取り直す）。馬番が全部空の出馬表は枠順の確定前（前日の朝の1R など。
-                    # 本番の原本で9時点）：予想の側もこの時点の入力を作らないので、今までどおり未発売の印で数える
-                    saved[-1]["incomplete"] = f"同じ回の出馬表の名簿が信用できない：{roster}"
+                elif state == "bad":
+                    # 未発売でも、同じ回の出馬表が読めない・途中まで（表が無い・入れ子・馬番の欠け・重複・頭数が一覧と
+                    # 合わない、全部空でも行の数が一覧と合わない）なら、この回の材料はそろっていない（時間帯の間は取り直す）。
+                    # 枠順の確定前（形に問題が無く、行の数が一覧の頭数と同じで馬番が全部空。前日の朝の1R など。本番の原本で
+                    # 9時点）は、予想の側もこの時点の入力を作らないので、今までどおり未発売の印で数える
+                    saved[-1]["incomplete"] = f"同じ回の出馬表が信用できない：{roster}"
                 self._append_index(saved[-1])
             else:
                 path, cname = odds_links[0]

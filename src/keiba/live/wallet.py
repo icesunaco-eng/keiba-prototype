@@ -116,6 +116,21 @@ def roster_issue(card_all, field_size) -> str | None:
         card_problem([c.get("horse_number") for c in card_all], field_size)
 
 
+def card_state(card_all, field_size) -> tuple[str, str | None]:
+    """出馬表の状態：("ok", None) 名簿が信用できる／("undrawn", None) 枠順の確定前（ページの形に問題が無く、取消でない行が
+    あり、その馬番が全部空で、レース一覧の頭数が全部の行の数か取消でない行の数と同じ。枠順の前に取消になった馬は馬番の無い
+    取消の行として残るので、どちらの数とも照らす）／("bad", 理由) 取得・読み取りの失敗や途中まで。
+    未発売の印と組めるのは ok と undrawn だけ（undrawn は予想の側もその時点の入力を作らない）。"""
+    issue = roster_issue(card_all, field_size)
+    if not issue:
+        return "ok", None
+    active = [c for c in card_all if not c.get("scratch")]
+    if not getattr(card_all, "problems", None) and active and field_size \
+            and int(field_size) in (len(card_all), len(active)) and all(c.get("horse_number") is None for c in active):
+        return "undrawn", None
+    return "bad", issue
+
+
 def complete_records(df: pd.DataFrame) -> pd.DataFrame:
     """目録の行のうち、途中（incomplete）の印の無いもの。0行のときも列はそのまま（空の絞り込みを列の選び方と取り違えない）。"""
     if "incomplete" not in df.columns or not len(df):
@@ -217,8 +232,14 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                 if not r.get("post_time"):
                     continue
                 dl = deadline(r["race_date"], r["post_time"], tp)
-                before = s["fetched_at"].map(lambda x: datetime.fromisoformat(x) <= dl) if len(s) else s
-                cards = s[(s["kind"] == "card") & before] if len(s) else s
+                # その時点の材料がそろったか（official.material。見回り・正式の判定と同じ）。そろった取得の回が分かれば、
+                # この時点の出馬表・オッズはその回のひと組だけを使う（判定に使った原本と、予想に使う原本を同じにする）
+                got_at, got_round = official.material(official.record_tuples(s[s["time_point"] == tp]), dl) if len(s) else (None, None)
+                captured = got_at is not None
+                use = s[(s["time_point"] != tp) | (s["capture_round"] == got_round)] \
+                    if got_round and len(s) and "capture_round" in s.columns else s
+                before = use["fetched_at"].map(lambda x: datetime.fromisoformat(x) <= dl) if len(use) else use
+                cards = use[(use["kind"] == "card") & before] if len(use) else use
                 if not len(cards):
                     continue
                 card_all = jra.parse_card(_read(root, cards.iloc[-1]))
@@ -237,8 +258,8 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                 if len(card) < 3:
                     held[f"{rk}|{tp}"] = f"出走馬（番号の読める・取消でない馬）が{len(card)}頭で、三連複を作れない"
                     continue
-                win = s[(s["kind"].isin(["odds_win", "odds_first"])) & (s["time_point"] == tp) & before]
-                trio = s[(s["kind"] == "odds_trio") & (s["time_point"] == tp)]  # 締切後のものも判定に出して不合格にする
+                win = use[(use["kind"].isin(["odds_win", "odds_first"])) & (use["time_point"] == tp) & before]
+                trio = use[(use["kind"] == "odds_trio") & (use["time_point"] == tp)]  # 締切後のものも判定に出して不合格にする
                 if tp == "15m" and not (len(win) or len(trio)):
                     continue  # 15分前は配分の見直しだけ。新しいオッズが無ければ作らない
                 active = [int(c["horse_number"]) for c in card]  # 出走馬（取消を除く）。オッズの組はこれとぴったり照らす
@@ -266,9 +287,6 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                     page = _read(root, trio_rec)
                     t = jra.parse_trio_odds(page, active)
                     t["odds_time"] = jra.parse_odds_time(page)
-                at_tp = s[s["time_point"] == tp]
-                at_tp = complete_records(at_tp)   # 途中のページは材料に数えない（official.capture_records と同じ）
-                captured = official.material_time(zip(at_tp["kind"], at_tp["fetched_at"]), dl) is not None   # その時点の材料がそろったか
                 inputs[(rk, tp)] = {"card": card, "scratched": scratched, "win": w, "trio": t, "captured": captured,
                                     "gate": _with_card_issue(odds_gate(t, trio_rec, r, tp) if tp != "24h" or trio_rec is not None else
                                                              {"pass": False, "reasons": ["前日はオッズを使わない（未発売のことが多い）"]},

@@ -110,19 +110,50 @@ def save_limit(rk: str, tp: str, post_time: str | None) -> datetime | None:
     return post - timedelta(minutes=DEADLINE_MIN[tp] - GRACE_MINUTES) if post else None
 
 
-def material_time(records, dl: datetime) -> datetime | None:
-    """その時点の材料がそろった時刻。records：その時点の（種類, 取得時刻）。取得の時間帯の中でそろわなければ None。
-    予想を作ってよいか（wallet.input_ready）と、正式に数えるかの両方がこの関数を使う。"""
+def material(records, dl: datetime) -> tuple[datetime | None, str | None]:
+    """その時点の材料がそろった（時刻, 取得の回）。そろわなければ (None, None)。
+    records：その時点の（種類, 取得時刻[, 取得の回, 途中か]）。取得の回の印がある記録は、時間帯の中のいちばん新しい回の
+    ひと組だけで見る（前の回の完全な組と、新しい回の途中の出馬表を混ぜない。新しい回が途中なら、そろうまで取り直す）。
+    印の無い前の版の記録は、今までどおり（時間帯の中の出馬表と、その後の三連複オッズ・未発売の印。途中の記録は除く）。"""
     from .live.collector import CAPTURE_LEAD_MIN
 
     # 取得の時間帯（締切の15分前〜締切）の材料だけ。時間帯より前に取ったもの（発走時刻が後で変わったときなど）は早めの参考
     opens = dl - timedelta(minutes=CAPTURE_LEAD_MIN)
-    got = [(k, t) for k, t in ((k, _moment(at)) for k, at in records) if t and opens <= t <= dl]
-    cards = [t for k, t in got if k == "card"]
+    got = []
+    for rec in records:
+        k, at = rec[0], rec[1]
+        rnd, bad = (rec[2], rec[3]) if len(rec) >= 4 else (None, False)
+        t = _moment(at)
+        if t and opens <= t <= dl:
+            got.append((k, t, rnd if isinstance(rnd, str) and rnd else None, bool(bad)))
+    rounds: dict[str, datetime] = {}
+    for k, t, rnd, _ in got:
+        if rnd:
+            rounds[rnd] = min(t, rounds.get(rnd, t))
+    if rounds:
+        last = max(rounds, key=lambda x: (rounds[x], x))
+        got = [x for x in got if x[2] == last]
+    got = [x for x in got if not x[3]]
+    cards = [t for k, t, _, _ in got if k == "card"]
     if not cards:
-        return None
+        return None, None
     start = min(cards)
-    return min((t for k, t in got if k in MATERIAL_ODDS and t >= start), default=None)
+    t = min((t for k, t, _, _ in got if k in MATERIAL_ODDS and t >= start), default=None)
+    return (t, (last if rounds else None)) if t else (None, None)
+
+
+def material_time(records, dl: datetime) -> datetime | None:
+    """その時点の材料がそろった時刻（material を見る）。取得の時間帯の中でそろわなければ None。
+    予想を作ってよいか（wallet.input_ready）と、正式に数えるかの両方がこの関数を使う。"""
+    return material(records, dl)[0]
+
+
+def record_tuples(df) -> list[tuple]:
+    """目録の行 →（種類, 取得時刻, 取得の回, 途中か）。material に渡す形（見回り・予想・正式の判定が同じ形を使う）。"""
+    rnd = df["capture_round"] if "capture_round" in df.columns else [None] * len(df)
+    bad = df["incomplete"] if "incomplete" in df.columns else [None] * len(df)
+    return [(k, at, r if isinstance(r, str) else None, isinstance(b, str) and bool(b))
+            for k, at, r, b in zip(df["kind"], df["fetched_at"], rnd, bad)]
 
 
 def card_observations(root: Path, keys) -> dict[str, list]:
@@ -206,18 +237,19 @@ def known_post(seen: list | None, at: datetime, final: str | None) -> str | None
 
 
 def capture_records(root: Path) -> dict[tuple, list]:
-    """(レース, 時点) → （種類, 取得時刻）の並び。目録が読めなければ空（＝材料は締切までそろわなかった扱い）。"""
+    """(レース, 時点) → （種類, 取得時刻, 取得の回, 途中か）の並び。目録が読めなければ空（＝材料は締切までそろわなかった扱い）。
+    途中のページ・未発表と出ていない未発売の印は material が材料に数えない（見回りも取り直す）。途中の記録も残すのは、
+    いちばん新しい取得の回が途中かどうかを見るため。"""
     from .live.wallet import _snapshots
 
     out: dict[tuple, list] = {}
     if not (root / "snapshots.jsonl").exists():
         return out
     try:
-        from .live.wallet import complete_records
-        snaps = complete_records(_snapshots(root))   # 途中のページ・未発表と出ていない未発売の印は材料に数えない（見回りも取り直す）
-        for rk, tp, kind, at in snaps[["race_key", "time_point", "kind", "fetched_at"]].itertuples(index=False):
+        snaps = _snapshots(root)
+        for (rk, tp), rec in zip(zip(snaps["race_key"], snaps["time_point"]), record_tuples(snaps)):
             if isinstance(rk, str) and isinstance(tp, str):
-                out.setdefault((rk, tp), []).append((kind, at))
+                out.setdefault((rk, tp), []).append(rec)
     except (OSError, KeyError):
         return {}
     return out

@@ -786,7 +786,8 @@ def _replay_trio_rows(directory, mode):
             return pages[name].replace("15時41分", "15時40分")
         if name == CARD and mode == "card_preparing" and clock["now"] < T("14:30"):
             return _re.sub(r'<td class="num">\d+</td>', '<td class="num"></td>', pages[name])   # 出馬表が準備中（馬番が空）
-        if name == CARD and (mode == "card_short_always" or (mode == "card_short" and clock["now"] < T("14:30"))):
+        if name == CARD and (mode == "card_short_always" or (mode == "card_short" and clock["now"] < T("14:30"))
+                             or (mode == "short_at_1430" and T("14:30") <= clock["now"] < T("14:35"))):
             rows = _re.findall(r"<tr>.*?</tr>", pages[name], flags=_re.S)
             assert len(rows) == 8
             return pages[name].replace(rows[-1], "")   # 出馬表が途中まで（8番の行が無い。一覧は8頭）
@@ -1029,11 +1030,15 @@ def test_short_card_through_the_deadline_is_missed_and_not_sent_to_mam(tmp_path)
                 assert not v.get("stakes"), (p["method"], a, v)
 
 
-@pytest.mark.parametrize("short", [False, True, "before_draw"])
+@pytest.mark.parametrize("short", [False, True, "before_draw", "table0", "nested", "blank7", "blank8_scratch",
+                                   "blank9_scratch"])
 def test_unreleased_odds_with_short_card_is_not_counted(tmp_path, short):
     """前日の時点で一覧に「未発表」と出ていても、同じ回の出馬表が途中まで（一覧8頭・出馬表7頭）なら材料に数えない。
     完全な出馬表なら今までどおり未発売として数える。馬番が全部空（枠順の確定前。本番の前日朝の1Rで実例）も
-    今までどおり数える（予想の側もこの時点の入力を作らない）。"""
+    今までどおり数える（予想の側もこの時点の入力を作らない）。
+    止める2（💚20261127-5）：出馬表の表が無い・入れ子・全部空でも7行（一覧8頭）は読めない出馬表なので数えない。
+    全部空の8行に取消の印がある（本番の原本にもある形）は枠順の確定前として数える。枠順の前の取消で馬番の無い取消の行が
+    残り、全部の行が9・取消でない行が8（一覧8頭）も枠順の確定前として数える（みにの台本の形）。"""
     import re as _re
     from tests.test_live_collector import race_list
     day_before = lambda hm: datetime.fromisoformat(f"2026-11-21T{hm}:00+09:00")
@@ -1046,8 +1051,21 @@ def test_unreleased_odds_with_short_card_is_not_counted(tmp_path, short):
         if name == LIST:
             return race_list(odds=False).replace("15時41分", "15時40分").replace("18頭", "8頭")
         html = _pages(clock)[name]
-        if name == CARD and short == "before_draw":
+        if name == CARD and short == "blank9_scratch":
+            from tests.test_capture_window_shift import ids as _ids
+            html = card_html([_ids(i) for i in range(9)]).replace(
+                '<td class="num">3</td>', '<td class="num"><span class="cap">取消</span></td>', 1)
             html = _re.sub(r'<td class="num">\d+</td>', '<td class="num"></td>', html)
+        elif name == CARD and short in ("before_draw", "blank7", "blank8_scratch"):
+            html = _re.sub(r'<td class="num">\d+</td>', '<td class="num"></td>', html)
+            if short == "blank7":
+                html = html.replace(_re.findall(r"<tr>.*?</tr>", html, flags=_re.S)[-1], "")
+            if short == "blank8_scratch":
+                html = html.replace('<td class="num"></td>', '<td class="num"><span class="cap">取消</span></td>', 1)
+        elif name == CARD and short == "table0":
+            html = "<html><body><p>出馬表を準備中</p></body></html>"
+        elif name == CARD and short == "nested":
+            html = f"<table><tr><td>{html}</td></tr></table>"
         elif name == CARD and short:
             html = html.replace(_re.findall(r"<tr>.*?</tr>", html, flags=_re.S)[-1], "")
         return html
@@ -1059,7 +1077,7 @@ def test_unreleased_odds_with_short_card_is_not_counted(tmp_path, short):
     col._write_state()
     clock["now"] = day_before("15:26")
     col.capture(RK, "24h")
-    counted = short is not True
+    counted = short in (False, "before_draw", "blank8_scratch", "blank9_scratch")
     assert (f"{RK}|24h" in col.state["taken"]) == counted
     dl = deadline(DAY, "15:40", "24h")
     assert (official.material_time(official.capture_records(root).get((RK, "24h"), []), dl) is not None) == counted
@@ -1122,12 +1140,128 @@ def test_tick_does_not_wait_for_manual_review_lock(env, monkeypatch):
 
 
 def test_ordinary_live_run_without_settlement_does_not_rewrite_reviews(env, monkeypatch):
-    """あとで（負荷）：精算の無いふつうの予想・精算の回（最後まで終わった回）は、月次を作り直さない。
-    始める印と一緒に残した月（live_months）は、最後まで終わったら外す。"""
+    """あとで（負荷）：月次が読むもの（予想・精算・目録・発走時刻の記録など）が何も変わらない予想・精算の回（最後まで
+    終わった回）は、月次を作り直さない。始める印と一緒に残した月（live_months）は、最後まで終わったら外す。"""
+    import keiba.review as review
     paths, col, rk = env
+    months = []
+
+    def tick(at):
+        class Cl:
+            count = 0
+            def get(self, path, cname): return "<html></html>"
+            def get_url(self, url): return "<html></html>"
+        real = collector_module.Collector
+        monkeypatch.setattr(collector_module, "Collector", lambda root: real(root, client=Cl(), now=lambda: at))
+        monkeypatch.setattr(real, "refresh", lambda self, force=False: None)
+        monkeypatch.setattr(real, "check_notices", lambda self, log=print: None)
+        monkeypatch.setattr(cli, "_notify", lambda *a, **k: None)
+        monkeypatch.setattr(mam, "export_packets", lambda p: [])
+        monkeypatch.setattr(wallet, "run_live", lambda p, **k: {"predicted": 1, "settled": 0, "months": []})
+        monkeypatch.setattr(review, "write_review", lambda p, month, *a, **k: (months.append(month), _REAL_WRITE_REVIEW(p, month, *a, **k)))
+        try:
+            with redirect_stdout(StringIO()):
+                cli.cmd_collect(paths, types.SimpleNamespace(action="tick"))
+        finally:
+            monkeypatch.setattr(collector_module, "Collector", real)
+
+    tick(datetime(2025, 8, 30, 14, 0, tzinfo=JST))                  # 最初の回（発走時刻の記録が初めて書かれるので月次も書く）
+    assert not review.stale_months(paths)
+    months.clear()
+    col = Collector(col.root)
     col.state["live_pending"] = True
     col._write_state()
-    months = []
-    _cli_tick(paths, monkeypatch, datetime(2025, 8, 30, 14, 0, tzinfo=JST), months=months)
+    tick(datetime(2025, 8, 30, 14, 5, tzinfo=JST))                  # 予想・精算は動くが、月次が読むものは変わらない回
     state = json.loads((col.root / "state.json").read_text())
     assert months == [] and not state.get("review_months") and "live_months" not in state
+
+
+def test_review_is_rewritten_when_only_predictions_and_captures_change(tmp_path):
+    """直してから（💚20261127-5）：月次を書いた後、精算0件で予想・原本だけ増えたふつうの見回り。月次が読む予想・取得の数が
+    変わったので、その回（収集の鍵を待たずに書ける回）に月次を書き直し、保存した月次が今の中身と同じになる。"""
+    from keiba import review
+    paths, root, client, tick, told = _replay_trio_rows(tmp_path / "rv", "display_row")
+    tick("14:00")
+    month = DAY[:7]
+    review.write_review(paths, month)                                # 予想の無い時点の月次（予想0R）
+    before = json.loads((paths.data_dir / "review" / f"{month}.json").read_text(encoding="utf-8"))
+    tick("14:25")                                                    # 原本4件・予想あり・精算0件
+    saved = json.loads((paths.data_dir / "review" / f"{month}.json").read_text(encoding="utf-8"))
+    now = json.loads(json.dumps(review.build_review(paths, month), ensure_ascii=False, default=str))
+    assert before["races_predicted"] == 0 and now["races_predicted"] == 1
+    assert saved["races_predicted"] == now["races_predicted"] and saved["comparison"] == now["comparison"]
+    assert month not in review.stale_months(paths)
+    text = (paths.data_dir / "review" / f"{month}.json").read_text(encoding="utf-8")
+    tick("14:30")                                                    # 何も変わらない回は書き直さない
+    assert (paths.data_dir / "review" / f"{month}.json").read_text(encoding="utf-8") == text
+
+
+def test_stop_after_complete_round_then_short_card_uses_one_round(tmp_path):
+    """止める1（💚20261127-5）：14:25の見回りが8頭の出馬表と三連複を保存した直後、取得済み・予想の前に止まった。14:30の
+    再開では出馬表が7頭（三連複は途中）。前の回の完全な組と今の回の途中の出馬表を混ぜず、取得済み・正式の予想を作らない。
+    14:35に完全な組を取り直し、その回の出馬表で正式の予想とまむの入力を作る。"""
+    paths, root, client, tick, told = _replay_trio_rows(tmp_path / "stop", "short_at_1430")
+    tick("14:00")
+    with patch.object(official, "material_time", side_effect=KeyboardInterrupt), pytest.raises(KeyboardInterrupt):
+        tick("14:25")                                                # 原本は保存した直後に止まった
+    recs = [json.loads(x) for x in (root / "snapshots.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert {x["kind"] for x in recs if x["time_point"] == "1h"} >= {"card", "odds_trio"}
+    assert f"{RK}|1h" not in Collector(root, client=client).state["taken"]
+    tick("14:30")                                                    # 出馬表7頭の回
+    assert f"{RK}|1h" not in Collector(root, client=client).state["taken"]
+    assert official.material_time(official.capture_records(root)[(RK, "1h")], T("14:40")) is None
+    led = Ledger(paths.ledger_path, read_only=True)
+    assert not [p for p in led.predictions() if p["race_key"] == RK and p["time_point"] == "1h"]
+    led.close()
+    assert _mam_1h(paths) is None
+    tick("14:35")                                                    # 完全な組
+    assert f"{RK}|1h" in Collector(root, client=client).state["taken"]
+    assert official.material_time(official.capture_records(root)[(RK, "1h")], T("14:40")) == T("14:35")
+    packet = _mam_1h(paths)
+    assert packet["scratched_known"] == [3] and [h["horse_number"] for h in packet["horses"]] == [1, 2, 4, 5, 6, 7, 8]
+    p = Source(paths, "live").preds[RK][("ml_lgbm", "1h")]
+    assert p["odds_gate"]["pass"] and not p["odds_gate"].get("card_issue")
+    assert tick("14:41")["missed"] == 0
+
+
+def test_rejected_short_card_then_round_without_card_is_not_counted(tmp_path):
+    """止める1の別の形（💚20261127-5）：前日、先の回の7頭の出馬表は弾いた（未発売の印は途中）。次の回は出馬表のリンクが無く
+    「未発表」の印だけ。前の回の7頭の出馬表と次の回の印を組み合わせず、取得済みにしない。出馬表が戻った回に取得済みにする。"""
+    import re as _re
+    from tests.test_live_collector import race_list
+    day_before = lambda hm: datetime.fromisoformat(f"2026-11-21T{hm}:00+09:00")
+    root = tmp_path / "live"
+    clock = {"now": day_before("15:00")}
+
+    def page(name):
+        if name.startswith("pw01dli"):
+            return INDEX
+        if name == LIST:
+            listing = race_list(odds=False).replace("15時41分", "15時40分").replace("18頭", "8頭")
+            if day_before("15:30") <= clock["now"] < day_before("15:35"):
+                listing = listing.replace(f"?CNAME={CARD}", "")      # 一覧の出馬表リンクが一時的に無い回
+            return listing
+        html = _pages(clock)[name]
+        if name == CARD and clock["now"] < day_before("15:30"):
+            html = html.replace(_re.findall(r"<tr>.*?</tr>", html, flags=_re.S)[-1], "")
+        return html
+    col = Collector(root, client=FakeClient(page), now=lambda: clock["now"])
+    col.state["races"][RK] = {"race_date": DAY, "venue": "京都", "race_number": 11, "post_time": "15:40",
+                             "field_size": 8, "surface": "芝", "distance_m": 1600, "list_cname": LIST,
+                             "card_cname": CARD, "known_at": day_before("09:00").isoformat(), "odds_status": "未発表"}
+    col.state["refreshed_at"] = day_before("15:10").isoformat()
+    col._write_state()
+    dl = deadline(DAY, "15:40", "24h")
+    clock["now"] = day_before("15:26")
+    col.capture(RK, "24h")                                           # 7頭：弾く
+    assert f"{RK}|24h" not in col.state["taken"]
+    clock["now"] = day_before("15:31")
+    col.state["races"][RK].pop("card_cname")                         # 出馬表のリンクが無い回（印だけ）
+    col.capture(RK, "24h")
+    assert f"{RK}|24h" not in col.state["taken"]
+    assert official.material_time(official.capture_records(root).get((RK, "24h"), []), dl) is None
+    clock["now"] = day_before("15:36")
+    col.state["races"][RK]["card_cname"] = CARD                      # 出馬表が戻った（8頭）
+    col.capture(RK, "24h")
+    assert f"{RK}|24h" in col.state["taken"]
+    assert official.material_time(official.capture_records(root).get((RK, "24h"), []), dl) == day_before("15:36")

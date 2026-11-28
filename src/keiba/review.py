@@ -174,7 +174,7 @@ def build_review(paths, month: str | None, start: str | None = None, end: str | 
     return review
 
 
-MARKS_FILE = ".marks.json"   # data/review/ の中。月 → 月次を書いたときの、その月の精算の行数
+MARKS_FILE = ".marks.json"   # data/review/ の中。月 → 月次を書いたときの、その月の月次が読むものの数（month_marks）
 
 
 def settlement_counts(paths) -> dict[str, int]:
@@ -191,6 +191,56 @@ def settlement_counts(paths) -> dict[str, int]:
     return {m: n for m, n in rows if isinstance(m, str)}
 
 
+def month_marks(paths) -> dict[str, str]:
+    """月（レースの日付）→ その月の月次が読むものの目印。台帳の予想・精算の行数（追記だけ）、収集の目録・発走時刻の記録・
+    取りやめ・予定表から外したレースの記録の行数（追記だけ）、予定表の発走時刻・頭数。どれかが変われば月次が古い
+    （予想だけ・取得だけ増えた回も書き直す。何も変わらない回は書き直さない）。台帳を読めなければ例外（書き直しの判定をしない）。"""
+    import hashlib
+    import sqlite3
+    from .live.collector import ARCHIVE_FILE, CANCEL_FILE, POST_FILE
+
+    parts: dict[str, dict] = {}
+
+    def add(month, key, n=1):
+        if isinstance(month, str) and len(month) == 7:
+            d = parts.setdefault(month, {})
+            d[key] = d.get(key, 0) + n
+
+    if paths.ledger_path.exists():
+        conn = sqlite3.connect(f"file:{paths.ledger_path}?mode=ro", uri=True)
+        try:
+            for table, key, where in (("settlements", "s", "version LIKE 'live-%' OR method='text_ai'"),
+                                      ("predictions", "p", "version LIKE 'live-%'")):
+                for m, n in conn.execute(f"SELECT substr(race_key, 1, 7), COUNT(*) FROM {table} WHERE {where} GROUP BY 1"):
+                    add(m, key, n)
+        finally:
+            conn.close()
+    root = paths.data_dir / "live"
+    for name, key in (("snapshots.jsonl", "c"), (POST_FILE, "h"), (CANCEL_FILE, "x"), (ARCHIVE_FILE, "a")):
+        try:
+            with open(root / name, encoding="utf-8", errors="replace") as f:
+                for line in f:   # 月はレースの鍵（取りやめの記録はレースの日付）の先頭7文字
+                    i = line.find('"race_key": "')
+                    j = line.find('"race_date": "') if i < 0 else -1
+                    add(line[i + 13:i + 20] if i >= 0 else (line[j + 14:j + 21] if j >= 0 else None), key)
+        except OSError:
+            pass
+    try:
+        races = json.loads((root / "state.json").read_text(encoding="utf-8")).get("races", {})
+    except (OSError, ValueError):
+        races = {}
+    seen: dict[str, list] = {}
+    for rk, r in sorted(races.items()):
+        if isinstance(rk, str) and isinstance(r, dict):
+            seen.setdefault(rk[:7], []).append((rk, r.get("post_time"), r.get("field_size")))
+    out = {}
+    for m in sorted(set(parts) | set(seen)):
+        d = parts.get(m, {})
+        races_hash = hashlib.sha256(json.dumps(seen.get(m, []), default=str).encode()).hexdigest()[:12]
+        out[m] = ";".join(f"{k}={d.get(k, 0)}" for k in "spchxa") + f";r={races_hash}"
+    return out
+
+
 def _marks(paths) -> dict:
     try:
         x = json.loads((paths.data_dir / "review" / MARKS_FILE).read_text(encoding="utf-8"))
@@ -200,10 +250,11 @@ def _marks(paths) -> dict:
 
 
 def stale_months(paths) -> list[str]:
-    """精算が増えたのに月次がまだ書き直されていない月（精算の直後に止まった・月次の書き込みに失敗した等）。
+    """月次が読むもの（予想・精算・収集の目録・発走時刻・取りやめ・予定表）が変わったのに、月次がまだ書き直されていない月
+    （精算・予想の直後に止まった・月次の書き込みに失敗した・手で動かす月次が書いていて待たなかった等）。
     月次は書き終えてから目印を書くので、どこで止まっても、次の見回りでこの関数が見つけて書き直せる。"""
     marks = _marks(paths)
-    return sorted(m for m, n in settlement_counts(paths).items() if marks.get(m) != n)
+    return sorted(m for m, n in month_marks(paths).items() if marks.get(m) != n)
 
 
 def _replace_text(path: Path, text: str):
@@ -228,7 +279,7 @@ def write_review(paths, month: str | None, start: str | None = None, end: str | 
             fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except BlockingIOError as exc:
             raise ReviewBusy(*exc.args) from exc
-        count = settlement_counts(paths).get(month, 0) if month else None   # 先に数える（作る途中に増えた分は、次の回に書き直す）
+        count = month_marks(paths).get(month) if month else None   # 先に数える（作る途中に増えた分は、次の回に書き直す）
         r = build_review(paths, month, start, end)
         path = _write_review_files(out, month or f"{start}_{end}", r)
         if month:
