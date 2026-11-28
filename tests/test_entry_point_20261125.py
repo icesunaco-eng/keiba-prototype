@@ -770,7 +770,8 @@ def test_mam_packet_on_storage_without_hard_links(env, monkeypatch):
 def _replay_trio_rows(directory, mode):
     """mode：row_missing（14:25は1-2-3の行が丸ごと欠け、14:30から完全）、display_row（馬番の無い表示だけの空の行が1行ある）。
     card_short：14:30より前は出馬表が途中まで（8番の行が無い・一覧は8頭）。card_short_always：締切まで途中のまま。
-    trio_tab_gone_from_1430：14:30からオッズの一覧に三連複のタブが無い。trio_tab_gone_at_1430：14:30の回だけ無い。"""
+    trio_tab_gone_from_1430：14:30からオッズの一覧に三連複のタブが無い。trio_tab_gone_at_1430：14:30の回だけ無い。
+    card_link_gone_from_1430：14:30から一覧の出馬表リンクが無い。"""
     import re as _re
     paths = _paths(directory)
     root = paths.data_dir / "live"
@@ -782,7 +783,10 @@ def _replay_trio_rows(directory, mode):
             return INDEX
         pages = _pages(clock)
         if name == LIST:
-            return pages[name].replace("15時41分", "15時40分")
+            listing = pages[name].replace("15時41分", "15時40分")
+            if mode == "card_link_gone_from_1430" and clock["now"] >= T("14:30"):
+                listing = listing.replace(f"?CNAME={CARD}", "")   # 14:30から一覧の出馬表リンクだけ無い（オッズは取れる）
+            return listing
         if name == "pw15orl10/AA" and ((mode == "trio_tab_gone_from_1430" and clock["now"] >= T("14:30"))
                                        or (mode == "trio_tab_gone_at_1430" and T("14:30") <= clock["now"] < T("14:35"))):
             return pages[name].splitlines()[0]   # 14:30から三連複のタブだけ無い（出馬表・単勝は取れる）

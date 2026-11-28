@@ -246,6 +246,12 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                     if got_round and len(s) and "capture_round" in s.columns else s
                 before = use["fetched_at"].map(lambda x: datetime.fromisoformat(x) <= dl) if len(use) else use
                 cards = use[(use["kind"] == "card") & before] if len(use) else use
+                other_round = False
+                if not len(cards) and got_round and len(s):
+                    # いちばん新しい回に出馬表が無い（一覧の出馬表リンクが欠けた等）：前の回の出馬表で締切の代わりの予想は
+                    # 作るが、回の違う原本の組なので、お金は配分せず、まむへの入力も出さない（下の card_issue・roster）
+                    cards = s[(s["kind"] == "card") & s["fetched_at"].map(lambda x: datetime.fromisoformat(x) <= dl)]
+                    other_round = bool(len(cards))
                 if not len(cards):
                     continue
                 card_all = jra.parse_card(_read(root, cards.iloc[-1]))
@@ -277,6 +283,9 @@ def live_tables(root: Path, state: dict, snaps: pd.DataFrame, held: dict | None 
                     # 見落としているかもしれないので、オッズが時間帯の中でもお金に使わない（オッズの時刻の検査と同じ扱い）
                     card_issue = (f"出馬表が取得の時間帯より前の取得（時間帯 {opens.astimezone(dl.tzinfo):%H:%M}〜"
                                   f"{dl:%H:%M}・取得 {card_at.astimezone(dl.tzinfo):%H:%M}）")
+                if other_round:
+                    roster = roster or "この時点のいちばん新しい取得の回に出馬表が無い（前の回の出馬表は参考だけ）"
+                    card_issue = card_issue or roster
                 w = {"ok": False, "odds": {}}
                 if len(win):
                     win_page = _read(root, win.iloc[-1])

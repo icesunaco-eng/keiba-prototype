@@ -78,6 +78,35 @@ def test_trio_back_in_the_last_round_is_taken_normally(tmp_path):
     assert tick("14:41")["missed"] == 0
 
 
+def test_odds_only_round_after_stop_does_not_pair_with_the_earlier_card(tmp_path):
+    """止める1の別の形：14:25の完全な組の直後に止まり、14:30からは一覧の出馬表リンクが無く、オッズだけ取れる回が続く。
+    締切の代わりの予想は前の回（14:25、時間帯の中）の出馬表で作るが、回の違う原本の組なので、お金は配分せず、
+    まむへの入力も出さない。"""
+    paths, root, client, tick, told = _replay_trio_rows(tmp_path / "oo", "card_link_gone_from_1430")
+    tick("14:00")
+    with patch.object(official, "material_time", side_effect=KeyboardInterrupt), pytest.raises(KeyboardInterrupt):
+        tick("14:25")
+    for hm in ("14:30", "14:35"):
+        tick(hm)
+    assert f"{RK}|1h" not in Collector(root, client=client).state["taken"]
+    tick("14:41")
+    later = [x for x in _recs(root) if x["time_point"] == "1h" and x["fetched_at"] >= f"{DAY}T14:30"]
+    assert later and "card" not in {x["kind"] for x in later}
+    state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    _, _, inputs = wallet.live_tables(root, state, wallet._snapshots(root))
+    inp = inputs[(RK, "1h")]
+    assert inp["roster_issue"] and not inp["gate"]["pass"] and not inp["win"]["ok"]
+    led = Ledger(paths.ledger_path, read_only=True)
+    preds = [p for p in led.predictions() if p["race_key"] == RK and p["time_point"] == "1h"]
+    led.close()
+    assert preds
+    for p in preds:
+        for a, v in (p.get("allocation") or {}).items():
+            if isinstance(v, dict):
+                assert not v.get("stakes") and not v.get("total"), (p["method"], a, v)
+    assert _mam_1h(paths) is None
+
+
 # ---- 止める2：保存した後の取り直しで、保存ずみの正式な予想が外れる ------------------------------------------
 
 def _utc(hm):
