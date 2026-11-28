@@ -118,6 +118,8 @@ def build_review(paths, month: str | None, start: str | None = None, end: str | 
         res = results.get(p["race_key"])
         if not res or not res["actual"]:
             continue
+        if p.get("formal_probability") is False:
+            continue  # 正式な確率にならなかった統合（票数なし・入力の欠け）は参考表示。成績に数えない
         ranked = [t["combo"] for t in p["trios"]]
         rank = ranked.index(res["actual"]) + 1 if res["actual"] in ranked else None
         cov = [h.get("coverage") for h in p["horses"] if h.get("coverage") is not None]
@@ -176,7 +178,9 @@ def write_review(paths, month: str | None, start: str | None = None, end: str | 
              "市場推定確率＝発走前の三連複オッズの逆数を合計1に直したもの（比較の基準。的中確率としての正確さは未確認。補正なし）</p>",
              "<h2>仮想の財布</h2>", table(r["wallets"], ["method", "wallet", "races", "bet_races", "stake", "returned", "roi", "hit_races"],
                                       ["方式", "配分", "レース", "賭けたレース", "賭け金", "払戻", "回収率", "的中レース"]),
-             "<h2>予想の当たり具合</h2>", table(r["accuracy"], ["method", "time_point", "races", "上位5", "上位10", "上位20"],
+             "<h2>予想の当たり具合</h2>",
+             "<p class='muted'>統合は正式な確率になった予想だけ（参考表示の予想は数えない）</p>",
+             table(r["accuracy"], ["method", "time_point", "races", "上位5", "上位10", "上位20"],
                                           ["方式", "時点", "レース", "上位5組", "上位10組", "上位20組"]),
              "<h2>食い違いの印ごとの学習モデル（配分には使わない）</h2>",
              table(r["role_a"], ["mark", "races", "上位5", "上位10", "上位20"], ["印", "レース", "上位5組", "上位10組", "上位20組"]),
