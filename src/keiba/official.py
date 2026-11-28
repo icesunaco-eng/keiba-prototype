@@ -111,7 +111,7 @@ def save_limit(rk: str, tp: str, post_time: str | None) -> datetime | None:
 
 
 def material(records, dl: datetime) -> tuple[datetime | None, str | None]:
-    """その時点の材料がそろった（時刻, 取得の回）。そろわなければ (None, None)。
+    """その時点の材料がそろった（時刻, 取得の回）。そろわなければ時刻は None（取得の回はいちばん新しい回。印が無ければ None）。
     records：その時点の（種類, 取得時刻[, 取得の回, 途中か]）。取得の回の印がある記録は、時間帯の中のいちばん新しい回の
     ひと組だけで見る（前の回の完全な組と、新しい回の途中の出馬表を混ぜない。新しい回が途中なら、そろうまで取り直す）。
     印の無い前の版の記録は、今までどおり（時間帯の中の出馬表と、その後の三連複オッズ・未発売の印。途中の記録は除く）。"""
@@ -126,20 +126,19 @@ def material(records, dl: datetime) -> tuple[datetime | None, str | None]:
         t = _moment(at)
         if t and opens <= t <= dl:
             got.append((k, t, rnd if isinstance(rnd, str) and rnd else None, bool(bad)))
-    rounds: dict[str, datetime] = {}
-    for k, t, rnd, _ in got:
+    # 回の新しさ：その回の最初の取得時刻、同じ秒なら目録に先に書いた回が古い（取得の回の印の文字の順では決めない）
+    rounds: dict[str, tuple] = {}
+    for i, (k, t, rnd, _) in enumerate(got):
         if rnd:
-            rounds[rnd] = min(t, rounds.get(rnd, t))
-    if rounds:
-        last = max(rounds, key=lambda x: (rounds[x], x))
+            rounds[rnd] = min((t, i), rounds.get(rnd, (t, i)))
+    last = max(rounds, key=rounds.get) if rounds else None
+    if last:
         got = [x for x in got if x[2] == last]
     got = [x for x in got if not x[3]]
     cards = [t for k, t, _, _ in got if k == "card"]
-    if not cards:
-        return None, None
-    start = min(cards)
-    t = min((t for k, t, _, _ in got if k in MATERIAL_ODDS and t >= start), default=None)
-    return (t, (last if rounds else None)) if t else (None, None)
+    t = min((t for k, t, _, _ in got if k in MATERIAL_ODDS and t >= min(cards)), default=None) if cards else None
+    # そろわなくても、いちばん新しい回は返す（締切からの代わりの予想も、その回の資料だけで作る。前の回のオッズと混ぜない）
+    return t, last
 
 
 def material_time(records, dl: datetime) -> datetime | None:
@@ -269,20 +268,24 @@ def select(rows: list[tuple], posts: dict[str, str], records: dict[tuple, list],
         if not limit or not at or not ended:
             sel.unknown.add((rk, tp, m, v))
             continue
-        if (rk, tp, known) not in start:
+        # 材料の判定は、その予想を保存した時点までに取った記録だけで見る（保存した後の取り直しで、保存ずみの正式な予想を
+        # 外さない。予想を作った見回りが見たのと同じ記録）。台帳の時刻は秒まで。取得時刻も秒にそろえて比べる
+        recs = records.get((rk, tp), [])
+        seen = [x for x in recs if (t := _moment(x[1])) and t.replace(microsecond=0) <= at]
+        key = (rk, tp, known, len(seen))   # 保存した時点で見えていた記録が違えば、判定を使い回さない
+        if key not in start:
             dl = limit - timedelta(minutes=GRACE_MINUTES)
-            # 台帳の時刻は秒まで。材料の時刻も秒にそろえる
-            got = material_time(records.get((rk, tp), []), dl)
+            got = material_time(seen, dl)
             if got is None:
-                missing.add((rk, tp, known))   # 材料がそろわなかった：締切からの代わりの予想
-            start[(rk, tp, known)] = (got or dl).replace(microsecond=0)
+                missing.add(key)   # 材料がそろわなかった：締切からの代わりの予想
+            start[key] = (got or dl).replace(microsecond=0)
         if at > limit or at >= ended:
             sel.late.add((rk, tp, m, v))
-        elif at < start[(rk, tp, known)]:
+        elif at < start[key]:
             sel.early.add((rk, tp, m, v))
         else:
             sel.valid.add((rk, tp, m, v))
-            if (rk, tp, known) in missing:
+            if key in missing:
                 sel.fallback.add((rk, tp, m, v))
             if (rk, m, tp) not in first or (at, i) < first[(rk, m, tp)][0]:   # 同じ秒なら、先に書いた行
                 first[(rk, m, tp)] = ((at, i), v)

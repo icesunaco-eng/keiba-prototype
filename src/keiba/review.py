@@ -25,14 +25,17 @@ from . import official
 from .ledger import Ledger
 from .settle import winning_combos
 from .live.collector import ARCHIVE_FILE, read_jsonl
-from .live.wallet import _snapshots, live_tables, odds_check, result_ready
+from .live import wallet
+from .live.wallet import _snapshots, live_tables, odds_rows, result_ready
 from .report.html import _page
 
 HIT_K = (5, 10, 20)
 MARKS = ("食い違い", "食い違いなし", "判定できず")
 
 
-def _results(paths) -> dict:
+def _results(paths) -> tuple:
+    """（レース → 実際の結果, 予定表, 入力, レースの表）。レースの表は予定表と予定表から外したレース（races_archive）を重ねた
+    読むだけの表（同じレースは予定表を優先）。月次のオッズの判定も、この同じ入力から作る（予定表から外れても過去の判定を消さない）。"""
     root = paths.data_dir / "live"
     state = json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {"races": {}}
     races = {}
@@ -50,7 +53,7 @@ def _results(paths) -> dict:
         finished = [(r["horse_number"], r["finish_position"]) for r in res["rows"] if r["status"] == "finished"]
         wins = sorted(winning_combos(finished))   # 3着同着なら的中の組は複数（仮想財布の精算と同じ決め方）
         out[rk] = {"actual": wins[0] if wins else None, "actuals": wins, "payouts": res["trio_payouts"]}
-    return out, state
+    return out, state, inputs, races
 
 
 CMP_METHODS = ["int_market", "ml_lgbm", "int_market_ml", "int_market_ml_mam"]
@@ -110,7 +113,7 @@ def build_review(paths, month: str | None, start: str | None = None, end: str | 
         preds = [p for p in preds if sel.is_shown(*key(p))]
         setts = [s for s in setts if sel.is_counted(*key(s))]
         led.close()
-    results, state = _results(paths)
+    results, state, inputs, races = _results(paths)
     review = {"month": month or f"{start}〜{end}", "races_predicted": len({p["race_key"] for p in preds}),
               "races_with_result": len({p["race_key"] for p in preds if p["race_key"] in results}),
               "versions": sorted({p["version"] for p in preds}),
@@ -162,7 +165,7 @@ def build_review(paths, month: str | None, start: str | None = None, end: str | 
                                for m, d in rv.groupby("method")] if len(rv) else []
 
     # 5. オッズの合格判定
-    oc = odds_check(paths)
+    oc = odds_rows(inputs, races, wallet.prediction_clock())   # 予定表から外したレースも（odds_check は今の予定表だけ）
     oc = oc[oc["race_key"].map(lambda k: _in_range(k[:10], month, start, end))] if len(oc) else oc
     review["odds_gate"] = [{"time_point": tp, "checked": len(d), "passed": int(d["pass"].sum()),
                             "reasons": dict(Counter(r for x in d["reasons"] if x for r in x.split(" / ")).most_common(5))}
@@ -174,6 +177,9 @@ def build_review(paths, month: str | None, start: str | None = None, end: str | 
     return review
 
 
+# 月次の作り方の版。作り方を変えたら上げる（目印が変わるので、前の作り方で書いた月次は次の見回りで書き直す）
+# 2：オッズの判定に、予定表から外したレースも入れる（前の作り方は、外れたレースの判定を月次から落としていた）
+REVIEW_FORMAT = 2
 MARKS_FILE = ".marks.json"   # data/review/ の中。月 → 月次を書いたときの、その月の月次が読むものの数（month_marks）
 
 
@@ -237,7 +243,7 @@ def month_marks(paths) -> dict[str, str]:
     for m in sorted(set(parts) | set(seen)):
         d = parts.get(m, {})
         races_hash = hashlib.sha256(json.dumps(seen.get(m, []), default=str).encode()).hexdigest()[:12]
-        out[m] = ";".join(f"{k}={d.get(k, 0)}" for k in "spchxa") + f";r={races_hash}"
+        out[m] = f"v={REVIEW_FORMAT};" + ";".join(f"{k}={d.get(k, 0)}" for k in "spchxa") + f";r={races_hash}"
     return out
 
 

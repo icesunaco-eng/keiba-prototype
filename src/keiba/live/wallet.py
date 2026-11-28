@@ -768,10 +768,14 @@ def odds_check(paths) -> pd.DataFrame:
     root = paths.data_dir / "live"
     state = json.loads((root / "state.json").read_text()) if (root / "state.json").exists() else {"races": {}}
     _, _, inputs = live_tables(root, state, _snapshots(root))
+    return odds_rows(inputs, state["races"], prediction_clock())
+
+
+def odds_rows(inputs: dict, races: dict, now: datetime) -> pd.DataFrame:
+    """live_tables の入力から、時点ごとの三連複オッズの判定の行を作る（odds_check と、予定表から外したレースも読む月次が使う）。"""
     rows = []
-    now = prediction_clock()
     for (rk, tp), inp in sorted(inputs.items()):
-        if tp == "result" or not input_ready(rk, tp, inp, state["races"][rk], now):
+        if tp == "result" or not input_ready(rk, tp, inp, races[rk], now):
             continue
         g = inp["gate"]
         rows.append({"race_key": rk, "time_point": tp, "deadline": g.get("deadline"), "pass": g["pass"], "reasons": " / ".join(g["reasons"]),

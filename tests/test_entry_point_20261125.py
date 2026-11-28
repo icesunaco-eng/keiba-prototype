@@ -769,7 +769,8 @@ def test_mam_packet_on_storage_without_hard_links(env, monkeypatch):
 
 def _replay_trio_rows(directory, mode):
     """mode：row_missing（14:25は1-2-3の行が丸ごと欠け、14:30から完全）、display_row（馬番の無い表示だけの空の行が1行ある）。
-    card_short：14:30より前は出馬表が途中まで（8番の行が無い・一覧は8頭）。card_short_always：締切まで途中のまま。"""
+    card_short：14:30より前は出馬表が途中まで（8番の行が無い・一覧は8頭）。card_short_always：締切まで途中のまま。
+    trio_tab_gone_from_1430：14:30からオッズの一覧に三連複のタブが無い。trio_tab_gone_at_1430：14:30の回だけ無い。"""
     import re as _re
     paths = _paths(directory)
     root = paths.data_dir / "live"
@@ -782,6 +783,9 @@ def _replay_trio_rows(directory, mode):
         pages = _pages(clock)
         if name == LIST:
             return pages[name].replace("15時41分", "15時40分")
+        if name == "pw15orl10/AA" and ((mode == "trio_tab_gone_from_1430" and clock["now"] >= T("14:30"))
+                                       or (mode == "trio_tab_gone_at_1430" and T("14:30") <= clock["now"] < T("14:35"))):
+            return pages[name].splitlines()[0]   # 14:30から三連複のタブだけ無い（出馬表・単勝は取れる）
         if name == CARD and mode == "card_preparing" and clock["now"] < T("14:30"):
             return _re.sub(r'<td class="num">\d+</td>', '<td class="num"></td>', pages[name])   # 出馬表が準備中（馬番が空）
         if name == CARD and (mode == "card_short_always" or (mode == "card_short" and clock["now"] < T("14:30"))

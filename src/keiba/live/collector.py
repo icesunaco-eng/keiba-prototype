@@ -268,15 +268,17 @@ class Collector:
         d = self.root / "snapshots" / sub
         d.mkdir(parents=True, exist_ok=True)
         body = page.encode("utf-8")
-        name = f"{ts.astimezone(timezone.utc):%Y%m%dT%H%M%SZ}-{tp or 'x'}-{kind}.html"
+        rnd = getattr(self, "_round", None)
+        # 取得の回の印も名前に入れる（同じ秒に2回取っても、前の回の原本を上書きしない）
+        name = f"{ts.astimezone(timezone.utc):%Y%m%dT%H%M%SZ}-{tp or 'x'}-{kind}{'-' + rnd if rnd else ''}.html"
         (d / name).write_bytes(body)
         rec = {"race_key": race_key, "kind": kind, "time_point": tp, "fetched_at": ts.isoformat(timespec="seconds"),
                "path": str((d / name).relative_to(self.root)), "sha256": hashlib.sha256(body).hexdigest(),
                "source": jra.BASE + path, "cname": cname}
         if incomplete:
             rec["incomplete"] = incomplete   # 途中のページ：原本は残すが、正式の材料には数えない（official.capture_records）
-        if getattr(self, "_round", None):
-            rec["capture_round"] = self._round   # 同じ取得の回の出馬表・オッズ・未発売の印をひと組にする（official.material_time）
+        if rnd:
+            rec["capture_round"] = rnd   # 同じ取得の回の出馬表・オッズ・未発売の印をひと組にする（official.material_time）
         self._append_index(rec)
         if race_key:
             self._live_needed()   # 予想・精算がまだ（成功するまでやり直す）
